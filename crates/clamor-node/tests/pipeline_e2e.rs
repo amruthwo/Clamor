@@ -127,10 +127,10 @@ fn coordinator_and_two_members_generate_through_the_api() {
     let (ctrl, portal, data) = (free_port(), free_port(), free_port_run(3));
     let (ctrl_s, portal_s, data_s) = (format!("127.0.0.1:{ctrl}"), format!("127.0.0.1:{portal}"), data.to_string());
 
-    let coord = spawn(&dir, "coordinator", &["coordinator", "--swarm", "t", "--token", "T", "--id", "coord", "--bind", &ctrl_s, "--portal", &portal_s, "--models", &models, "--data-port", &data_s, "--quick-bench", "--no-update-check", "--config-dir", &cfg_dir(&dir, "coordinator"), "--participation", "full", "--allow-battery", "--priority", "normal"]);
+    let coord = spawn(&dir, "coordinator", &["coordinator", "--swarm", "t", "--passphrase", "tiny-test-words", "--id", "coord", "--bind", &ctrl_s, "--portal", &portal_s, "--models", &models, "--data-port", &data_s, "--quick-bench", "--no-update-check", "--config-dir", &cfg_dir(&dir, "coordinator"), "--participation", "full", "--allow-battery", "--priority", "normal"]);
     wait_for("the portal", Duration::from_secs(30), &[&coord], || TcpStream::connect(("127.0.0.1", portal)).is_ok());
-    let a = spawn(&dir, "member-a", &["join", &ctrl_s, "--token", "T", "--id", "a", "--models", &models, "--no-update-check", "--config-dir", &cfg_dir(&dir, "member-a"), "--participation", "full", "--allow-battery", "--priority", "normal"]);
-    let b = spawn(&dir, "member-b", &["join", &ctrl_s, "--token", "T", "--id", "b", "--models", &models, "--no-update-check", "--config-dir", &cfg_dir(&dir, "member-b"), "--participation", "full", "--allow-battery", "--priority", "normal"]);
+    let a = spawn(&dir, "member-a", &["join", &ctrl_s, "--passphrase", "tiny-test-words", "--id", "a", "--models", &models, "--no-update-check", "--config-dir", &cfg_dir(&dir, "member-a"), "--participation", "full", "--allow-battery", "--priority", "normal"]);
+    let b = spawn(&dir, "member-b", &["join", &ctrl_s, "--passphrase", "tiny-test-words", "--id", "b", "--models", &models, "--no-update-check", "--config-dir", &cfg_dir(&dir, "member-b"), "--participation", "full", "--allow-battery", "--priority", "normal"]);
     let all = [&coord, &a, &b];
     wait_for("members to finish the muster", Duration::from_secs(120), &all, || {
         let (_, r) = http(portal, "GET", "/api/roster", None);
@@ -279,10 +279,10 @@ fn a_model_on_one_device_is_shared_with_the_others() {
 
     let (ctrl, portal, data) = (free_port(), free_port(), free_port_run(3));
     let (ctrl_s, portal_s, data_s) = (format!("127.0.0.1:{ctrl}"), format!("127.0.0.1:{portal}"), data.to_string());
-    let coord = spawn(&dir, "coordinator", &["coordinator", "--token", "T", "--id", "coord", "--bind", &ctrl_s, "--portal", &portal_s, "--models", &coord_models, "--cache-dir", &coord_cache, "--data-port", &data_s, "--quick-bench", "--no-update-check", "--config-dir", &cfg_dir(&dir, "coordinator"), "--participation", "full", "--allow-battery", "--priority", "normal"]);
+    let coord = spawn(&dir, "coordinator", &["coordinator", "--passphrase", "tiny-test-words", "--id", "coord", "--bind", &ctrl_s, "--portal", &portal_s, "--models", &coord_models, "--cache-dir", &coord_cache, "--data-port", &data_s, "--quick-bench", "--no-update-check", "--config-dir", &cfg_dir(&dir, "coordinator"), "--participation", "full", "--allow-battery", "--priority", "normal"]);
     wait_for("the portal", Duration::from_secs(30), &[&coord], || TcpStream::connect(("127.0.0.1", portal)).is_ok());
-    let a = spawn(&dir, "member-a", &["join", &ctrl_s, "--token", "T", "--id", "a", "--models", &a_models, "--cache-dir", &a_cache, "--no-update-check", "--config-dir", &cfg_dir(&dir, "member-a"), "--participation", "full", "--allow-battery", "--priority", "normal"]);
-    let b = spawn(&dir, "member-b", &["join", &ctrl_s, "--token", "T", "--id", "b", "--models", &b_models, "--cache-dir", &b_cache, "--no-update-check", "--config-dir", &cfg_dir(&dir, "member-b"), "--participation", "full", "--allow-battery", "--priority", "normal"]);
+    let a = spawn(&dir, "member-a", &["join", &ctrl_s, "--passphrase", "tiny-test-words", "--id", "a", "--models", &a_models, "--cache-dir", &a_cache, "--no-update-check", "--config-dir", &cfg_dir(&dir, "member-a"), "--participation", "full", "--allow-battery", "--priority", "normal"]);
+    let b = spawn(&dir, "member-b", &["join", &ctrl_s, "--passphrase", "tiny-test-words", "--id", "b", "--models", &b_models, "--cache-dir", &b_cache, "--no-update-check", "--config-dir", &cfg_dir(&dir, "member-b"), "--participation", "full", "--allow-battery", "--priority", "normal"]);
     let all = [&coord, &a, &b];
     let mut b_share = 0;
     wait_for("members to finish the muster", Duration::from_secs(120), &all, || {
@@ -297,9 +297,9 @@ fn a_model_on_one_device_is_shared_with_the_others() {
     let holds = |id: &str| r["nodes"].as_array().unwrap().iter().find(|n| n["id"] == id).unwrap()["models"].as_array().unwrap().len();
     assert_eq!((holds("coord"), holds("a"), holds("b")), (0, 0, 1), "only b has the model: {r}");
 
-    // b's model server wants the swarm token.
+    // b's model server answers only signed requests from the swarm's devices.
     let (st, _) = http(b_share, "GET", "/models", None);
-    assert_eq!(st, 401, "model sharing must require the token");
+    assert_eq!(st, 401, "model sharing must require a device of the swarm");
 
     // Nobody has this one.
     let (st, r) = http(portal, "POST", "/api/pipeline", Some(json!({ "model": "nope.gguf" })));
@@ -384,4 +384,101 @@ fn only_compute_threads_run_at_low_priority() {
     let runtime: Vec<i64> = threads.iter().filter(|(n, _)| n.starts_with("tokio")).map(|t| t.1).collect();
     assert!(!compute.is_empty() && compute.iter().all(|&n| n == 10), "compute threads at low priority: {threads:?}");
     assert!(!runtime.is_empty() && runtime.iter().all(|&n| n == 0), "heartbeats and networking at normal priority: {threads:?}");
+}
+
+/// Waits for a process to exit; returns whether it succeeded.
+fn exits(p: &mut Proc, timeout: Duration) -> bool {
+    let t0 = Instant::now();
+    while t0.elapsed() < timeout {
+        if let Some(st) = p.0.try_wait().unwrap() {
+            return st.success();
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    panic!("{} did not exit\n{}", p.1, p.log());
+}
+
+/// Joining by passphrase: a wrong one is refused, the right one approves the device, and from
+/// then on `clamor-node join` alone rejoins (the device is known by its key), also after the
+/// coordinator restarts. A different coordinator at the same address is not trusted without
+/// the passphrase.
+#[test]
+fn devices_join_by_passphrase_and_rejoin_by_key() {
+    let dir = std::env::temp_dir().join(format!("clamor-node-join-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("models")).unwrap();
+    let models = dir.join("models").display().to_string();
+    let (ctrl, portal, data) = (free_port(), free_port(), free_port_run(1));
+    let (ctrl_s, portal_s, data_s) = (format!("127.0.0.1:{ctrl}"), format!("127.0.0.1:{portal}"), data.to_string());
+    let (coord_cfg, member_cfg) = (cfg_dir(&dir, "coordinator"), cfg_dir(&dir, "member"));
+    let coordinator = |name: &'static str, cfg: &str| {
+        let c = spawn(&dir, name, &["coordinator", "--swarm", "home", "--id", "coord", "--bind", &ctrl_s, "--portal", &portal_s, "--models", &models, "--data-port", &data_s, "--quick-bench", "--no-update-check", "--config-dir", cfg, "--participation", "full", "--allow-battery"]);
+        wait_for("the portal", Duration::from_secs(30), &[&c], || TcpStream::connect(("127.0.0.1", portal)).is_ok());
+        c
+    };
+    let member = |name: &'static str, extra: &[&str]| {
+        let mut args = vec!["join"];
+        args.extend_from_slice(extra);
+        args.extend_from_slice(&["--id", "m", "--models", &models, "--no-update-check", "--config-dir", &member_cfg, "--participation", "full", "--allow-battery"]);
+        spawn(&dir, name, &args)
+    };
+    let joined = |procs: &[&Proc]| {
+        wait_for("the member to join", Duration::from_secs(60), procs, || {
+            let (_, r) = http(portal, "GET", "/api/roster", None);
+            r["nodes"].as_array().is_some_and(|ns| ns.iter().any(|n| n["id"] == "m" && n["state"] == "ready"))
+        })
+    };
+
+    // A new swarm gets five random words.
+    let coord = coordinator("coordinator", &coord_cfg);
+    wait_for("the passphrase", Duration::from_secs(10), &[&coord], || coord.log().contains("passphrase: "));
+    let log = coord.log();
+    let pass = log.split("passphrase: ").nth(1).unwrap().lines().next().unwrap().trim().to_string();
+    assert_eq!(pass.split('-').count(), 5, "{pass}");
+    assert!(!std::fs::read_dir(format!("{coord_cfg}/swarms")).unwrap().next().is_none());
+
+    // First join: no passphrase, or a wrong one, is refused.
+    let mut m = member("member-nopass", &[&ctrl_s]);
+    assert!(!exits(&mut m, Duration::from_secs(30)));
+    assert!(m.log().contains("passphrase"), "{}", m.log());
+    let mut m = member("member-wrong", &[&ctrl_s, "--passphrase", "not-the-right-words"]);
+    assert!(!exits(&mut m, Duration::from_secs(30)));
+    assert!(m.log().contains("wrong passphrase"), "{}", m.log());
+    assert!(coord.log().contains("wrong passphrase"));
+
+    // The right one (case and separators do not matter).
+    let spaced = pass.replace('-', " ").to_uppercase();
+    let m = member("member-first", &[&ctrl_s, "--passphrase", &spaced]);
+    joined(&[&coord, &m]);
+    assert!(coord.log().contains("approved"), "{}", coord.log());
+    drop(m);
+
+    // Rejoin with nothing but `join`: the address is remembered, the key is approved.
+    let m = member("member-rejoin", &[]);
+    joined(&[&coord, &m]);
+    assert!(m.log().contains("rejoining swarm 'home'"), "{}", m.log());
+    drop(m);
+
+    // The coordinator restarts: same swarm, same passphrase, same approvals.
+    drop(coord);
+    let coord = coordinator("coordinator-again", &coord_cfg);
+    assert!(coord.log().contains(&pass) && coord.log().contains("1 device(s) approved"), "{}", coord.log());
+    let m = member("member-after-restart", &[]);
+    joined(&[&coord, &m]);
+    drop(m);
+    drop(coord);
+
+    // Someone else's coordinator at the same address, even with the same swarm name: the device
+    // does not know it, so it will not join without that swarm's passphrase.
+    let other = coordinator("coordinator-other", &cfg_dir(&dir, "other"));
+    let mut m = member("member-other", &[]);
+    assert!(!exits(&mut m, Duration::from_secs(30)));
+    assert!(m.log().contains("passphrase"), "{}", m.log());
+    drop(other);
+
+    // `swarms` lists what the member remembers.
+    let out = Command::new(env!("CARGO_BIN_EXE_clamor-node")).args(["swarms", "--config-dir", &member_cfg]).output().unwrap();
+    let out = String::from_utf8_lossy(&out.stdout);
+    assert!(out.contains("joined 'home'") && out.contains(&ctrl_s), "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
 }

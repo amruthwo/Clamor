@@ -1,5 +1,6 @@
 //! `clamor-node`: run a coordinator (roster + web portal) or join one as a member.
 
+mod auth;
 mod build_info;
 mod coordinator;
 mod member;
@@ -67,9 +68,10 @@ enum Cmd {
         bind: String,
         #[arg(long, default_value_t = format!("0.0.0.0:{DEFAULT_PORTAL_PORT}"))]
         portal: String,
-        /// Shared secret nodes must present to join.
-        #[arg(long)]
-        token: Option<String>,
+        /// The swarm's passphrase. Default: the one this swarm already has, or five random
+        /// words for a new swarm (printed at start). Devices need it only for their first join.
+        #[arg(long, alias = "token", env = "CLAMOR_PASSPHRASE", hide_env_values = true)]
+        passphrase: Option<String>,
         #[arg(long)]
         id: Option<String>,
         #[command(flatten)]
@@ -85,12 +87,14 @@ enum Cmd {
         #[command(flatten)]
         policy: PolicyArgs,
     },
-    /// Join a swarm.
+    /// Join a swarm. Without an address, rejoin the swarm joined most recently.
     Join {
         /// Coordinator address, host:port (default port 7420).
-        addr: String,
-        #[arg(long)]
-        token: Option<String>,
+        addr: Option<String>,
+        /// The swarm's passphrase: needed for the first join only (afterwards this device is
+        /// recognised by its key).
+        #[arg(long, alias = "token", env = "CLAMOR_PASSPHRASE", hide_env_values = true)]
+        passphrase: Option<String>,
         #[arg(long)]
         id: Option<String>,
         #[command(flatten)]
@@ -100,6 +104,8 @@ enum Cmd {
         #[command(flatten)]
         policy: PolicyArgs,
     },
+    /// List the swarms this device coordinates or has joined.
+    Swarms,
 }
 
 /// How much of this device Clamor may use. Unset options keep the defaults for the kind of
@@ -196,10 +202,10 @@ struct EngineArgs {
 }
 
 impl EngineArgs {
-    /// `token`: the swarm's join token, also required to fetch model slices.
-    fn config(self, token: Option<String>) -> stage::EngineConfig {
+    /// `share_key`: signs this device's requests for model slices.
+    fn config(self, share_key: Option<ed25519_dalek::SigningKey>) -> stage::EngineConfig {
         let cache_dir = self.cache_dir.unwrap_or_else(|| dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("clamor").join("slices"));
-        stage::EngineConfig { models_dir: self.models, device: self.device, threads: self.threads, cache_dir, share_token: token }
+        stage::EngineConfig { models_dir: self.models, device: self.device, threads: self.threads, cache_dir, share_key }
     }
 }
 
@@ -263,13 +269,22 @@ async fn run(cmd: Cmd, priority: Option<Priority>) -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Coordinator { swarm, bind, portal, token, id, engine, data_port, quick_bench, updates, policy } => {
+        Cmd::Coordinator { swarm, bind, portal, passphrase, id, engine, data_port, quick_bench, updates, policy } => {
             let id = NodeId(id.unwrap_or_else(|| probe::default_node_id().0));
-            let engine = engine.config(token.clone());
+            let config_dir = neighbour::config_dir();
+            let profile = auth::CoordinatorProfile::load_or_create(&config_dir, &swarm, passphrase.as_deref())?;
+            let key = auth::Device::load_or_create(&config_dir)?.swarm_key(&profile.swarm_id);
+            let engine = engine.config(Some(key.clone()));
             engine.validate()?; // fail fast on a bad --device
-            // Share our models with members that lack them (layer slices), behind the join token.
-            let share_port = share::serve(DEFAULT_SHARE_PORT, engine.models_dir.clone(), token.clone()).await?;
-            let shared = Arc::new(Mutex::new(coordinator::Swarm::new(swarm, token, id.clone(), engine, data_port, quick_bench, Some(share_port))));
+            println!("swarm '{swarm}' passphrase: {}", profile.passphrase);
+            println!("add a device: clamor-node join {} --passphrase {}", join_hint(&bind), profile.passphrase);
+            if !profile.approved.is_empty() {
+                println!("{} device(s) approved; they rejoin without the passphrase", profile.approved.len());
+            }
+            let swarm_auth = coordinator::SwarmAuth::new(profile, key, config_dir);
+            // Share our models with the swarm's devices (layer slices).
+            let share_port = share::serve(DEFAULT_SHARE_PORT, engine.models_dir.clone(), swarm_auth.allowed.clone()).await?;
+            let shared = Arc::new(Mutex::new(coordinator::Swarm::new(swarm, swarm_auth, id.clone(), engine, data_port, quick_bench, Some(share_port))));
             coordinator::register_self(shared.clone(), id, policy.policy(priority)).await;
             tokio::spawn(coordinator::bench_self(shared.clone()));
             tokio::spawn(coordinator::reaper(shared.clone()));
@@ -283,11 +298,65 @@ async fn run(cmd: Cmd, priority: Option<Priority>) -> Result<()> {
             });
             coordinator::run_listener(&bind, shared).await
         }
-        Cmd::Join { addr, token, id, engine, updates, policy } => {
-            let addr = if addr.contains(':') { addr } else { format!("{addr}:{DEFAULT_PORT}") };
-            let engine = engine.config(token.clone());
+        Cmd::Join { addr, passphrase, id, engine, updates, policy } => {
+            let config_dir = neighbour::config_dir();
+            let addr = match addr {
+                Some(a) if a.contains(':') => a,
+                Some(a) => format!("{a}:{DEFAULT_PORT}"),
+                None => {
+                    let Some(p) = auth::MemberProfile::all(&config_dir).into_iter().find(|p| !p.addresses.is_empty()) else {
+                        anyhow::bail!("this device has not joined a swarm yet: clamor-node join <coordinator> --passphrase <words>");
+                    };
+                    println!("rejoining swarm '{}' at {}", p.name, p.addresses[0]);
+                    p.addresses[0].clone()
+                }
+            };
+            let engine = engine.config(None); // the key is per swarm: set once joined
             engine.validate()?;
-            member::join(addr, token, id, engine, updates.policy(), policy.policy(priority)).await
+            let creds = member::Credentials { device: auth::Device::load_or_create(&config_dir)?, passphrase, config_dir };
+            member::join(addr, creds, id, engine, updates.policy(), policy.policy(priority)).await
         }
+        Cmd::Swarms => {
+            let config_dir = neighbour::config_dir();
+            let coordinated = auth::CoordinatorProfile::all(&config_dir);
+            let joined = auth::MemberProfile::all(&config_dir);
+            if coordinated.is_empty() && joined.is_empty() {
+                println!("no swarms yet. Start one with `clamor-node coordinator`, or join one with `clamor-node join <coordinator> --passphrase <words>`.");
+            }
+            for p in coordinated {
+                println!("coordinating '{}': passphrase {}, {} device(s) approved", p.name, p.passphrase, p.approved.len());
+                for d in &p.approved {
+                    println!("    {} (key {}…)", d.name, &d.key[..16]);
+                }
+            }
+            for p in joined {
+                println!("joined '{}' at {} (last joined {})", p.name, p.addresses.first().map(String::as_str).unwrap_or("?"), ago(p.last_joined_unix));
+            }
+            Ok(())
+        }
+    }
+}
+
+/// How devices reach this coordinator, for the printed join command.
+fn join_hint(bind: &str) -> String {
+    let port = bind.rsplit(':').next().unwrap_or("7420");
+    let host = if bind.starts_with("0.0.0.0") || bind.starts_with("[::]") { local_ip().unwrap_or_else(|| "<this-computer>".into()) } else { bind.rsplit_once(':').map(|(h, _)| h.to_string()).unwrap_or_default() };
+    if port == DEFAULT_PORT.to_string() { host } else { format!("{host}:{port}") }
+}
+
+/// This machine's LAN address (the one used to reach the internet; no packet is sent).
+fn local_ip() -> Option<String> {
+    let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    s.connect("192.0.2.1:9").ok()?;
+    Some(s.local_addr().ok()?.ip().to_string())
+}
+
+fn ago(unix: u64) -> String {
+    let s = unix_now().saturating_sub(unix);
+    match s {
+        0..=119 => "just now".into(),
+        120..=7199 => format!("{} minutes ago", s / 60),
+        7200..=172_799 => format!("{} hours ago", s / 3600),
+        _ => format!("{} days ago", s / 86400),
     }
 }

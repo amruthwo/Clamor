@@ -45,9 +45,47 @@ pub struct NodeEntry {
     pub settings_note: Option<String>,
 }
 
+/// Who may join: the swarm's profile (id, passphrase, approved device keys) and the
+/// coordinator's own key in this swarm.
+pub struct SwarmAuth {
+    pub profile: crate::auth::CoordinatorProfile,
+    pub key: ed25519_dalek::SigningKey,
+    pub config_dir: std::path::PathBuf,
+    /// Keys the share servers accept (approved devices and the coordinator).
+    pub allowed: crate::share::AllowedKeys,
+}
+
+impl SwarmAuth {
+    pub fn new(profile: crate::auth::CoordinatorProfile, key: ed25519_dalek::SigningKey, config_dir: std::path::PathBuf) -> Self {
+        let allowed: crate::share::AllowedKeys = Default::default();
+        let me = SwarmAuth { profile, key, config_dir, allowed };
+        me.refresh_allowed();
+        me
+    }
+    pub fn approved_keys(&self) -> Vec<String> {
+        self.profile.approved.iter().map(|d| d.key.clone()).collect()
+    }
+    fn refresh_allowed(&self) {
+        let mut a = self.allowed.write().unwrap();
+        a.clear();
+        a.extend(self.approved_keys());
+        a.insert(crate::auth::key_hex(&self.key.verifying_key()));
+    }
+    /// Approve a device that proved it knows the passphrase.
+    fn approve(&mut self, key: &str, name: &str) {
+        if !self.profile.approved.iter().any(|d| d.key == key) {
+            self.profile.approved.push(crate::auth::ApprovedDevice { key: key.into(), name: name.into(), approved_unix: unix_now() });
+            if let Err(e) = self.profile.save(&self.config_dir) {
+                eprintln!("could not save the swarm profile: {e:#}");
+            }
+            self.refresh_allowed();
+        }
+    }
+}
+
 pub struct Swarm {
     pub name: String,
-    pub token: Option<String>,
+    pub auth: SwarmAuth,
     pub coordinator: NodeId,
     pub nodes: BTreeMap<NodeId, NodeEntry>,
     next_generation: u64,
@@ -63,8 +101,8 @@ pub struct Swarm {
 }
 
 impl Swarm {
-    pub fn new(name: String, token: Option<String>, coordinator: NodeId, engine: EngineConfig, data_port: u16, quick_bench: bool, share_port: Option<u16>) -> Self {
-        Swarm { name, token, coordinator, nodes: BTreeMap::new(), next_generation: 1, engine, data_port, quick_bench, pipeline: None, next_epoch: 1, share_port }
+    pub fn new(name: String, auth: SwarmAuth, coordinator: NodeId, engine: EngineConfig, data_port: u16, quick_bench: bool, share_port: Option<u16>) -> Self {
+        Swarm { name, auth, coordinator, nodes: BTreeMap::new(), next_generation: 1, engine, data_port, quick_bench, pipeline: None, next_epoch: 1, share_port }
     }
 
     /// A node that held a pipeline stage is gone: that pipeline cannot run any more.
@@ -190,7 +228,7 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
     let (mut rd, mut wr) = stream.into_split();
 
     let hello = timeout(Duration::from_secs(10), read_msg(&mut rd)).await??;
-    let Message::Hello { proto, info, bench_port, join_token, build, models, share_port, policy: owner_policy } = hello else {
+    let Message::Hello { proto, info, bench_port, build, models, share_port, policy: owner_policy, auth_nonce } = hello else {
         write_msg(&mut wr, &Message::Reject { reason: "expected hello".into() }).await?;
         return Ok(());
     };
@@ -199,13 +237,57 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
         return Ok(());
     }
 
+    let Some(nonce_m) = auth_nonce else {
+        write_msg(&mut wr, &Message::Reject { reason: "this device's clamor is too old to join by passphrase: update it".into() }).await?;
+        return Ok(());
+    };
+
+    // Authenticate: the device proves it is approved (its key) or knows the passphrase (SPAKE2).
+    let (hs, ch) = {
+        let sw = shared.lock().unwrap();
+        crate::auth::CoordinatorHandshake::start(&sw.auth.profile.swarm_id, &sw.name, &sw.auth.key, &sw.auth.profile.passphrase)
+    };
+    write_msg(&mut wr, &Message::AuthChallenge { swarm_id: ch.swarm_id, swarm_name: ch.swarm_name, coordinator_key: ch.coordinator_key, nonce: ch.nonce, spake: ch.spake }).await?;
+    let proof = match timeout(Duration::from_secs(30), read_msg(&mut rd)).await?? {
+        Message::AuthProve { device_key, signature, spake, confirm } => crate::auth::Proof { device_key, signature, spake, confirm },
+        Message::Leave => return Ok(()), // the device declined (e.g. the coordinator's key changed)
+        _ => {
+            write_msg(&mut wr, &Message::Reject { reason: "expected auth_prove".into() }).await?;
+            return Ok(());
+        }
+    };
+    let verified = {
+        let mut sw = shared.lock().unwrap();
+        let key = sw.auth.key.clone();
+        let r = hs.verify(&key, &nonce_m, &proof, |k| sw.auth.profile.approved.iter().any(|d| d.key == k));
+        if let Ok((crate::auth::Verdict::Approve, _)) = &r {
+            sw.auth.approve(&proof.device_key, &info.id.0);
+            println!("{} approved: it knows the passphrase (key {}…)", info.id, &proof.device_key[..16]);
+            // Everyone's share servers must now accept the new device.
+            let keys = sw.auth.approved_keys();
+            for e in sw.nodes.values() {
+                if let Some(t) = &e.tx {
+                    let _ = t.send(Message::Approved { keys: keys.clone() });
+                }
+            }
+        }
+        r.map(|(_, cp)| (cp, sw.auth.approved_keys()))
+    };
+    let (cproof, approved_keys) = match verified {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{} from {addr} refused: {e:#}", info.id);
+            write_msg(&mut wr, &Message::Reject { reason: format!("{e:#}") }).await?;
+            return Ok(());
+        }
+    };
+    let welcome_auth = WelcomeAuth { signature: cproof.signature, confirm: cproof.confirm, approved_keys };
+
     let (tx, mut rx) = unbounded_channel::<Message>();
     let id = info.id.clone();
     let admission = {
         let mut sw = shared.lock().unwrap();
-        if sw.token.is_some() && sw.token != join_token {
-            Admission::Rejected("bad join token".into())
-        } else if id == sw.coordinator {
+        if id == sw.coordinator {
             Admission::Rejected("that id belongs to the coordinator".into())
         } else if sw.nodes.get(&id).map(|e| e.tx.is_some()).unwrap_or(false) {
             Admission::Rejected(format!("{id} is already connected"))
@@ -254,7 +336,7 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
     };
     println!("{id} joined from {addr}{}", if cached_bench { " (cached benchmark)" } else { "" });
 
-    let _ = tx.send(Message::Welcome { swarm, coordinator, heartbeat_secs: HEARTBEAT_SECS });
+    let _ = tx.send(Message::Welcome { swarm, coordinator, heartbeat_secs: HEARTBEAT_SECS, auth: Some(welcome_auth) });
     // The node starts from its class defaults; send the policy we hold for it (it may have been
     // changed in the dashboard, and survives the node reconnecting).
     if let Some(policy) = shared.lock().unwrap().nodes.get(&id).map(|e| e.report.policy) {

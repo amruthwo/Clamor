@@ -1,57 +1,142 @@
-# Clamor
+<p align="center">
+  <img src="assets/clamor-icon.svg" width="128" height="128" alt="Clamor icon: six crabs holding claws in a ring">
+</p>
 
-Pool the idle computers on your network to run local AI no single machine could.
-Design spec: see the Clamor design spec doc (sections 1-14).
+<h1 align="center">Clamor</h1>
 
-## Try it (two terminals, or two machines)
+<p align="center">
+  <strong>Pool the idle computers on your network to run AI none of them could run alone.</strong>
+</p>
 
-    cargo build --release
+<p align="center">
+  <a href="https://github.com/amruthwo/Clamor/actions/workflows/ci.yml"><img src="https://github.com/amruthwo/Clamor/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
+</p>
 
-    # machine A: start the swarm (control :7420, web portal :7421)
-    ./target/release/clamor-node coordinator --swarm home --token SECRET
+> [!NOTE]
+> Clamor is early and experimental. Devices can already join a swarm, measure themselves, and plan how to share a
+> model. Running a real model across machines is being built right now (see [What works today](#what-works-today)).
 
-    # machine B: join (benchmarks itself, link is measured by the coordinator)
-    ./target/release/clamor-node join <machine-A-ip> --token SECRET
+## What is Clamor?
 
-    # open http://<machine-A-ip>:7421/
+Most homes and offices have computers sitting idle: an old gaming PC, a laptop on the shelf, a mini PC, a phone on
+its charger. On its own, none of them has enough memory to run a capable AI model. Together, they might.
 
-## Muster by hand (no swarm needed)
+Clamor lets those machines team up. Start it on one computer, join the others with one command, and they work like
+one bigger machine. Everything stays on your own network: no cloud, no accounts, and your data never leaves the room.
 
-    ./target/release/clamor-muster probe --out a.json                 # on each machine
-    ./target/release/clamor-muster serve                              # on the coordinator
-    ./target/release/clamor-muster probe --coordinator <ip>:7422 --out b.json
-    ./target/release/clamor-muster plan a.json b.json --quant q4 --ctx 8192
+The icon is the idea in a picture: each crab is a computer, and they hold claws in a ring because that is how Clamor
+passes work between them.
 
-Always use --release: debug builds benchmark far too slow to plan with.
+## How it works
 
-## Transport (data plane)
+### One big model, split across machines
 
-`clamor-transport` moves activations between pipeline stages over a ring, with its own binary
-framing, credit flow control, epoch fencing and cancel. It is engine-agnostic (`StageExecutor`).
+An AI language model is a stack of layers. Clamor cuts that stack into pieces sized to each machine's memory, so
+every computer holds only its share. To produce each word, the work travels once around the ring: each machine runs
+its layers and hands the result to the next, and the last one sends the new word back to the start.
 
-    cargo test --release -p clamor-transport
-    cargo run --release -p clamor-transport --bin transport-bench -- --stages 3 --concurrency 1,2,4,8
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/diagram-split-dark.svg">
+  <img src="assets/diagram-split-light.svg" width="100%" alt="A 40 GB model with 80 layers is split three ways: a gaming PC runs layers 1 to 40, a laptop 41 to 68, and a mini PC 69 to 80. Each passes its result to the next, and the next word goes back to the first.">
+</picture>
 
-## Status
-v0.1: protocol, muster, coordinator, portal, ring transport (mock engine only).
-Not yet: a real inference engine behind `StageExecutor`, task execution, TLS, Android.
+An honest caveat: pooling makes a big model **fit**; it doesn't make it **fast**. Every word has to visit every
+machine, so a model split across a home network runs at a few words per second, limited by the slowest computer and
+the network between them. That's the price of running something no single machine you own could run at all.
 
-## ggml engine (v0.3 scaffold)
+### Lots of small jobs, spread out
 
-`crates/clamor-engine-ggml` vendors ggml and exposes device enumeration, a matmul check/benchmark and GGUF metadata.
+The other half of Clamor is breadth. AI assistants and agents create streams of small, separate jobs: summarize
+this, transcribe that, read the text in this image. Those don't need one big model; they need many hands. Clamor
+hands each job to a device that suits it, and here every device helps, even a phone.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/diagram-lanes-dark.svg">
+  <img src="assets/diagram-lanes-light.svg" width="100%" alt="Left: one big model passed around a ring of four computers. Right: small jobs such as summarize, embed, transcribe, OCR and tool calls are sent out to a PC, laptop, mini PC and phone.">
+</picture>
+
+### It measures before it plans
+
+Before you pick a model, Clamor runs a quick **muster**: it measures each device's processing speed, memory and
+memory bandwidth, and the speed of the network between them. From that it tells you which models will fit, how fast
+each should run, and what is holding things back: a slow machine, or the network.
+
+Devices can leave whenever their owner needs them: one click in the dashboard drains a device, and a device that
+drops off can rejoin later without benchmarking again.
+
+## What works today
+
+| | |
+|---|---|
+| **Works** | Starting a swarm, joining with a token, automatic benchmarks, a web dashboard showing devices and which models fit |
+| **Works** | The ring connection that carries work between machines (tested with a stand-in engine) |
+| **Works** | Running a slice of a real Llama-style model's layers, checked against a reference implementation |
+| **In progress** | Connecting the model engine to the ring, a tokenizer, compressed (quantized) models, a real model on two machines |
+| **Planned** | Chat in the dashboard, an OpenAI-compatible API for agent tools, a phone app, automatic discovery, encryption between devices |
+
+CI runs the tests on Linux (x86_64 and arm64), Windows and macOS. The Vulkan, CUDA and Android builds are
+compile-checked only. GPU inference has been tested by hand with Vulkan on an Apple M1 running Asahi Linux.
+
+## Try it
+
+You need [Rust](https://rustup.rs), CMake and a C++ compiler. Then:
 
 ```bash
-cargo run -p clamor-engine-ggml --release --example devices                  # CPU
-cargo run -p clamor-engine-ggml --release --features vulkan --example devices
+git clone https://github.com/amruthwo/Clamor.git && cd Clamor
+cargo build --release
 ```
 
-`LlamaStage` runs a layer range of an f32 Llama GGUF (embedding on the head stage, lm_head on the tail) with a KV
-cache per request, checked against a numpy reference (`tools/ref_forward.py`):
+On the first computer, start a swarm (pick your own secret):
 
 ```bash
-pip install numpy gguf
-cargo test -p clamor-engine-ggml --release --test llama_ref
+./target/release/clamor-node coordinator --swarm home --token SECRET
 ```
 
-Not yet implemented: the `StageExecutor` that puts `LlamaStage` on the ring, tokenizer, quantized weights (see `CLAUDE.md`).
-Building on an Asahi laptop and pushing to GitHub: see `ASAHI_SETUP.md`.
+On each other computer, join it:
+
+```bash
+./target/release/clamor-node join <first-computer-ip> --token SECRET
+```
+
+Then open `http://<first-computer-ip>:7421/` in any browser on your network, phone included, to see the swarm
+measure itself and suggest models.
+
+> [!WARNING]
+> For now, devices join with a shared token over unencrypted connections. Only run Clamor on a network you trust.
+
+## For developers
+
+Clamor is a Rust workspace:
+
+| Crate | What it does |
+|---|---|
+| `clamor-proto` | Control messages between the coordinator and devices (JSON over TCP, port 7420) |
+| `clamor-muster` | Device probes, benchmarks, network tests, and the planner that splits models; also a CLI |
+| `clamor-node` | The coordinator, the member that joins, and the web portal (port 7421) |
+| `clamor-transport` | The binary ring transport between pipeline stages: flow control, plan epochs, cancel |
+| `clamor-engine-ggml` | Inference on [ggml](https://github.com/ggml-org/ggml) (vendored): devices, GGUF loading, layer-range Llama stages |
+
+Useful commands:
+
+```bash
+cargo test --workspace --release                      # everything (engine tests need: pip install numpy gguf)
+cargo run -p clamor-engine-ggml --release --example devices                     # list compute devices
+cargo run -p clamor-engine-ggml --release --features vulkan --example devices   # GPU backends are cargo features
+cargo run --release -p clamor-transport --bin transport-bench -- --stages 3 --concurrency 1,2,4,8
+
+# Run the muster by hand, no swarm needed
+./target/release/clamor-muster probe --out a.json                         # on each machine
+./target/release/clamor-muster serve                                      # on the coordinator
+./target/release/clamor-muster probe --coordinator <ip>:7422 --out b.json # measures the link too
+./target/release/clamor-muster plan a.json b.json --quant q4 --ctx 8192
+```
+
+Always benchmark with `--release`: debug builds are far too slow to plan with.
+
+- [`CLAUDE.md`](CLAUDE.md): architecture notes, current state, and the roadmap in order
+- [`ASAHI_SETUP.md`](ASAHI_SETUP.md): building on Asahi Linux (Apple silicon) and the CI workflow
+- [`assets/`](assets): icon, diagrams and social preview; diagrams are generated by `assets/src/make_graphics.py`
+
+## License
+
+Dual-licensed under MIT or Apache-2.0, at your option.

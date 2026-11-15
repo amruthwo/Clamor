@@ -1,7 +1,10 @@
 name: ci
 on:
-  push: { branches: [main] }
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "assets/**"]
   pull_request:
+    paths-ignore: ["**.md", "assets/**"]
   workflow_dispatch:
 
 # A new push to the same PR/branch cancels the run it supersedes.

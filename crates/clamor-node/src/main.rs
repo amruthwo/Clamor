@@ -65,11 +65,15 @@ struct EngineArgs {
     /// Compute device for pipeline stages: cpu, a device name such as Vulkan0, or an index.
     #[arg(long, default_value = "cpu")]
     device: String,
+    /// CPU threads per stage. Default: the performance cores (efficiency cores and
+    /// hyperthreads slow inference down).
+    #[arg(long, default_value_t = 0)]
+    threads: usize,
 }
 
 impl EngineArgs {
     fn config(self) -> stage::EngineConfig {
-        stage::EngineConfig { models_dir: self.models, device: self.device }
+        stage::EngineConfig { models_dir: self.models, device: self.device, threads: self.threads }
     }
 }
 

@@ -5,7 +5,8 @@
 use crate::coordinator::Shared;
 use crate::stage::{self, Assignment};
 use anyhow::{anyhow, bail, Result};
-use clamor_engine_ggml::{GgufFile, LlamaHparams};
+use clamor_engine_ggml::{GgufFile, LlamaHparams, Tokenizer};
+use std::sync::Arc;
 use clamor_muster::plan;
 use clamor_proto::*;
 use clamor_transport::stage::HeadHandle;
@@ -45,6 +46,12 @@ pub struct Pipeline {
     pub first_failure: Option<String>,
     #[serde(skip)]
     pub failure_is_cause: bool,
+    /// Text in and out (`/api/chat`). `None` if the model's tokenizer is not supported yet;
+    /// token ids still work through `/api/generate`.
+    #[serde(skip)]
+    pub tokenizer: Option<Arc<Tokenizer>>,
+    /// Why there is no tokenizer, if there isn't one.
+    pub tokenizer_note: Option<String>,
     #[serde(skip)]
     pub head: Option<HeadHandle>,
     #[serde(skip)]
@@ -163,6 +170,10 @@ pub async fn start(shared: &Shared, req: PipelineRequest) -> Result<()> {
     let g = GgufFile::open(&path.display().to_string()).map_err(|e| anyhow!("{e}"))?;
     let hp = LlamaHparams::from_gguf(&g).map_err(|e| anyhow!("{e}"))?;
     let n_ctx = req.ctx.unwrap_or(2048).clamp(16, hp.n_ctx_train.max(16));
+    let (tokenizer, tokenizer_note) = match Tokenizer::from_gguf(&g) {
+        Ok(t) => (Some(Arc::new(t)), None),
+        Err(e) => (None, Some(e.to_string())),
+    };
 
     let layout: Vec<(NodeId, u32, u32)> = match &req.stages {
         Some(specs) => specs.iter().map(|s| (NodeId(s.node.clone()), s.layers[0], s.layers[1])).collect(),
@@ -248,6 +259,8 @@ pub async fn start(shared: &Shared, req: PipelineRequest) -> Result<()> {
             act_dtype,
             first_failure: None,
             failure_is_cause: false,
+            tokenizer,
+            tokenizer_note,
             stages: layout.iter().enumerate().map(|(i, (node, a, b))| PipeStage { node: node.clone(), layer_start: *a, layer_end: *b, addr: addr(i), status: StageStatus::Loading }).collect(),
             head: None,
             local: None,
@@ -350,7 +363,7 @@ mod tests {
     #[test]
     fn failure_blames_the_cause_not_the_knock_on_effects() {
         let st = |n: &str| PipeStage { node: id(n), layer_start: 0, layer_end: 0, addr: String::new(), status: StageStatus::Loading };
-        let mut p = Pipeline { model: "m".into(), epoch: 2, n_ctx: 8, n_layer: 4, act_dtype: ActDType::F16, stages: vec![st("c"), st("a"), st("b")], first_failure: None, failure_is_cause: false, head: None, local: None };
+        let mut p = Pipeline { model: "m".into(), epoch: 2, n_ctx: 8, n_layer: 4, act_dtype: ActDType::F16, stages: vec![st("c"), st("a"), st("b")], first_failure: None, failure_is_cause: false, tokenizer: None, tokenizer_note: None, head: None, local: None };
         p.mark_failed(2, 0, None, "ring broken: tail link closed".into(), false);
         p.mark_failed(2, 1, Some(&id("a")), "upstream link closed".into(), false);
         assert_eq!(p.failure().as_deref(), Some("stage 0 (c): ring broken: tail link closed"), "only knock-on effects so far: the first");

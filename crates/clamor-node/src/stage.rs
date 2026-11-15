@@ -17,6 +17,8 @@ pub struct EngineConfig {
     pub models_dir: PathBuf,
     /// `cpu`, a ggml device name such as `Vulkan0`, or a device index.
     pub device: String,
+    /// CPU threads per stage; 0 picks the performance cores.
+    pub threads: usize,
 }
 
 impl EngineConfig {
@@ -97,7 +99,7 @@ pub struct Started {
 pub async fn start(cfg: &EngineConfig, a: &Assignment) -> Result<Started> {
     let path = resolve_model(&cfg.models_dir, &a.model)?;
     let mut opts = ExecutorOptions {
-        stage: StageOptions { device: 0, n_ctx: a.n_ctx, n_threads: 0, embed: Some(a.embed) },
+        stage: StageOptions { device: 0, n_ctx: a.n_ctx, n_threads: cfg.threads, embed: Some(a.embed) },
         wire: match a.act_dtype {
             ActDType::F16 => DType::F16,
             ActDType::I8 => DType::I8,

@@ -8,17 +8,23 @@
 pub mod bindings;
 pub use bindings as sys;
 
+mod chat;
+mod cpu;
 mod devices;
 mod executor;
 mod gguf;
 mod llama;
 mod smoke;
+mod tokenizer;
 
+pub use chat::{encode_chat, render as render_chat, ChatMessage, CHATML};
+pub use cpu::default_threads;
 pub use devices::{list_devices, DeviceInfo, DeviceKind};
 pub use executor::{ExecutorOptions, GgmlExecutor, Sampling};
 pub use gguf::{GgufFile, GgufTensorInfo};
 pub use llama::{LlamaHparams, LlamaInput, LlamaOutput, LlamaStage, Logits, StageOptions};
 pub use smoke::{matmul_check, matmul_gflops, MatmulReport};
+pub use tokenizer::{token_type, StreamDecoder, Tokenizer};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

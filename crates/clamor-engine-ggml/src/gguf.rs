@@ -67,14 +67,52 @@ impl GgufFile {
         (id >= 0).then_some(id)
     }
 
+    fn kv_type(&self, id: i64) -> sys::gguf_type {
+        unsafe { sys::gguf_get_kv_type(self.ctx, id) }
+    }
+
+    // ggml aborts the process on a type mismatch, so every accessor checks the type first and
+    // returns None for the wrong one.
+
     pub fn get_u32(&self, key: &str) -> Option<u32> {
-        self.key(key).map(|i| unsafe { sys::gguf_get_val_u32(self.ctx, i) })
+        let i = self.key(key)?;
+        match self.kv_type(i) {
+            sys::gguf_type::GGUF_TYPE_UINT32 => Some(unsafe { sys::gguf_get_val_u32(self.ctx, i) }),
+            sys::gguf_type::GGUF_TYPE_INT32 => u32::try_from(unsafe { sys::gguf_get_val_i32(self.ctx, i) }).ok(),
+            _ => None,
+        }
     }
     pub fn get_f32(&self, key: &str) -> Option<f32> {
-        self.key(key).map(|i| unsafe { sys::gguf_get_val_f32(self.ctx, i) })
+        let i = self.key(key)?;
+        (self.kv_type(i) == sys::gguf_type::GGUF_TYPE_FLOAT32).then(|| unsafe { sys::gguf_get_val_f32(self.ctx, i) })
+    }
+    pub fn get_bool(&self, key: &str) -> Option<bool> {
+        let i = self.key(key)?;
+        (self.kv_type(i) == sys::gguf_type::GGUF_TYPE_BOOL).then(|| unsafe { sys::gguf_get_val_bool(self.ctx, i) })
     }
     pub fn get_str(&self, key: &str) -> Option<String> {
-        self.key(key).map(|i| cstr(unsafe { sys::gguf_get_val_str(self.ctx, i) }))
+        let i = self.key(key)?;
+        (self.kv_type(i) == sys::gguf_type::GGUF_TYPE_STRING).then(|| cstr(unsafe { sys::gguf_get_val_str(self.ctx, i) }))
+    }
+
+    fn arr(&self, key: &str, elem: sys::gguf_type) -> Option<(i64, usize)> {
+        let i = self.key(key)?;
+        if self.kv_type(i) != sys::gguf_type::GGUF_TYPE_ARRAY || unsafe { sys::gguf_get_arr_type(self.ctx, i) } != elem {
+            return None;
+        }
+        Some((i, unsafe { sys::gguf_get_arr_n(self.ctx, i) }))
+    }
+    /// A string array, e.g. `tokenizer.ggml.tokens`. Strings are raw bytes in GGUF; invalid
+    /// UTF-8 is replaced.
+    pub fn get_arr_str(&self, key: &str) -> Option<Vec<String>> {
+        let (i, n) = self.arr(key, sys::gguf_type::GGUF_TYPE_STRING)?;
+        Some((0..n).map(|k| cstr(unsafe { sys::gguf_get_arr_str(self.ctx, i, k) })).collect())
+    }
+    /// An int32 array, e.g. `tokenizer.ggml.token_type`.
+    pub fn get_arr_i32(&self, key: &str) -> Option<Vec<i32>> {
+        let (i, n) = self.arr(key, sys::gguf_type::GGUF_TYPE_INT32)?;
+        let p = unsafe { sys::gguf_get_arr_data(self.ctx, i) } as *const i32;
+        Some(unsafe { std::slice::from_raw_parts(p, n) }.to_vec())
     }
 
     pub fn tensors(&self) -> Vec<GgufTensorInfo> {

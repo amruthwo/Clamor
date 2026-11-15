@@ -16,7 +16,7 @@ fn python_fixture(dir: &Path) -> Option<Vec<u32>> {
     let tools = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tools");
     let model = dir.join("tiny.gguf");
     let py = |args: Vec<String>| Command::new("python3").args(&args).output().map(|o| o.status.success()).unwrap_or(false);
-    let ok = py(vec![format!("{tools}/gen_tiny_llama.py"), model.display().to_string(), "--layers".into(), "4".into()])
+    let ok = py(vec![format!("{tools}/gen_tiny_llama.py"), model.display().to_string(), "--layers".into(), "4".into(), "--bytes-vocab".into()])
         && py(vec![
             format!("{tools}/ref_forward.py"),
             model.display().to_string(),
@@ -143,6 +143,22 @@ fn coordinator_and_two_members_generate_through_the_api() {
     assert_eq!(stages.len(), 3, "{p}");
     assert_eq!((stages[0]["node"].as_str(), stages[0]["layer_end"].as_u64()), (Some("coord"), Some(0)));
     assert_eq!(generate(), greedy, "embedding-only head + 2 members");
+
+    // Text chat: the reply must equal rendering + tokenizing the conversation ourselves, generating
+    // from those ids, and decoding. (The model is random, so the text itself is gibberish.)
+    let messages = json!([{ "role": "system", "content": "Be brief." }, { "role": "user", "content": "Héllo 😀" }]);
+    let (st, chat) = http(portal, "POST", "/api/chat", Some(json!({ "messages": messages, "max_new": 12 })));
+    assert_eq!(st, 200, "{chat}");
+    let tok = clamor_engine_ggml::Tokenizer::from_gguf(&clamor_engine_ggml::GgufFile::open(dir.join("tiny.gguf").to_str().unwrap()).unwrap()).unwrap();
+    let msgs: Vec<clamor_engine_ggml::ChatMessage> = serde_json::from_value(messages).unwrap();
+    let prompt = clamor_engine_ggml::encode_chat(&tok, &msgs).unwrap();
+    assert_eq!(chat["prompt_tokens"].as_u64(), Some(prompt.len() as u64), "{chat}");
+    let (_, generated) = http(portal, "POST", "/api/generate", Some(json!({ "tokens": prompt, "max_new": 12 })));
+    let ids: Vec<u32> = generated["tokens"].as_array().unwrap().iter().map(|t| t.as_u64().unwrap() as u32).collect();
+    assert_eq!(chat["message"]["content"].as_str(), Some(tok.decode(&ids, true).as_str()), "{chat}\n{generated}");
+    assert_eq!(chat["done"], generated["done"]);
+    let (st, r) = http(portal, "POST", "/api/chat", Some(json!({ "messages": [] })));
+    assert_eq!(st, 400, "empty conversation: {r}");
 
     // 2. A new pipeline replaces the old one (new epoch); the coordinator holds layer 0 itself.
     let p2 = start(json!([{ "node": "coord", "layers": [0, 1] }, { "node": "a", "layers": [1, 3] }, { "node": "b", "layers": [3, 4] }]));

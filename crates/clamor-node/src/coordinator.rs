@@ -2,12 +2,14 @@
 //! nodes that stop sending heartbeats. A departed node stays in the roster as `Away` with its
 //! benchmark results, so rejoining is instant.
 
+use crate::pipeline::Pipeline;
+use crate::stage::EngineConfig;
 use crate::wire::{read_msg, write_msg};
 use anyhow::Result;
 use clamor_muster::{bench, net, probe};
 use clamor_proto::*;
 use std::collections::BTreeMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
@@ -26,6 +28,10 @@ pub struct NodeEntry {
     pub note: Option<String>,
     /// Bumped on every (re)join so a stale connection cannot overwrite a newer one.
     pub generation: u64,
+    /// The node's address, as seen on its control connection.
+    pub peer_ip: Option<IpAddr>,
+    /// The coordinator's own address on that connection: how this node reaches us.
+    pub coord_ip: Option<IpAddr>,
 }
 
 pub struct Swarm {
@@ -34,11 +40,28 @@ pub struct Swarm {
     pub coordinator: NodeId,
     pub nodes: BTreeMap<NodeId, NodeEntry>,
     next_generation: u64,
+    pub engine: EngineConfig,
+    /// Stage `i` of a pipeline listens on `data_port + i`.
+    pub data_port: u16,
+    /// Ask joining nodes for the quick benchmark instead of the standard one.
+    pub quick_bench: bool,
+    pub pipeline: Option<Pipeline>,
+    pub next_epoch: u32,
 }
 
 impl Swarm {
-    pub fn new(name: String, token: Option<String>, coordinator: NodeId) -> Self {
-        Swarm { name, token, coordinator, nodes: BTreeMap::new(), next_generation: 1 }
+    pub fn new(name: String, token: Option<String>, coordinator: NodeId, engine: EngineConfig, data_port: u16, quick_bench: bool) -> Self {
+        Swarm { name, token, coordinator, nodes: BTreeMap::new(), next_generation: 1, engine, data_port, quick_bench, pipeline: None, next_epoch: 1 }
+    }
+
+    /// A node that held a pipeline stage is gone: that pipeline cannot run any more.
+    fn node_lost(&mut self, id: &NodeId, why: &str) {
+        if let Some(p) = self.pipeline.as_mut() {
+            let epoch = p.epoch;
+            if let Some(i) = p.stages.iter().position(|s| &s.node == id) {
+                p.mark_failed(epoch, i as u32, Some(id), why.to_string(), true);
+            }
+        }
     }
 }
 
@@ -69,6 +92,8 @@ pub async fn register_self(shared: Shared, id: NodeId) {
             running_tasks: 0,
             note: Some("coordinator".into()),
             generation,
+            peer_ip: None,
+            coord_ip: None,
         },
     );
 }
@@ -88,12 +113,13 @@ pub async fn run_listener(bind: &str, shared: Shared) -> Result<()> {
 }
 
 enum Admission {
-    Ok { generation: u64, swarm: String, coordinator: NodeId, cached_bench: bool },
+    Ok { generation: u64, swarm: String, coordinator: NodeId, cached_bench: bool, quick: bool },
     Rejected(String),
 }
 
 async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Result<()> {
     stream.set_nodelay(true)?;
+    let coord_ip = stream.local_addr().ok().map(|a| a.ip());
     let (mut rd, mut wr) = stream.into_split();
 
     let hello = timeout(Duration::from_secs(10), read_msg(&mut rd)).await??;
@@ -137,13 +163,15 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
                     running_tasks: 0,
                     note: if cached { Some("rejoined with cached benchmark".into()) } else { None },
                     generation,
+                    peer_ip: Some(addr.ip()),
+                    coord_ip,
                 },
             );
-            Admission::Ok { generation, swarm, coordinator, cached_bench: cached }
+            Admission::Ok { generation, swarm, coordinator, cached_bench: cached, quick: sw.quick_bench }
         }
     };
-    let (generation, swarm, coordinator, cached_bench) = match admission {
-        Admission::Ok { generation, swarm, coordinator, cached_bench } => (generation, swarm, coordinator, cached_bench),
+    let (generation, swarm, coordinator, cached_bench, quick) = match admission {
+        Admission::Ok { generation, swarm, coordinator, cached_bench, quick } => (generation, swarm, coordinator, cached_bench, quick),
         Admission::Rejected(reason) => {
             write_msg(&mut wr, &Message::Reject { reason }).await?;
             return Ok(());
@@ -154,7 +182,7 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
     let _ = tx.send(Message::Welcome { swarm, coordinator, heartbeat_secs: HEARTBEAT_SECS });
     if !cached_bench {
         set_state(&shared, &id, generation, NodeState::Benchmarking);
-        let _ = tx.send(Message::BenchRequest { quick: false });
+        let _ = tx.send(Message::BenchRequest { quick });
     }
     let writer = tokio::spawn(async move {
         while let Some(m) = rx.recv().await {
@@ -215,8 +243,20 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
                 leave_note = "left at the owner's request".into();
                 break;
             }
-            Message::TaskUpdate { .. } | Message::TaskResult { .. } | Message::ShardReady { .. } => {
-                // Task and shard bookkeeping lands with the scheduler.
+            Message::ShardReady { epoch, stage_index, load_ms, .. } => {
+                println!("{id}: stage {stage_index} ready (epoch {epoch}, loaded in {load_ms} ms)");
+                if let Some(p) = shared.lock().unwrap().pipeline.as_mut() {
+                    p.mark_ready(epoch, stage_index, Some(&id), load_ms);
+                }
+            }
+            Message::ShardFailed { epoch, stage_index, error, stopped, .. } => {
+                eprintln!("{id}: stage {stage_index} failed (epoch {epoch}): {error}");
+                if let Some(p) = shared.lock().unwrap().pipeline.as_mut() {
+                    p.mark_failed(epoch, stage_index, Some(&id), error, !stopped);
+                }
+            }
+            Message::TaskUpdate { .. } | Message::TaskResult { .. } => {
+                // Task bookkeeping lands with the scheduler.
             }
             _ => {}
         }
@@ -224,13 +264,18 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
 
     {
         let mut sw = shared.lock().unwrap();
+        let mut lost = false;
         if let Some(e) = sw.nodes.get_mut(&id) {
             if e.generation == generation {
                 e.state = NodeState::Away;
                 e.tx = None;
                 e.cpu_load = None;
                 e.note = Some(leave_note.clone());
+                lost = true;
             }
+        }
+        if lost {
+            sw.node_lost(&id, &leave_note);
         }
     }
     writer.abort();
@@ -253,13 +298,18 @@ pub async fn reaper(shared: Shared) {
         sleep(Duration::from_secs(5)).await;
         let now = unix_now();
         let mut sw = shared.lock().unwrap();
+        let mut lost = Vec::new();
         for (id, e) in sw.nodes.iter_mut() {
             if e.tx.is_some() && now.saturating_sub(e.last_seen) > 3 * HEARTBEAT_SECS as u64 {
                 e.tx = None;
                 e.state = NodeState::Away;
                 e.note = Some("heartbeat timeout".into());
                 println!("{id}: heartbeat timeout");
+                lost.push(id.clone());
             }
+        }
+        for id in lost {
+            sw.node_lost(&id, "heartbeat timeout");
         }
     }
 }

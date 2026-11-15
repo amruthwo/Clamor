@@ -21,7 +21,11 @@ Step 2 done: `GgmlExecutor` (src/executor.rs) puts a `LlamaStage` behind `StageE
 on the wire, tail samples (greedy, or temperature/top-k with a per-request seeded RNG), EOS ids from GGUF.
 tests/ring_e2e.rs runs real rings on loopback: 1-4 stages match numpy greedy generation, and the ring is
 bit-exact with the same executors called in-process; cancel, EOS, concurrency, context overflow.
-NOT done: node wiring (ShardAssign), tokenizer, quantized weights, real models.
+Step 3a done: the coordinator runs pipelines (src/pipeline.rs, src/stage.rs in clamor-node). POST /api/pipeline
+takes an explicit layout or asks the planner; the coordinator is always stage 0 (embedding-only `0..0` if the
+layout leaves it out) and members load their stage on `ShardAssign`. POST /api/generate is tokens in, tokens out.
+tests/pipeline_e2e.rs runs a coordinator + 2 member processes and matches numpy greedy output.
+NOT done: tokenizer (3b), quantized weights, real models, re-planning after a failure.
 
 ## Next steps, in order
 1. DONE. `tools/gen_tiny_llama.py` + `tools/ref_forward.py` give a random-weight Llama model and numpy reference
@@ -30,7 +34,7 @@ NOT done: node wiring (ShardAssign), tokenizer, quantized weights, real models.
    per layer (f32 tolerance ~1e-4), then check split-equals-full (layers 0..2 then 2..4 == 0..4).
    Convention is ggml's (RoPE on adjacent pairs, weights [out,in]).
 2. DONE. `GgmlExecutor: StageExecutor` (crates/clamor-transport/src/stage.rs defines the trait). One KV cache per request id; `release()` frees it.
-3. Wire executor into `clamor-node` via the `ShardAssign` message; add a real tokenizer path (GGUF vocab).
+3. Wire executor into `clamor-node` via the `ShardAssign` message (DONE, 3a); add a real tokenizer path (GGUF vocab) (3b).
 4. Quantized weights (Q4_K etc.) loaded from real GGUF; then real small model (e.g. a ~1B Llama) end to end on 2 local processes.
 5. Per-device GPU benchmark → `BenchReport` → planner (planner currently ignores accelerators until benchmarked).
 6. Later: pairwise link measurement, mDNS discovery, mTLS, Android app wrapper.
@@ -48,6 +52,11 @@ NOT done: node wiring (ShardAssign), tokenizer, quantized weights, real models.
 - Engine errors fail one request, not the ring: a failing stage releases the request and sends a `Token` frame
   with `FLAG_FAILED` (payload = message) on around the ring; the head ends that request `Failed(msg)` and
   cancels it everywhere. Before this, any `forward` error ended the stage loop and broke every request.
+- Pipelines: every node needs the model file in its `--models` dir (names are bare `.gguf` file names; anything
+  path-like is refused). Stage `i` listens on `--data-port + i`. `--device cpu|Vulkan0|<index>` picks the device.
+  A failed stage fails the pipeline (no re-plan yet); the status blames the first *cause* (device left, load
+  error) over knock-on "link closed" failures, which can arrive first.
+- `--quick-bench` on the coordinator makes the muster take seconds (tests use it).
 - The tail computes logits for the last token only (`Logits::Last`); `Logits::All` exists for tests.
 - `tools/ref_forward.py --generate N` gives numpy greedy tokens (and prints the smallest top-1/top-2 gap,
   which bounds how much activation rounding greedy text can tolerate).

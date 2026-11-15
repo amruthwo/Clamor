@@ -174,8 +174,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "clamor-engine-ggml",
  "clamor-muster",
  "clamor-proto",
+ "clamor-transport",
  "clap",
  "serde",
  "serde_json",

@@ -109,7 +109,7 @@ fn usable_devices(f: &Fixture) -> Vec<DeviceInfo> {
 }
 
 fn stage(f: &Fixture, layers: std::ops::Range<u32>, device: usize) -> LlamaStage {
-    LlamaStage::load(&f.model, layers, StageOptions { device, n_ctx: 32, n_threads: 0 }).unwrap()
+    LlamaStage::load(&f.model, layers, StageOptions { device, n_ctx: 32, ..Default::default() }).unwrap()
 }
 
 fn hidden(o: LlamaOutput) -> Vec<f32> {
@@ -243,8 +243,8 @@ fn release_frees_and_allows_restart() {
 #[test]
 fn rejects_bad_inputs() {
     let Some(f) = fixture() else { return };
-    let opts = || StageOptions { device: cpu(), n_ctx: 8, n_threads: 0 };
-    assert!(LlamaStage::load(&f.model, 2..2, opts()).is_err(), "empty range");
+    let opts = || StageOptions { device: cpu(), n_ctx: 8, ..Default::default() };
+    assert!(LlamaStage::load(&f.model, 2..2, opts()).is_err(), "empty range past the start");
     assert!(LlamaStage::load(&f.model, 0..5, opts()).is_err(), "past last layer");
 
     let mut head = LlamaStage::load(&f.model, 0..2, opts()).unwrap();
@@ -281,11 +281,42 @@ fn tied_embeddings() {
     let want = read_f32(dir.join("logits.f32"));
     assert!(GgufFile::open(&model).unwrap().tensor_ne("output.weight").is_none());
 
-    let opts = || StageOptions { device: cpu(), n_ctx: 32, n_threads: 0 };
+    let opts = || StageOptions { device: cpu(), n_ctx: 32, ..Default::default() };
     let mut full = LlamaStage::load(&model, 0..4, opts()).unwrap();
     assert!(max_err(&logits(full.forward(1, 0, LlamaInput::Tokens(&TOKENS)).unwrap()), &want) < 1e-4);
     let mut a = LlamaStage::load(&model, 0..2, opts()).unwrap();
     let mut b = LlamaStage::load(&model, 2..4, opts()).unwrap();
     let h = hidden(a.forward(1, 0, LlamaInput::Tokens(&TOKENS)).unwrap());
     assert!(max_err(&logits(b.forward(1, 0, LlamaInput::Hidden(&h)).unwrap()), &want) < 1e-4);
+}
+
+/// An embedding-only head (layers 0..0) feeds a stage that holds every layer but does not
+/// embed (`embed: Some(false)`): together they must equal the reference. This is the layout the
+/// coordinator uses when it hosts the head without holding layers.
+#[test]
+fn embedding_only_head_composes() {
+    let Some(f) = fixture() else { return };
+    let o = |embed| StageOptions { device: cpu(), n_ctx: 32, embed, ..Default::default() };
+    let mut head = LlamaStage::load(&f.model, 0..0, o(None)).unwrap();
+    assert!(head.is_head() && !head.is_tail());
+    let mut rest = LlamaStage::load(&f.model, 0..N_LAYER, o(Some(false))).unwrap();
+    assert!(!rest.is_head() && rest.is_tail());
+
+    let h = hidden(head.forward(1, 0, LlamaInput::Tokens(&TOKENS)).unwrap());
+    assert_eq!(h.len(), TOKENS.len() * E);
+    let (out, traced) = rest.forward_traced(1, 0, LlamaInput::Hidden(&h)).unwrap();
+    for (l, t) in traced.iter().enumerate() {
+        assert!(max_err(t, &f.hidden[l]) < 1e-4, "layer {l}");
+    }
+    assert!(max_err(&logits(out), &f.logits) < 1e-4);
+
+    // The head tracks positions with no KV cache, and still enforces order.
+    assert_eq!(head.n_past(1), TOKENS.len() as u32);
+    assert!(head.forward(1, 0, LlamaInput::Tokens(&[3])).is_err(), "position rewind");
+    head.release(1);
+    assert_eq!(head.live_requests(), 0);
+
+    // Roles that cannot work are refused.
+    assert!(LlamaStage::load(&f.model, 0..0, o(Some(false))).is_err(), "no layers and no embedding");
+    assert!(LlamaStage::load(&f.model, 2..4, o(Some(true))).is_err(), "embedding needs layer 0");
 }

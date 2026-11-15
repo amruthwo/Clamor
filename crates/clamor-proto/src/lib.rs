@@ -1,4 +1,4 @@
-//! Clamor wire protocol (v1).
+//! Clamor wire protocol (v2).
 //!
 //! Every message is a JSON object with a `"type"` tag, sent as a length-prefixed frame
 //! (4-byte big-endian length, then the UTF-8 JSON body). JSON keeps v1 debuggable with
@@ -9,7 +9,10 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::io::{self, Read, Write};
 
-pub const PROTOCOL_VERSION: u16 = 1;
+/// v2: `ShardAssign` gained `n_ctx`, `embed` and `sampling`; added `ShardFailed`.
+pub const PROTOCOL_VERSION: u16 = 2;
+/// First data-plane port: stage `i` listens on `DEFAULT_DATA_PORT + i`.
+pub const DEFAULT_DATA_PORT: u16 = 7430;
 /// Control plane (node <-> coordinator).
 pub const DEFAULT_PORT: u16 = 7420;
 /// Web portal and JSON API served by the coordinator.
@@ -244,6 +247,15 @@ pub enum ActDType {
     I8,
 }
 
+/// How the tail stage picks tokens. `temperature == 0` is greedy.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SamplingParams {
+    pub temperature: f32,
+    /// Keep only the k most likely tokens. 0 means no limit.
+    pub top_k: u32,
+    pub seed: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Message {
@@ -319,6 +331,7 @@ pub enum Message {
     // --- big-model pipeline lane (activations travel on the data plane, see clamor-transport) ---
     /// Give a node its place in the ring. A new `epoch` supersedes every earlier assignment.
     ShardAssign {
+        /// Model file name in the node's models directory (a bare file name, never a path).
         model: String,
         epoch: u32,
         session: u64,
@@ -332,12 +345,29 @@ pub enum Message {
         downstream: String,
         /// Encoding for activations leaving this stage.
         act_dtype: ActDType,
+        /// KV cache length per request.
+        n_ctx: u32,
+        /// This stage owns the token embedding (stage 0). Usually it also holds layer 0, but an
+        /// embedding-only head has `layer_start == layer_end == 0`.
+        embed: bool,
+        /// Used by the last stage.
+        sampling: SamplingParams,
     },
     ShardReady {
         model: String,
         epoch: u32,
         stage_index: u32,
         load_ms: u64,
+    },
+    /// A stage could not load, or stopped. That epoch's pipeline cannot run any more.
+    ShardFailed {
+        model: String,
+        epoch: u32,
+        stage_index: u32,
+        error: String,
+        /// The stage had been running and then stopped. Usually a knock-on effect (a neighbour's
+        /// link closed), so the coordinator prefers to blame a failure that is not.
+        stopped: bool,
     },
     ShardRelease {
         model: String,
@@ -462,7 +492,14 @@ mod tests {
             listen_port: 7430,
             downstream: "192.168.1.12:7430".into(),
             act_dtype: ActDType::I8,
+            n_ctx: 4096,
+            embed: false,
+            sampling: SamplingParams { temperature: 0.7, top_k: 40, seed: 5 },
         };
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &msg).unwrap();
+        assert_eq!(read_frame(&mut buf.as_slice()).unwrap(), msg);
+        let msg = Message::ShardFailed { model: "tiny.gguf".into(), epoch: 3, stage_index: 1, error: "out of memory".into(), stopped: false };
         let mut buf = Vec::new();
         write_frame(&mut buf, &msg).unwrap();
         assert_eq!(read_frame(&mut buf.as_slice()).unwrap(), msg);

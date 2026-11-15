@@ -42,16 +42,18 @@ fn free_port() -> u16 {
     TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
 }
 
-/// A run of `n` consecutive free ports (data ports for the stages). Tests in this binary run in
+/// A run of `n` consecutive free ports (data ports for the stages). Chosen from 20000-32000,
+/// below every OS's ephemeral range: ports from that range get reused for the test processes'
+/// own outgoing connections (seen on macOS and Windows CI). Tests in this binary run in
 /// parallel, so ranges handed out here are remembered and never given out twice.
 fn free_port_run(n: u16) -> u16 {
     static TAKEN: std::sync::Mutex<Vec<u16>> = std::sync::Mutex::new(Vec::new());
+    let mut seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos() as u64 ^ (std::process::id() as u64) << 20;
     for _ in 0..500 {
-        // Start from a port the OS considers free (random-ish), then check the whole run.
-        let base = free_port();
-        if base.checked_add(n).is_none() {
-            continue;
-        }
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        let base = 20_000 + (seed % 12_000) as u16;
         let mut taken = TAKEN.lock().unwrap();
         if taken.iter().any(|&t| base < t + n && t < base + n) {
             continue;

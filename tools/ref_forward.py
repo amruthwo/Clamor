@@ -36,21 +36,36 @@ T = {t.name: tensor_f32(t) for t in r.tensors}
 def kv(k):
     f = r.fields[k]
     return f.contents()
-n_layer = int(kv("llama.block_count")); E = int(kv("llama.embedding_length"))
-H = int(kv("llama.attention.head_count")); HKV = int(kv("llama.attention.head_count_kv"))
-eps = float(kv("llama.attention.layer_norm_rms_epsilon")); base = float(kv("llama.rope.freq_base"))
+arch = str(kv("general.architecture"))
+assert arch in ("llama", "qwen2"), f"unsupported architecture {arch}"
+P = arch + "."
+n_layer = int(kv(P + "block_count")); E = int(kv(P + "embedding_length"))
+H = int(kv(P + "attention.head_count")); HKV = int(kv(P + "attention.head_count_kv"))
+eps = float(kv(P + "attention.layer_norm_rms_epsilon")); base = float(kv(P + "rope.freq_base"))
 HD = E // H
+# Qwen2 rotates the two halves of each head (NEOX); llama.cpp's converter permutes Llama's q/k
+# weights so Llama rotates adjacent pairs (NORM).
+NEOX = arch == "qwen2"
+# Llama 3 RoPE scaling: frequency i is divided by rope_freqs[i].
+FF = np.array(next(t.data for t in r.tensors if t.name == "rope_freqs.weight"), dtype=np.float64) if any(t.name == "rope_freqs.weight" for t in r.tensors) else np.ones(HD // 2)
 
 def rms(x, g): return x / np.sqrt((x * x).mean(-1, keepdims=True) + eps) * g
-def rope(x, pos):  # x: [T, heads, HD], adjacent pairs (ggml NORM)
+def rope(x, pos):  # x: [T, heads, HD]
     i = np.arange(HD // 2)
-    ang = pos[:, None] * base ** (-2.0 * i / HD)
+    ang = pos[:, None] * base ** (-2.0 * i / HD) / FF
     c, s = np.cos(ang)[:, None, :], np.sin(ang)[:, None, :]
-    x0, x1 = x[..., 0::2], x[..., 1::2]
     out = np.empty_like(x)
-    out[..., 0::2] = x0 * c - x1 * s
-    out[..., 1::2] = x0 * s + x1 * c
+    if NEOX:  # pairs (i, i + HD/2)
+        x0, x1 = x[..., : HD // 2], x[..., HD // 2 :]
+        out[..., : HD // 2] = x0 * c - x1 * s
+        out[..., HD // 2 :] = x0 * s + x1 * c
+    else:  # adjacent pairs (2i, 2i+1)
+        x0, x1 = x[..., 0::2], x[..., 1::2]
+        out[..., 0::2] = x0 * c - x1 * s
+        out[..., 1::2] = x0 * s + x1 * c
     return out
+def bias(l, name):
+    return T.get(f"blk.{l}.{name}.bias", 0.0)
 def silu(x): return x / (1 + np.exp(-x))
 
 def forward(toks):
@@ -62,9 +77,9 @@ def forward(toks):
     for l in range(n_layer):
         g = lambda s: T[f"blk.{l}.{s}.weight"]
         h = rms(x, g("attn_norm"))
-        q = rope((h @ g("attn_q").T).reshape(n, H, HD), pos)
-        k = rope((h @ g("attn_k").T).reshape(n, HKV, HD), pos)
-        v = (h @ g("attn_v").T).reshape(n, HKV, HD)
+        q = rope((h @ g("attn_q").T + bias(l, "attn_q")).reshape(n, H, HD), pos)
+        k = rope((h @ g("attn_k").T + bias(l, "attn_k")).reshape(n, HKV, HD), pos)
+        v = (h @ g("attn_v").T + bias(l, "attn_v")).reshape(n, HKV, HD)
         rep = H // HKV
         k = np.repeat(k, rep, axis=1); v = np.repeat(v, rep, axis=1)
         sc = np.einsum("qhd,khd->hqk", q, k) / np.sqrt(HD) + mask

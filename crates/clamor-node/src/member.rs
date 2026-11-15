@@ -2,6 +2,7 @@
 //! gracefully on `Drain` or Ctrl-C. Reconnects with backoff if the connection drops.
 
 use crate::stage::{self, Assignment, EngineConfig};
+use crate::update;
 use crate::wire::{read_msg, write_msg};
 use anyhow::{bail, Result};
 use clamor_muster::{bench, net, probe};
@@ -66,9 +67,15 @@ enum Exit {
     Drained,
     Interrupted,
     Rejected(String),
+    /// Left the swarm to install an update.
+    Update,
 }
 
-pub async fn join(addr: String, token: Option<String>, id: Option<String>, engine: EngineConfig) -> Result<()> {
+pub async fn join(addr: String, token: Option<String>, id: Option<String>, engine: EngineConfig, updates: update::Policy) -> Result<()> {
+    let update_flag: update::UpdateFlag = Default::default();
+    if updates.check || updates.auto {
+        update::spawn_checker(update_flag.clone());
+    }
     // Network-benchmark server the coordinator measures this device against.
     let listener = TcpListener::bind(("0.0.0.0", DEFAULT_BENCH_PORT)).or_else(|_| TcpListener::bind("0.0.0.0:0"))?;
     let bench_port = listener.local_addr()?.port();
@@ -79,7 +86,14 @@ pub async fn join(addr: String, token: Option<String>, id: Option<String>, engin
     let id = NodeId(id.unwrap_or_else(|| probe::default_node_id().0));
     let mut backoff = 2u64;
     loop {
-        match session(&addr, &token, &id, bench_port, &mut backoff, &engine).await {
+        match session(&addr, &token, &id, bench_port, &mut backoff, &engine, &update_flag, updates.auto).await {
+            Ok(Exit::Update) => {
+                // Returns only if the update failed; then carry on with this version.
+                if let Err(e) = update::update_and_restart().await {
+                    eprintln!("update failed, staying on this version: {e:#}");
+                }
+                *update_flag.lock().unwrap() = None;
+            }
             Ok(Exit::Drained) => {
                 println!("drained: left the swarm. Run `clamor-node join {addr}` to rejoin.");
                 return Ok(());
@@ -90,6 +104,13 @@ pub async fn join(addr: String, token: Option<String>, id: Option<String>, engin
             }
             Ok(Exit::Rejected(reason)) => {
                 eprintln!("coordinator rejected us: {reason}");
+                // A coordinator on a newer protocol: catch up and rejoin.
+                if updates.auto && reason.contains("protocol") {
+                    println!("trying an update to match the coordinator");
+                    if let Err(e) = update::update_and_restart().await {
+                        eprintln!("update failed: {e:#}");
+                    }
+                }
                 std::process::exit(1);
             }
             Err(e) => eprintln!("disconnected: {e}; retrying in {backoff}s"),
@@ -99,7 +120,8 @@ pub async fn join(addr: String, token: Option<String>, id: Option<String>, engin
     }
 }
 
-async fn session(addr: &str, token: &Option<String>, id: &NodeId, bench_port: u16, backoff: &mut u64, engine: &EngineConfig) -> Result<Exit> {
+#[allow(clippy::too_many_arguments)]
+async fn session(addr: &str, token: &Option<String>, id: &NodeId, bench_port: u16, backoff: &mut u64, engine: &EngineConfig, update_flag: &update::UpdateFlag, auto_update: bool) -> Result<Exit> {
     let id2 = id.clone();
     let info = tokio::task::spawn_blocking(move || probe::probe_node(id2)).await?;
     let class = info.class;
@@ -107,7 +129,7 @@ async fn session(addr: &str, token: &Option<String>, id: &NodeId, bench_port: u1
     let stream = TcpStream::connect(addr).await?;
     stream.set_nodelay(true)?;
     let (mut rd, mut wr) = stream.into_split();
-    write_msg(&mut wr, &Message::Hello { proto: PROTOCOL_VERSION, info, bench_port, join_token: token.clone() }).await?;
+    write_msg(&mut wr, &Message::Hello { proto: PROTOCOL_VERSION, info, bench_port, join_token: token.clone(), build: Some(crate::build_info::current()) }).await?;
 
     let heartbeat_secs = match timeout(Duration::from_secs(10), read_msg(&mut rd)).await?? {
         Message::Welcome { swarm, coordinator, heartbeat_secs } => {
@@ -160,7 +182,14 @@ async fn session(addr: &str, token: &Option<String>, id: &NodeId, bench_port: u1
             },
             _ = hb.tick() => {
                 let (cpu, ram) = sampler.sample();
-                write_msg(&mut wr, &Message::Heartbeat { cpu_load: cpu, ram_available_bytes: ram, power: None, running_tasks: 0 }).await?;
+                let update_available = update_flag.lock().unwrap().clone();
+                // Update only between pipelines, never under a running stage.
+                if auto_update && update_available.is_some() && slot.epoch.is_none() {
+                    println!("leaving the swarm to install clamor {}", update_available.unwrap_or_default());
+                    let _ = write_msg(&mut wr, &Message::Leave).await;
+                    return Ok(Exit::Update);
+                }
+                write_msg(&mut wr, &Message::Heartbeat { cpu_load: cpu, ram_available_bytes: ram, power: None, running_tasks: 0, update_available }).await?;
             }
             _ = tokio::signal::ctrl_c() => {
                 let _ = write_msg(&mut wr, &Message::Leave).await;

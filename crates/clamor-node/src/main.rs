@@ -6,6 +6,7 @@ mod member;
 mod pipeline;
 mod portal;
 mod stage;
+mod update;
 mod wire;
 
 use anyhow::Result;
@@ -31,6 +32,16 @@ enum Cmd {
     },
     /// List the compute devices this build can use, and check each computes correctly.
     Devices,
+    /// Update to the latest release from GitHub (only builds signed with the Clamor release key,
+    /// matching this platform and GPU variant).
+    Update {
+        /// Only report whether an update is available.
+        #[arg(long)]
+        check: bool,
+        /// Put back the version the last update replaced.
+        #[arg(long, conflicts_with = "check")]
+        rollback: bool,
+    },
     /// Start a swarm: control plane, muster, and web portal.
     Coordinator {
         #[arg(long, default_value = "clamor")]
@@ -52,6 +63,8 @@ enum Cmd {
         /// Ask joining devices for the quick benchmark (seconds instead of a minute).
         #[arg(long)]
         quick_bench: bool,
+        #[command(flatten)]
+        updates: UpdateArgs,
     },
     /// Join a swarm.
     Join {
@@ -63,7 +76,26 @@ enum Cmd {
         id: Option<String>,
         #[command(flatten)]
         engine: EngineArgs,
+        #[command(flatten)]
+        updates: UpdateArgs,
     },
+}
+
+#[derive(clap::Args)]
+struct UpdateArgs {
+    /// Install new Clamor releases automatically when idle (no pipeline stage running), then
+    /// restart with the same options. Only builds signed with the Clamor release key are used.
+    #[arg(long)]
+    auto_update: bool,
+    /// Never contact GitHub to look for new releases.
+    #[arg(long, conflicts_with = "auto_update")]
+    no_update_check: bool,
+}
+
+impl UpdateArgs {
+    fn policy(&self) -> update::Policy {
+        update::Policy { check: !self.no_update_check, auto: self.auto_update }
+    }
 }
 
 #[derive(clap::Args)]
@@ -94,12 +126,43 @@ async fn main() -> Result<()> {
             if json {
                 println!("{}", serde_json::to_string_pretty(&b)?);
             } else {
-                println!("{b}");
+                println!("{}", build_info::describe(&b));
+            }
+            Ok(())
+        }
+        Cmd::Update { check, rollback } => {
+            let exe = std::env::current_exe()?;
+            if rollback {
+                update::rollback(&exe)?;
+                println!("rolled back {}", exe.display());
+                return Ok(());
+            }
+            let me = build_info::current();
+            println!("this build: {}", build_info::describe(&me));
+            // Network and disk work: keep it off the async runtime.
+            let found = tokio::task::spawn_blocking(move || update::check(&update::Source::github(), &me)).await??;
+            match found {
+                update::Check::UpToDate { latest } => println!("up to date (latest release: {latest})"),
+                update::Check::NoReleases => println!("no releases have been published yet"),
+                update::Check::NoMatchingBuild { latest } => {
+                    println!("release {latest} is out, but has no build for this platform and GPU variant")
+                }
+                update::Check::Available(av) => {
+                    println!("update available: {} ({}, {} MB)", av.version, av.asset.file, av.asset.size >> 20);
+                    if let Some(page) = &av.release_page {
+                        println!("release notes: {page}");
+                    }
+                    if !check {
+                        let backup = tokio::task::spawn_blocking(move || update::apply(&av, &exe)).await??;
+                        println!("updated. The previous version is kept at {} (clamor-node update --rollback).", backup.display());
+                        println!("Restart clamor-node to run the new version.");
+                    }
+                }
             }
             Ok(())
         }
         Cmd::Devices => {
-            println!("{}", build_info::current());
+            println!("{}", build_info::describe(&build_info::current()));
             println!("default CPU threads: {} (the performance cores; override with --threads)", clamor_engine_ggml::default_threads());
             for d in clamor_engine_ggml::list_devices() {
                 println!("[{}] {}: {} ({:?}, {} MiB)", d.index, d.name, d.description, d.kind, d.memory_total >> 20);
@@ -110,13 +173,14 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Coordinator { swarm, bind, portal, token, id, engine, data_port, quick_bench } => {
+        Cmd::Coordinator { swarm, bind, portal, token, id, engine, data_port, quick_bench, updates } => {
             let id = NodeId(id.unwrap_or_else(|| probe::default_node_id().0));
             let engine = engine.config();
             engine.validate()?; // fail fast on a bad --device
             let shared = Arc::new(Mutex::new(coordinator::Swarm::new(swarm, token, id.clone(), engine, data_port, quick_bench)));
             tokio::spawn(coordinator::register_self(shared.clone(), id));
             tokio::spawn(coordinator::reaper(shared.clone()));
+            tokio::spawn(coordinator::updates(shared.clone(), updates.policy()));
             let portal_shared = shared.clone();
             tokio::spawn(async move {
                 if let Err(e) = portal::serve(portal, portal_shared).await {
@@ -125,11 +189,11 @@ async fn main() -> Result<()> {
             });
             coordinator::run_listener(&bind, shared).await
         }
-        Cmd::Join { addr, token, id, engine } => {
+        Cmd::Join { addr, token, id, engine, updates } => {
             let addr = if addr.contains(':') { addr } else { format!("{addr}:{DEFAULT_PORT}") };
             let engine = engine.config();
             engine.validate()?;
-            member::join(addr, token, id, engine).await
+            member::join(addr, token, id, engine, updates.policy()).await
         }
     }
 }

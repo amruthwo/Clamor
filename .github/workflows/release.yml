@@ -9,7 +9,7 @@ on:
     tags: ["v*"]
   workflow_dispatch:
   pull_request:
-    paths: [".github/workflows/release.yml", "scripts/package-release.sh", "crates/clamor-node/build.rs", "crates/clamor-engine-ggml/build.rs"]
+    paths: [".github/workflows/release.yml", "scripts/package-release.sh", "crates/clamor-node/build.rs", "crates/clamor-engine-ggml/build.rs", "crates/clamor-node/src/update.rs"]
 
 permissions:
   contents: write
@@ -81,26 +81,45 @@ jobs:
           path: dist/*
 
   release:
-    name: draft release
+    # Runs on every trigger, so the manifest and signing are tested before a real release;
+    # only a tag creates the draft release.
+    name: manifest, signature, draft release
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with: { path: dist, merge-multiple: true }
       - name: Check the tag matches the version
+        if: startsWith(github.ref, 'refs/tags/v')
         run: |
           v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           [ "v$v" = "${GITHUB_REF_NAME}" ] || { echo "tag ${GITHUB_REF_NAME} but Cargo.toml says $v"; exit 1; }
       - name: Manifest
         run: |
-          v=${GITHUB_REF_NAME#v}
+          v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           jq -s --arg v "$v" --arg c "$GITHUB_SHA" '{version: $v, commit: $c, assets: .}' dist/*.json > dist/manifest.json
           rm dist/clamor-*.json
-          (cd dist && sha256sum clamor-* manifest.json > SHA256SUMS)
           cat dist/manifest.json
+      - name: Sign the manifest
+        # Nodes install only builds listed in a manifest signed by this key (see
+        # crates/clamor-node/src/update.rs). The secret holds the Ed25519 private key (PEM).
+        env: { SIGNING_KEY: "${{ secrets.CLAMOR_RELEASE_SIGNING_KEY }}" }
+        run: |
+          [ -n "$SIGNING_KEY" ] || { echo "::error::The CLAMOR_RELEASE_SIGNING_KEY secret is not set"; exit 1; }
+          umask 077
+          printf '%s\n' "$SIGNING_KEY" > key.pem
+          openssl pkey -in key.pem -pubout -out pub.pem
+          openssl pkeyutl -sign -inkey key.pem -rawin -in dist/manifest.json -out dist/manifest.json.sig
+          rm -f key.pem
+          openssl pkeyutl -verify -pubin -inkey pub.pem -rawin -in dist/manifest.json -sigfile dist/manifest.json.sig
+          # The secret must be the key built into clamor-node, or no node would accept the release.
+          have=$(openssl pkey -pubin -in pub.pem -outform DER | tail -c 32 | od -An -tx1 | tr -d ' \n')
+          want=$(sed -n '/RELEASE_PUBKEY: \[u8; 32\]/,/];/p' crates/clamor-node/src/update.rs | grep -o '0x[0-9a-f][0-9a-f]' | sed 's/0x//' | tr -d '\n')
+          [ "$have" = "$want" ] || { echo "::error::signing key ($have) does not match RELEASE_PUBKEY in update.rs ($want)"; exit 1; }
+          (cd dist && sha256sum clamor-* manifest.json manifest.json.sig > SHA256SUMS)
       - name: Create draft release
+        if: startsWith(github.ref, 'refs/tags/v')
         env: { GH_TOKEN: "${{ github.token }}" }
         run: |
           gh release create "$GITHUB_REF_NAME" dist/* --draft --title "Clamor ${GITHUB_REF_NAME}" --generate-notes

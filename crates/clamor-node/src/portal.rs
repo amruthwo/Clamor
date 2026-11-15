@@ -50,6 +50,8 @@ struct RosterRow {
     cpu_load: Option<f32>,
     running_tasks: u32,
     note: Option<String>,
+    build: Option<BuildInfo>,
+    update_available: Option<String>,
     report: NodeReport,
 }
 
@@ -62,6 +64,8 @@ fn row(entry: &NodeEntry, id: &NodeId, coordinator: &NodeId) -> RosterRow {
         cpu_load: entry.cpu_load,
         running_tasks: entry.running_tasks,
         note: entry.note.clone(),
+        build: entry.build.clone(),
+        update_available: entry.update_available.clone(),
         report: entry.report.clone(),
     }
 }

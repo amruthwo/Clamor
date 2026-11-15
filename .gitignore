@@ -2,3 +2,7 @@
 *.gguf
 *.npz
 __pycache__/
+
+# Local notes, not published
+ASAHI_SETUP.md
+CLAUDE.md

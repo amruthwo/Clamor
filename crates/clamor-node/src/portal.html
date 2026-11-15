@@ -45,7 +45,7 @@
 
   <section><h2>Devices</h2>
     <table>
-      <thead><tr><th>Device</th><th>State</th><th>Type</th><th class="num">RAM free</th><th class="num">Mem BW</th><th class="num">GFLOP/s</th><th class="num">RTT</th><th class="num">Link</th><th></th></tr></thead>
+      <thead><tr><th>Device</th><th>State</th><th>Type</th><th>Clamor</th><th class="num">RAM free</th><th class="num">Mem BW</th><th class="num">GFLOP/s</th><th class="num">RTT</th><th class="num">Link</th><th></th></tr></thead>
       <tbody id="roster"></tbody>
     </table>
   </section>
@@ -94,13 +94,14 @@ function renderRoster(data) {
     return `<tr class="${esc(n.state)}">
       <td><span class="dot"></span>${esc(n.id)}</td><td>${esc(n.state)}</td>
       <td>${esc(r.info.class)} · ${esc(r.info.os)}/${esc(r.info.arch)}</td>
+      <td>${n.build ? esc(n.build.version) + (n.build.variant !== 'cpu' ? ' · ' + esc(n.build.variant) : '') : '<span class="mute">older</span>'}${n.update_available ? ` <span class="mute" title="clamor-node update">→ ${esc(n.update_available)} available</span>` : ''}</td>
       <td class="num">${gib(r.info.ram_available_bytes)} / ${gib(r.info.ram_total_bytes)} GiB</td>
       <td class="num">${b ? b.mem_bw_gbps.toFixed(1) + ' GB/s' : '–'}</td>
       <td class="num">${b ? b.cpu_gflops_mt.toFixed(0) : '–'}</td>
       <td class="num">${l ? l.rtt_ms_p50.toFixed(1) + ' ms' : (n.is_coordinator ? 'local' : '–')}</td>
       <td class="num">${l && l.up_mbps ? Math.min(l.up_mbps, l.down_mbps).toFixed(0) + ' Mbit/s' : '–'}</td>
       <td>${actions}</td></tr>`;
-  }).join('') || '<tr><td colspan="9" class="mute">no devices yet</td></tr>';
+  }).join('') || '<tr><td colspan="10" class="mute">no devices yet</td></tr>';
 }
 
 function renderPlan(data) {

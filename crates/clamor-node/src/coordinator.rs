@@ -32,6 +32,10 @@ pub struct NodeEntry {
     pub peer_ip: Option<IpAddr>,
     /// The coordinator's own address on that connection: how this node reaches us.
     pub coord_ip: Option<IpAddr>,
+    /// The node's binary (None for nodes too old to say).
+    pub build: Option<BuildInfo>,
+    /// A newer release the node could update to.
+    pub update_available: Option<String>,
 }
 
 pub struct Swarm {
@@ -94,6 +98,8 @@ pub async fn register_self(shared: Shared, id: NodeId) {
             generation,
             peer_ip: None,
             coord_ip: None,
+            build: Some(crate::build_info::current()),
+            update_available: None,
         },
     );
 }
@@ -123,7 +129,7 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
     let (mut rd, mut wr) = stream.into_split();
 
     let hello = timeout(Duration::from_secs(10), read_msg(&mut rd)).await??;
-    let Message::Hello { proto, info, bench_port, join_token } = hello else {
+    let Message::Hello { proto, info, bench_port, join_token, build } = hello else {
         write_msg(&mut wr, &Message::Reject { reason: "expected hello".into() }).await?;
         return Ok(());
     };
@@ -165,6 +171,8 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
                     generation,
                     peer_ip: Some(addr.ip()),
                     coord_ip,
+                    build,
+                    update_available: None,
                 },
             );
             Admission::Ok { generation, swarm, coordinator, cached_bench: cached, quick: sw.quick_bench }
@@ -202,9 +210,10 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
             }
         }
         match msg {
-            Message::Heartbeat { cpu_load, ram_available_bytes, power, running_tasks } => {
+            Message::Heartbeat { cpu_load, ram_available_bytes, power, running_tasks, update_available } => {
                 let mut sw = shared.lock().unwrap();
                 if let Some(e) = sw.nodes.get_mut(&id) {
+                    e.update_available = update_available;
                     e.cpu_load = Some(cpu_load);
                     e.running_tasks = running_tasks;
                     e.report.info.ram_available_bytes = ram_available_bytes;
@@ -288,6 +297,34 @@ fn set_state(shared: &Shared, id: &NodeId, generation: u64, state: NodeState) {
     if let Some(e) = sw.nodes.get_mut(id) {
         if e.generation == generation {
             e.state = state;
+        }
+    }
+}
+
+/// The coordinator's own update checks: show them in its roster entry and, with
+/// `--auto-update`, install when no pipeline is running (members reconnect on their own).
+pub async fn updates(shared: Shared, policy: crate::update::Policy) {
+    if !(policy.check || policy.auto) {
+        return;
+    }
+    let flag: crate::update::UpdateFlag = Default::default();
+    crate::update::spawn_checker(flag.clone());
+    loop {
+        sleep(Duration::from_secs(300)).await;
+        let available = flag.lock().unwrap().clone();
+        let idle = {
+            let mut sw = shared.lock().unwrap();
+            let me = sw.coordinator.clone();
+            if let Some(e) = sw.nodes.get_mut(&me) {
+                e.update_available = available.clone();
+            }
+            sw.pipeline.is_none()
+        };
+        if policy.auto && available.is_some() && idle {
+            if let Err(e) = crate::update::update_and_restart().await {
+                eprintln!("update failed, staying on this version: {e:#}");
+                *flag.lock().unwrap() = None;
+            }
         }
     }
 }

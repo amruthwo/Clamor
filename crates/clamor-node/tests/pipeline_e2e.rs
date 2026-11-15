@@ -326,16 +326,20 @@ fn a_model_on_one_device_is_shared_with_the_others() {
     // The slices landed in the caches: a has layers 0..2, the coordinator its embedding slice
     // and the metadata; b, which holds the file, cached nothing.
     let files = |p: &str| -> Vec<String> {
-        let mut v: Vec<String> = std::fs::read_dir(p).unwrap().flatten().flat_map(|d| std::fs::read_dir(d.path()).unwrap().flatten().map(|f| f.file_name().to_string_lossy().into_owned())).collect();
+        let mut v: Vec<String> = std::fs::read_dir(p).unwrap().flatten().filter(|d| d.path().is_dir()).flat_map(|d| std::fs::read_dir(d.path()).unwrap().flatten().map(|f| f.file_name().to_string_lossy().into_owned())).collect();
         v.sort();
         v
     };
     assert_eq!(files(&a_cache), vec!["tiny.layers-0-2.gguf"]);
     assert_eq!(files(&coord_cache), vec!["tiny.layers-0-0-embed.gguf", "tiny.layers-0-0.gguf"]);
     assert!(files(&b_cache).is_empty(), "b used its own file");
+    // The cache index records which swarm each slice was fetched for (for `leave --purge`).
+    let index: Value = serde_json::from_str(&std::fs::read_to_string(Path::new(&a_cache).join("index.json")).unwrap()).unwrap();
+    let swarms = index.as_object().unwrap().values().next().unwrap()["swarms"].clone();
+    assert_eq!(swarms.as_array().map(|a| a.len()), Some(1), "{index}");
 
     // A second pipeline with the same layout loads from the cache: no new download.
-    let a_slice = std::fs::read_dir(&a_cache).unwrap().next().unwrap().unwrap().path().join("tiny.layers-0-2.gguf");
+    let a_slice = std::fs::read_dir(&a_cache).unwrap().flatten().find(|d| d.path().is_dir()).unwrap().path().join("tiny.layers-0-2.gguf");
     let before = std::fs::metadata(&a_slice).unwrap().modified().unwrap();
     std::thread::sleep(Duration::from_millis(1100));
     start();
@@ -454,9 +458,19 @@ fn devices_join_by_passphrase_and_rejoin_by_key() {
     drop(m);
 
     // Rejoin with nothing but `join`: the address is remembered, the key is approved.
-    let m = member("member-rejoin", &[]);
+    let mut m = member("member-rejoin", &[]);
     joined(&[&coord, &m]);
     assert!(m.log().contains("rejoining swarm 'home'"), "{}", m.log());
+
+    // Removed in the dashboard: it leaves, and its key is no longer enough to come back.
+    let (st, r) = http(portal, "POST", "/api/nodes/m/remove", None);
+    assert_eq!((st, r["revoked"].as_bool()), (200, Some(true)), "{r}");
+    assert!(exits(&mut m, Duration::from_secs(30)), "a removed device leaves gracefully\n{}", m.log());
+    let mut m = member("member-removed", &[]);
+    assert!(!exits(&mut m, Duration::from_secs(30)));
+    assert!(m.log().contains("not approved"), "{}", m.log());
+    let m = member("member-readded", &["--passphrase", &pass]);
+    joined(&[&coord, &m]);
     drop(m);
 
     // The coordinator restarts: same swarm, same passphrase, same approvals.
@@ -480,6 +494,12 @@ fn devices_join_by_passphrase_and_rejoin_by_key() {
     let out = Command::new(env!("CARGO_BIN_EXE_clamor-node")).args(["swarms", "--config-dir", &member_cfg]).output().unwrap();
     let out = String::from_utf8_lossy(&out.stdout);
     assert!(out.contains("joined 'home'") && out.contains(&ctrl_s), "{out}");
+
+    // `leave` forgets it: joining again needs the passphrase.
+    let st = Command::new(env!("CARGO_BIN_EXE_clamor-node")).args(["leave", "home", "--purge", "--config-dir", &member_cfg, "--cache-dir", &dir.join("cache").display().to_string()]).status().unwrap();
+    assert!(st.success());
+    let out = Command::new(env!("CARGO_BIN_EXE_clamor-node")).args(["swarms", "--config-dir", &member_cfg]).output().unwrap();
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("joined 'home'"));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

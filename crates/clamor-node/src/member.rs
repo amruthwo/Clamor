@@ -219,6 +219,7 @@ async fn session(addr: &str, creds: &Credentials, allowed: &share::AllowedKeys, 
     // Fetch slices from other devices as ourselves.
     let mut engine = engine.clone();
     engine.share_key = Some(key);
+    engine.swarm_id = Some(ch.swarm_id.clone());
     let engine = &engine;
 
     // Reader runs in its own task so the select loop below never cancels a half-read frame.

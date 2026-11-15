@@ -216,7 +216,11 @@ $('set-save').onclick = async () => {
   if (res.note) { $('set-note').hidden = false; $('set-note').textContent = '⚠ ' + res.note; refresh(); return; }
   $('settings').close(); refresh();
 };
-$('set-drain').onclick = () => { $('settings').close(); drain(editing); };
+$('set-drain').onclick = () => {
+  if (!confirm('Remove ' + editing + ' from the swarm? It finishes its current work and leaves, and needs the passphrase to join again.')) return;
+  $('settings').close();
+  post('/api/nodes/' + encodeURIComponent(editing) + '/remove');
+};
 $('muster').onclick = () => post('/api/muster');
 
 function renderRoster(data) {

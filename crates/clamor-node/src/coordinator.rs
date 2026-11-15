@@ -43,6 +43,8 @@ pub struct NodeEntry {
     pub paused: Option<String>,
     /// About the last settings change (e.g. it needs a restart to take effect).
     pub settings_note: Option<String>,
+    /// The device's key in this swarm (None for the coordinator itself).
+    pub key: Option<String>,
 }
 
 /// Who may join: the swarm's profile (id, passphrase, approved device keys) and the
@@ -71,6 +73,21 @@ impl SwarmAuth {
         a.extend(self.approved_keys());
         a.insert(crate::auth::key_hex(&self.key.verifying_key()));
     }
+    /// Withdraw a device's approval: it needs the passphrase to join again. Returns whether
+    /// it was approved.
+    pub fn revoke(&mut self, key: &str) -> bool {
+        let before = self.profile.approved.len();
+        self.profile.approved.retain(|d| d.key != key);
+        let removed = self.profile.approved.len() != before;
+        if removed {
+            if let Err(e) = self.profile.save(&self.config_dir) {
+                eprintln!("could not save the swarm profile: {e:#}");
+            }
+            self.refresh_allowed();
+        }
+        removed
+    }
+
     /// Approve a device that proved it knows the passphrase.
     fn approve(&mut self, key: &str, name: &str) {
         if !self.profile.approved.iter().any(|d| d.key == key) {
@@ -106,7 +123,7 @@ impl Swarm {
     }
 
     /// A node that held a pipeline stage is gone: that pipeline cannot run any more.
-    fn node_lost(&mut self, id: &NodeId, why: &str) {
+    pub fn node_lost(&mut self, id: &NodeId, why: &str) {
         if let Some(p) = self.pipeline.as_mut() {
             let epoch = p.epoch;
             if let Some(i) = p.stages.iter().position(|s| &s.node == id) {
@@ -117,6 +134,18 @@ impl Swarm {
 }
 
 pub type Shared = Arc<Mutex<Swarm>>;
+
+impl Swarm {
+    /// Tell every connected device which keys are approved now.
+    pub fn broadcast_approved(&self) {
+        let keys = self.auth.approved_keys();
+        for e in self.nodes.values() {
+            if let Some(t) = &e.tx {
+                let _ = t.send(Message::Approved { keys: keys.clone() });
+            }
+        }
+    }
+}
 
 /// Add the coordinator's own hardware to the roster so it takes part in planning.
 /// Add the coordinator's own device to the roster before the portal opens (probe and model scan
@@ -157,6 +186,7 @@ pub async fn register_self(shared: Shared, id: NodeId, owner_policy: Option<Poli
             share_port,
             paused: None,
             settings_note: None,
+            key: None,
         },
     );
 }
@@ -269,12 +299,7 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
             sw.auth.approve(&proof.device_key, &info.id.0);
             println!("{} approved: it knows the passphrase (key {}…)", info.id, &proof.device_key[..16]);
             // Everyone's share servers must now accept the new device.
-            let keys = sw.auth.approved_keys();
-            for e in sw.nodes.values() {
-                if let Some(t) = &e.tx {
-                    let _ = t.send(Message::Approved { keys: keys.clone() });
-                }
-            }
+            sw.broadcast_approved();
         }
         r.map(|(_, cp)| (cp, sw.auth.approved_keys()))
     };
@@ -286,6 +311,7 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
             return Ok(());
         }
     };
+    let device_key = proof.device_key.clone();
     let welcome_auth = WelcomeAuth { signature: cproof.signature, confirm: cproof.confirm, approved_keys };
 
     let (tx, mut rx) = unbounded_channel::<Message>();
@@ -327,6 +353,7 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
                     share_port,
                     paused: None,
                     settings_note: None,
+                    key: Some(device_key.clone()),
                 },
             );
             Admission::Ok { generation, swarm, coordinator, cached_bench: cached, quick: sw.quick_bench }

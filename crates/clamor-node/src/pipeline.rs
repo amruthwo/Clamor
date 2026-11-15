@@ -285,6 +285,8 @@ pub async fn start(shared: &Shared, req: PipelineRequest) -> Result<()> {
         tokio::task::spawn_blocking(move || crate::share::fetch_slice(&src, &name, &id, 0..0, false, key.as_ref(), &d, |_, _| {}))
             .await?
             .with_context(|| format!("fetching {}'s metadata from {}", req.model, holders[0]))?;
+        crate::cache::used(&engine.cache_dir, &dest, engine.swarm_id.as_deref());
+        crate::cache::enforce_cap(&engine.cache_dir, engine.cache_max, &dest);
         dest
     };
     // The header is a C handle (not Send), so it lives only in this block, never across an await.

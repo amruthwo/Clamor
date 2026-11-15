@@ -70,6 +70,29 @@ clamor-node swarms
 On the coordinator this also lists the passphrase and the devices it has approved. Add `--scan`
 to also list the swarms announced on the network right now.
 
+## Leaving
+
+- **For now:** stop `clamor-node` (Ctrl-C). The device finishes what it is doing and leaves; it
+  can come back any time with `clamor-node join`.
+- **For good:** `clamor-node leave home` makes the device forget the swarm. Joining it again needs
+  the passphrase. Add `--purge` to also delete the model pieces it downloaded for that swarm
+  (pieces another swarm also uses are kept).
+- **Removing someone else's device:** in the dashboard, open the device's **Settings** and press
+  **Remove from swarm**. It finishes its work and leaves, and its key is no longer approved: it
+  needs the passphrase to join again. To keep it out for good, also change the passphrase
+  (restart the coordinator with `--passphrase "new words"`).
+- **Deleting a swarm you coordinate:** `clamor-node leave home --delete-swarm` deletes its
+  passphrase and approvals. Starting the coordinator again makes a new swarm that every device
+  has to join afresh.
+
+## Disk space
+
+Devices that do not have a model download only the pieces (layers) they run, and keep them for
+next time in Clamor's cache folder (`~/.cache/clamor/slices` on Linux). The cache stays under
+32 GB by default: beyond that, the pieces used least recently are deleted. Change the limit with
+`--cache-max-gb 10`, or move the folder with `--cache-dir`. `clamor-node swarms` shows how much
+it holds. Deleting the folder is always safe.
+
 ## How it stays safe
 
 - **The passphrase never crosses the network.** The device and the coordinator use it to agree on a
@@ -94,8 +117,7 @@ you: `device.key` is the device's secret, and `swarms/` holds one file per swarm
 - The connections are not encrypted yet: someone on your network could read what devices send each
   other (prompts and replies included), although they cannot join or pretend to be a device.
 - The dashboard has no login: anyone on your network can open it.
-- Removing a single device's approval, and adding a device with a one-time code or QR code from
-  the dashboard, are coming next.
+- Adding a device with a one-time code or QR code from the dashboard is coming next.
 - Finding the swarm on the network is tested on Linux. Some networks (guest Wi-Fi, some
   corporate networks) block it; give the address instead.
 
@@ -110,4 +132,5 @@ Only run Clamor on a network you trust until these are done.
 | `this swarm's coordinator key changed since you joined` | The coordinator was reinstalled, its config folder was deleted, or something else is answering at its address. If you expected this, join again with `--passphrase`. |
 | `several swarms on the network` | Name the one you want: `--swarm home`. |
 | `no swarm found on the network` | The coordinator is not running, is started with `--no-mdns` or listens on one address only (`--bind`), or your network blocks discovery. Give its address. |
+| `this device is not approved in this swarm` | It was removed from the swarm (or the swarm was deleted and started again). Join with the passphrase. |
 | `none of the swarms this device joined is on the network` | To join a new swarm, name it with `--swarm` or give its address. |

@@ -25,6 +25,10 @@ pub struct EngineConfig {
     /// Signs requests for slices from other devices (this device's key in the swarm; set once
     /// it has joined).
     pub share_key: Option<ed25519_dalek::SigningKey>,
+    /// The swarm this device works for (slices in the cache are recorded against it).
+    pub swarm_id: Option<String>,
+    /// Size cap of the slice cache, bytes.
+    pub cache_max: u64,
 }
 
 impl EngineConfig {
@@ -142,6 +146,8 @@ pub async fn start(cfg: &EngineConfig, a: &Assignment, progress: impl FnMut(u64,
             tokio::task::spawn_blocking(move || crate::share::fetch_slice(&src, &name, &id, layers, embed, key.as_ref(), &d, progress))
                 .await?
                 .with_context(|| format!("fetching layers {}..{} of {} from {}", a.layer_start, a.layer_end, a.model, a.source.as_deref().unwrap_or("")))?;
+            crate::cache::used(&cfg.cache_dir, &dest, cfg.swarm_id.as_deref());
+            crate::cache::enforce_cap(&cfg.cache_dir, cfg.cache_max, &dest);
             dest
         }
         _ => resolve_model(&cfg.models_dir, &a.model)?,

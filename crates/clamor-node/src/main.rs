@@ -2,6 +2,7 @@
 
 mod auth;
 mod build_info;
+mod cache;
 mod coordinator;
 mod discovery;
 mod member;
@@ -115,6 +116,23 @@ enum Cmd {
         #[command(flatten)]
         policy: PolicyArgs,
     },
+    /// Forget a swarm this device joined: it will not rejoin it without the passphrase.
+    /// (To leave a running swarm for now, stop clamor-node with Ctrl-C or drain the device in
+    /// the dashboard.)
+    Leave {
+        /// The swarm's name (may be left out if this device joined only one).
+        swarm: Option<String>,
+        /// Also delete the cached model slices only that swarm used.
+        #[arg(long)]
+        purge: bool,
+        /// Delete a swarm this device coordinates: its passphrase and approved devices. Every
+        /// device will have to join the new swarm with a new passphrase.
+        #[arg(long)]
+        delete_swarm: bool,
+        /// The slice cache folder, if not the default.
+        #[arg(long)]
+        cache_dir: Option<std::path::PathBuf>,
+    },
     /// List the swarms this device coordinates or has joined.
     Swarms {
         /// Also list the swarms advertised on the local network now.
@@ -214,13 +232,22 @@ struct EngineArgs {
     /// folder, e.g. ~/.cache/clamor). Delete it any time to reclaim space.
     #[arg(long)]
     cache_dir: Option<std::path::PathBuf>,
+    /// Most disk space the cache may use, in GB. The least recently used slices are removed
+    /// beyond that.
+    #[arg(long, default_value_t = 32.0)]
+    cache_max_gb: f64,
+}
+
+fn default_cache_dir() -> std::path::PathBuf {
+    dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("clamor").join("slices")
 }
 
 impl EngineArgs {
     /// `share_key`: signs this device's requests for model slices.
-    fn config(self, share_key: Option<ed25519_dalek::SigningKey>) -> stage::EngineConfig {
-        let cache_dir = self.cache_dir.unwrap_or_else(|| dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("clamor").join("slices"));
-        stage::EngineConfig { models_dir: self.models, device: self.device, threads: self.threads, cache_dir, share_key }
+    fn config(self, share_key: Option<ed25519_dalek::SigningKey>, swarm_id: Option<String>) -> stage::EngineConfig {
+        let cache_dir = self.cache_dir.unwrap_or_else(default_cache_dir);
+        let cache_max = (self.cache_max_gb.max(0.0) * 1e9) as u64;
+        stage::EngineConfig { models_dir: self.models, device: self.device, threads: self.threads, cache_dir, share_key, swarm_id, cache_max }
     }
 }
 
@@ -289,7 +316,7 @@ async fn run(cmd: Cmd, priority: Option<Priority>) -> Result<()> {
             let config_dir = neighbour::config_dir();
             let profile = auth::CoordinatorProfile::load_or_create(&config_dir, &swarm, passphrase.as_deref())?;
             let key = auth::Device::load_or_create(&config_dir)?.swarm_key(&profile.swarm_id);
-            let engine = engine.config(Some(key.clone()));
+            let engine = engine.config(Some(key.clone()), Some(profile.swarm_id.clone()));
             engine.validate()?; // fail fast on a bad --device
             println!("swarm '{swarm}' passphrase: {}", profile.passphrase);
             println!("add a device: clamor-node join {} --passphrase {}", join_hint(&bind), profile.passphrase);
@@ -329,10 +356,32 @@ async fn run(cmd: Cmd, priority: Option<Priority>) -> Result<()> {
                 Some(a) => format!("{a}:{DEFAULT_PORT}"),
                 None => find_swarm(&config_dir, swarm.as_deref(), no_mdns).await?,
             };
-            let engine = engine.config(None); // the key is per swarm: set once joined
+            let engine = engine.config(None, None); // the key is per swarm: set once joined
             engine.validate()?;
             let creds = member::Credentials { device: auth::Device::load_or_create(&config_dir)?, passphrase, config_dir };
             member::join(addr, creds, id, engine, updates.policy(), policy.policy(priority), !no_mdns).await
+        }
+        Cmd::Leave { swarm, purge, delete_swarm, cache_dir } => {
+            let config_dir = neighbour::config_dir();
+            let cache_dir = cache_dir.unwrap_or_else(default_cache_dir);
+            let (id, name) = if delete_swarm {
+                let all = auth::CoordinatorProfile::all(&config_dir);
+                let p = pick(all.iter().map(|p| (&p.swarm_id, &p.name)), swarm.as_deref(), "coordinates")?;
+                auth::CoordinatorProfile::delete(&config_dir, &p.0)?;
+                println!("deleted swarm '{}': its passphrase and approvals are gone", p.1);
+                p
+            } else {
+                let all = auth::MemberProfile::all(&config_dir);
+                let p = pick(all.iter().map(|p| (&p.swarm_id, &p.name)), swarm.as_deref(), "has joined")?;
+                auth::MemberProfile::delete(&config_dir, &p.0)?;
+                println!("forgot swarm '{}': joining it again needs its passphrase", p.1);
+                p
+            };
+            if purge {
+                let (n, bytes) = cache::purge(&cache_dir, &id);
+                println!("removed {n} cached slice(s) of '{name}' ({:.1} GB)", bytes as f64 / 1e9);
+            }
+            Ok(())
         }
         Cmd::Swarms { scan } => {
             let config_dir = neighbour::config_dir();
@@ -350,6 +399,8 @@ async fn run(cmd: Cmd, priority: Option<Priority>) -> Result<()> {
             for p in joined {
                 println!("joined '{}' at {} (last joined {})", p.name, p.addresses.first().map(String::as_str).unwrap_or("?"), ago(p.last_joined_unix));
             }
+            let cache = default_cache_dir();
+            println!("model slice cache: {:.1} GB in {}", cache::size(&cache) as f64 / 1e9, cache.display());
             if scan {
                 let found = tokio::task::spawn_blocking(|| discovery::browse(std::time::Duration::from_secs(3))).await??;
                 if found.is_empty() {
@@ -426,4 +477,16 @@ async fn find_swarm(config_dir: &std::path::Path, want: Option<&str>, no_mdns: b
         why = "this device has not joined a swarm yet".into();
     }
     anyhow::bail!("{why}. Give the coordinator's address: clamor-node join <coordinator> --passphrase <words>")
+}
+
+/// One (id, name) of `all`: the one called `want`, or the only one.
+fn pick<'a>(all: impl Iterator<Item = (&'a String, &'a String)>, want: Option<&str>, verb: &str) -> Result<(String, String)> {
+    let all: Vec<(String, String)> = all.map(|(i, n)| (i.clone(), n.clone())).collect();
+    let names = || all.iter().map(|p| p.1.as_str()).collect::<Vec<_>>().join(", ");
+    match want {
+        Some(w) => all.iter().find(|p| p.1 == w).cloned().ok_or_else(|| anyhow::anyhow!("this device {verb} no swarm called '{w}' (it {verb}: {})", if all.is_empty() { "none".into() } else { names() })),
+        None if all.len() == 1 => Ok(all[0].clone()),
+        None if all.is_empty() => anyhow::bail!("this device {verb} no swarms"),
+        None => anyhow::bail!("which swarm? this device {verb}: {}", names()),
+    }
 }

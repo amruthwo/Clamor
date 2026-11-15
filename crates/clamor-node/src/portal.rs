@@ -26,6 +26,7 @@ pub async fn serve(bind: String, shared: Shared) -> anyhow::Result<()> {
         .route("/api/plan", get(plan_handler))
         .route("/api/muster", post(muster))
         .route("/api/nodes/{id}/drain", post(drain))
+        .route("/api/nodes/{id}/remove", post(remove))
         .route("/api/nodes/{id}/policy", post(set_policy))
         .route("/api/pipeline", get(pipeline_status).post(pipeline_start).delete(pipeline_stop))
         .route("/api/generate", post(generate))
@@ -167,6 +168,27 @@ async fn drain(State(shared): State<Shared>, Path(id): Path<String>) -> ApiResul
     entry.state = NodeState::Draining;
     entry.report.policy.participation = Participation::Draining;
     Ok(Json(json!({ "draining": id })))
+}
+
+/// Remove a device from the swarm: withdraw its approval (it needs the passphrase to join
+/// again), let it finish its work and leave, and drop it from the roster.
+async fn remove(State(shared): State<Shared>, Path(id): Path<String>) -> ApiResult {
+    let id = NodeId(id);
+    let mut sw = shared.lock().unwrap();
+    if id == sw.coordinator {
+        return Err((StatusCode::BAD_REQUEST, "the coordinator cannot remove itself".into()));
+    }
+    let entry = sw.nodes.get(&id).ok_or((StatusCode::NOT_FOUND, format!("unknown node {id}")))?;
+    let (key, tx) = (entry.key.clone(), entry.tx.clone());
+    let revoked = key.as_deref().is_some_and(|k| sw.auth.revoke(k));
+    if let Some(tx) = tx {
+        let _ = tx.send(Message::Drain { grace_secs: 30 });
+    }
+    sw.node_lost(&id, "removed from the swarm");
+    sw.nodes.remove(&id);
+    sw.broadcast_approved();
+    println!("{id} removed from the swarm{}", if revoked { "; its key is no longer approved" } else { "" });
+    Ok(Json(json!({ "removed": id, "revoked": revoked })))
 }
 
 /// Change a device's settings. Pausing, battery and priority take effect within a heartbeat;

@@ -209,6 +209,9 @@ impl CoordinatorProfile {
     pub fn save(&self, config_dir: &Path) -> Result<()> {
         write_private(&Self::path(config_dir, &self.swarm_id), &serde_json::to_vec_pretty(self)?)
     }
+    pub fn delete(config_dir: &Path, swarm_id: &str) -> Result<()> {
+        Ok(std::fs::remove_file(Self::path(config_dir, swarm_id))?)
+    }
     pub fn all(config_dir: &Path) -> Vec<Self> {
         let mut v: Vec<Self> = std::fs::read_dir(swarms_dir(config_dir))
             .into_iter()
@@ -228,6 +231,9 @@ impl MemberProfile {
     }
     pub fn load(config_dir: &Path, swarm_id: &str) -> Option<Self> {
         load_json(&Self::path(config_dir, swarm_id))
+    }
+    pub fn delete(config_dir: &Path, swarm_id: &str) -> Result<()> {
+        Ok(std::fs::remove_file(Self::path(config_dir, swarm_id))?)
     }
     pub fn all(config_dir: &Path) -> Vec<Self> {
         let mut v: Vec<Self> = std::fs::read_dir(swarms_dir(config_dir))

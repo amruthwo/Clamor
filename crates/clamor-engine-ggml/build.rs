@@ -73,7 +73,8 @@ fn main() {
                 }
             }
         }
-        "windows" => {}
+        // ggml-cpu reads CPU info from the registry (RegOpenKeyExA etc.).
+        "windows" => println!("cargo:rustc-link-lib=advapi32"),
         "android" => {
             println!("cargo:rustc-link-lib=c++_shared");
             println!("cargo:rustc-link-lib=log");

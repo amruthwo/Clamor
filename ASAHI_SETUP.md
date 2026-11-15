@@ -63,6 +63,6 @@ Asahi or on hosted runners. Run `examples/devices` by hand on a real NVIDIA/Andr
 
 ## 5. What you cannot do on this machine
 
-- Metal: needs macOS. CI covers build and CPU/Metal test on `macos-14` (Apple silicon runner; Metal availability in
+- Metal: needs macOS. CI covers build and CPU/Metal test on `macos-15` (Apple silicon runner; Metal availability in
   hosted VMs can be limited, so a failure in the Metal matmul there may be the runner, not the code).
 - CUDA: needs an NVIDIA machine to run. Android: build via CI (no official NDK for aarch64 Linux).

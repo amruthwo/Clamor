@@ -63,7 +63,7 @@ fn cpu() -> usize {
 }
 
 fn opts(wire: DType, n_ctx: u32) -> ExecutorOptions {
-    ExecutorOptions { stage: StageOptions { device: cpu(), n_ctx, n_threads: 2, embed: None }, wire, sampling: Sampling::default(), eos: Some(vec![]) }
+    ExecutorOptions { stage: StageOptions { device: cpu(), n_ctx, n_threads: 2, ..Default::default() }, wire, sampling: Sampling::default(), eos: Some(vec![]) }
 }
 
 fn executors(f: &Fixture, bounds: &[u32], o: &ExecutorOptions) -> Vec<GgmlExecutor> {
@@ -121,6 +121,7 @@ async fn spawn_ring(execs: Vec<GgmlExecutor>, window: u32) -> Ring {
                 downstream: if n == 1 { None } else { Some(addrs[(i + 1) % n]) },
                 window,
                 connect_timeout: Duration::from_secs(5),
+                stall_timeout: clamor_transport::stage::DEFAULT_STALL_TIMEOUT,
             };
             run_stage(cfg, l, exec)
         })

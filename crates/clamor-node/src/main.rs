@@ -3,6 +3,7 @@
 mod build_info;
 mod coordinator;
 mod member;
+mod neighbour;
 mod pipeline;
 mod portal;
 mod share;
@@ -21,6 +22,35 @@ use std::sync::{Arc, Mutex};
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
+    /// CPU priority for Clamor's work. `low` (default) lets your own apps always go first, so a
+    /// busy swarm never makes this machine unresponsive; `normal` competes with them equally.
+    #[arg(long, global = true, value_enum, default_value_t = Priority::Low)]
+    priority: Priority,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum Priority {
+    Low,
+    Normal,
+}
+
+/// Lower this process's CPU priority. Called before the async runtime starts, because on Linux
+/// priority is per thread and new threads inherit their creator's.
+fn lower_priority() {
+    #[cfg(unix)]
+    unsafe {
+        // nice 10: below interactive apps, above batch jobs.
+        if libc::setpriority(libc::PRIO_PROCESS, 0, 10) != 0 {
+            eprintln!("could not lower CPU priority (continuing at normal priority)");
+        }
+    }
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, SetPriorityClass, BELOW_NORMAL_PRIORITY_CLASS};
+        if SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS) == 0 {
+            eprintln!("could not lower CPU priority (continuing at normal priority)");
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -66,6 +96,8 @@ enum Cmd {
         quick_bench: bool,
         #[command(flatten)]
         updates: UpdateArgs,
+        #[command(flatten)]
+        policy: PolicyArgs,
     },
     /// Join a swarm.
     Join {
@@ -79,7 +111,61 @@ enum Cmd {
         engine: EngineArgs,
         #[command(flatten)]
         updates: UpdateArgs,
+        #[command(flatten)]
+        policy: PolicyArgs,
     },
+}
+
+/// How much of this device Clamor may use. Unset options keep the defaults for the kind of
+/// device (laptops and phones: idle-only, plugged in only, half the RAM and CPU; desktops: full,
+/// 70% RAM, 80% CPU).
+#[derive(clap::Args)]
+struct PolicyArgs {
+    /// `full`: always take work. `idle-only`: step aside while you are using the device.
+    #[arg(long, value_enum)]
+    participation: Option<ParticipationArg>,
+    /// Keep working on battery (laptops and phones otherwise pause until plugged in).
+    #[arg(long)]
+    allow_battery: bool,
+    /// Share of RAM Clamor may use, 0.05-0.95.
+    #[arg(long)]
+    ram_share: Option<f32>,
+    /// Share of the performance cores Clamor may use, 0.05-1.0.
+    #[arg(long)]
+    cpu_share: Option<f32>,
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum ParticipationArg {
+    Full,
+    IdleOnly,
+}
+
+impl PolicyArgs {
+    /// The owner's settings on top of the defaults for this kind of device, or None if the
+    /// owner set nothing (the coordinator then applies its defaults).
+    fn policy(&self) -> Option<Policy> {
+        if self.participation.is_none() && !self.allow_battery && self.ram_share.is_none() && self.cpu_share.is_none() {
+            return None;
+        }
+        let mut p = Policy::default_for(clamor_muster::probe::probe_node(NodeId("local".into())).class);
+        if let Some(x) = self.participation {
+            p.participation = match x {
+                ParticipationArg::Full => Participation::Full,
+                ParticipationArg::IdleOnly => Participation::IdleOnly,
+            };
+        }
+        if self.allow_battery {
+            p.require_plugged_in = false;
+        }
+        if let Some(r) = self.ram_share {
+            p.max_ram_fraction = r.clamp(0.05, 0.95);
+        }
+        if let Some(c) = self.cpu_share {
+            p.max_cpu_fraction = c.clamp(0.05, 1.0);
+        }
+        Some(p)
+    }
 }
 
 #[derive(clap::Args)]
@@ -125,9 +211,16 @@ impl EngineArgs {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    match Cli::parse().cmd {
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+    if cli.priority == Priority::Low && matches!(cli.cmd, Cmd::Coordinator { .. } | Cmd::Join { .. }) {
+        lower_priority();
+    }
+    tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(run(cli.cmd))
+}
+
+async fn run(cmd: Cmd) -> Result<()> {
+    match cmd {
         Cmd::Version { json } => {
             let b = build_info::current();
             if json {
@@ -180,15 +273,16 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Coordinator { swarm, bind, portal, token, id, engine, data_port, quick_bench, updates } => {
+        Cmd::Coordinator { swarm, bind, portal, token, id, engine, data_port, quick_bench, updates, policy } => {
             let id = NodeId(id.unwrap_or_else(|| probe::default_node_id().0));
             let engine = engine.config(token.clone());
             engine.validate()?; // fail fast on a bad --device
             // Share our models with members that lack them (layer slices), behind the join token.
             let share_port = share::serve(DEFAULT_SHARE_PORT, engine.models_dir.clone(), token.clone()).await?;
             let shared = Arc::new(Mutex::new(coordinator::Swarm::new(swarm, token, id.clone(), engine, data_port, quick_bench, Some(share_port))));
-            tokio::spawn(coordinator::register_self(shared.clone(), id));
+            tokio::spawn(coordinator::register_self(shared.clone(), id, policy.policy()));
             tokio::spawn(coordinator::reaper(shared.clone()));
+            tokio::spawn(coordinator::monitor_self(shared.clone()));
             tokio::spawn(coordinator::updates(shared.clone(), updates.policy()));
             let portal_shared = shared.clone();
             tokio::spawn(async move {
@@ -198,11 +292,11 @@ async fn main() -> Result<()> {
             });
             coordinator::run_listener(&bind, shared).await
         }
-        Cmd::Join { addr, token, id, engine, updates } => {
+        Cmd::Join { addr, token, id, engine, updates, policy } => {
             let addr = if addr.contains(':') { addr } else { format!("{addr}:{DEFAULT_PORT}") };
             let engine = engine.config(token.clone());
             engine.validate()?;
-            member::join(addr, token, id, engine, updates.policy()).await
+            member::join(addr, token, id, engine, updates.policy(), policy.policy()).await
         }
     }
 }

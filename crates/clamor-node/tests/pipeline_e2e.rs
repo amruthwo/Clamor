@@ -120,10 +120,10 @@ fn coordinator_and_two_members_generate_through_the_api() {
     let (ctrl, portal, data) = (free_port(), free_port(), free_port_run(3));
     let (ctrl_s, portal_s, data_s) = (format!("127.0.0.1:{ctrl}"), format!("127.0.0.1:{portal}"), data.to_string());
 
-    let coord = spawn(&dir, "coordinator", &["coordinator", "--swarm", "t", "--token", "T", "--id", "coord", "--bind", &ctrl_s, "--portal", &portal_s, "--models", &models, "--data-port", &data_s, "--quick-bench", "--no-update-check"]);
+    let coord = spawn(&dir, "coordinator", &["coordinator", "--swarm", "t", "--token", "T", "--id", "coord", "--bind", &ctrl_s, "--portal", &portal_s, "--models", &models, "--data-port", &data_s, "--quick-bench", "--no-update-check", "--participation", "full", "--allow-battery"]);
     wait_for("the portal", Duration::from_secs(30), &[&coord], || TcpStream::connect(("127.0.0.1", portal)).is_ok());
-    let a = spawn(&dir, "member-a", &["join", &ctrl_s, "--token", "T", "--id", "a", "--models", &models, "--no-update-check"]);
-    let b = spawn(&dir, "member-b", &["join", &ctrl_s, "--token", "T", "--id", "b", "--models", &models, "--no-update-check"]);
+    let a = spawn(&dir, "member-a", &["join", &ctrl_s, "--token", "T", "--id", "a", "--models", &models, "--no-update-check", "--participation", "full", "--allow-battery"]);
+    let b = spawn(&dir, "member-b", &["join", &ctrl_s, "--token", "T", "--id", "b", "--models", &models, "--no-update-check", "--participation", "full", "--allow-battery"]);
     let all = [&coord, &a, &b];
     wait_for("members to finish the muster", Duration::from_secs(120), &all, || {
         let (_, r) = http(portal, "GET", "/api/roster", None);
@@ -177,6 +177,31 @@ fn coordinator_and_two_members_generate_through_the_api() {
     let p2 = start(json!([{ "node": "coord", "layers": [0, 1] }, { "node": "a", "layers": [1, 3] }, { "node": "b", "layers": [3, 4] }]));
     assert!(p2["pipeline"]["epoch"].as_u64() > p["pipeline"]["epoch"].as_u64());
     assert_eq!(generate(), greedy, "coordinator with layers + 2 members");
+
+    // Limits: a's RAM share shrunk to almost nothing; a pipeline using a must be refused up
+    // front with the numbers, not loaded until the machine swaps.
+    let policy = |id: &str, p: Value| {
+        let (st, r) = http(portal, "POST", &format!("/api/nodes/{id}/policy"), Some(p));
+        assert_eq!(st, 200, "{r}");
+    };
+    let full = json!({ "participation": "full", "max_ram_fraction": 0.7, "max_cpu_fraction": 0.8, "require_plugged_in": false });
+    policy("a", json!({ "participation": "full", "max_ram_fraction": 0.0001, "max_cpu_fraction": 0.8, "require_plugged_in": false }));
+    let (st, r) = http(portal, "POST", "/api/pipeline", Some(json!({ "model": "tiny.gguf", "ctx": 64, "stages": [{ "node": "a", "layers": [0, 2] }, { "node": "b", "layers": [2, 4] }] })));
+    assert_eq!(st, 400, "{r}");
+    let msg = r["text"].as_str().unwrap_or("");
+    assert!(msg.contains("on a") && msg.contains("may use"), "explains which device and why: {msg}");
+    policy("a", full.clone());
+    // The refused request left the running pipeline alone.
+    assert_eq!(generate(), greedy, "still serving after a refused pipeline");
+
+    // Pausing: a paused device takes no new requests (within one heartbeat), then resumes.
+    policy("a", json!({ "participation": "paused", "max_ram_fraction": 0.7, "max_cpu_fraction": 0.8, "require_plugged_in": false }));
+    wait_for("a's pause to reach the coordinator", Duration::from_secs(20), &all, || {
+        let (st, r) = http(portal, "POST", "/api/generate", Some(json!({ "tokens": PROMPT, "max_new": 2 })));
+        st == 503 && r["text"].as_str().unwrap_or("").contains("paused")
+    });
+    policy("a", full);
+    wait_for("a to resume", Duration::from_secs(20), &all, || http(portal, "POST", "/api/generate", Some(json!({ "tokens": PROMPT, "max_new": 2 }))).0 == 200);
 
     // 3. Requests that cannot work are refused up front.
     for (bad, why) in [
@@ -234,10 +259,10 @@ fn a_model_on_one_device_is_shared_with_the_others() {
 
     let (ctrl, portal, data) = (free_port(), free_port(), free_port_run(3));
     let (ctrl_s, portal_s, data_s) = (format!("127.0.0.1:{ctrl}"), format!("127.0.0.1:{portal}"), data.to_string());
-    let coord = spawn(&dir, "coordinator", &["coordinator", "--token", "T", "--id", "coord", "--bind", &ctrl_s, "--portal", &portal_s, "--models", &coord_models, "--cache-dir", &coord_cache, "--data-port", &data_s, "--quick-bench", "--no-update-check"]);
+    let coord = spawn(&dir, "coordinator", &["coordinator", "--token", "T", "--id", "coord", "--bind", &ctrl_s, "--portal", &portal_s, "--models", &coord_models, "--cache-dir", &coord_cache, "--data-port", &data_s, "--quick-bench", "--no-update-check", "--participation", "full", "--allow-battery"]);
     wait_for("the portal", Duration::from_secs(30), &[&coord], || TcpStream::connect(("127.0.0.1", portal)).is_ok());
-    let a = spawn(&dir, "member-a", &["join", &ctrl_s, "--token", "T", "--id", "a", "--models", &a_models, "--cache-dir", &a_cache, "--no-update-check"]);
-    let b = spawn(&dir, "member-b", &["join", &ctrl_s, "--token", "T", "--id", "b", "--models", &b_models, "--cache-dir", &b_cache, "--no-update-check"]);
+    let a = spawn(&dir, "member-a", &["join", &ctrl_s, "--token", "T", "--id", "a", "--models", &a_models, "--cache-dir", &a_cache, "--no-update-check", "--participation", "full", "--allow-battery"]);
+    let b = spawn(&dir, "member-b", &["join", &ctrl_s, "--token", "T", "--id", "b", "--models", &b_models, "--cache-dir", &b_cache, "--no-update-check", "--participation", "full", "--allow-battery"]);
     let all = [&coord, &a, &b];
     let mut b_share = 0;
     wait_for("members to finish the muster", Duration::from_secs(120), &all, || {

@@ -304,6 +304,10 @@ pub enum Message {
         /// Port serving layer slices of those models (see `DEFAULT_SHARE_PORT`).
         #[serde(default)]
         share_port: Option<u16>,
+        /// The device owner's own policy settings, if they gave any (they win over the
+        /// coordinator's defaults for this kind of device).
+        #[serde(default)]
+        policy: Option<Policy>,
     },
     /// The node's models changed (a file was added or removed).
     Inventory {
@@ -327,6 +331,10 @@ pub enum Message {
         /// A newer release this node could update to.
         #[serde(default)]
         update_available: Option<String>,
+        /// Why this node is not taking new work right now (on battery, owner busy, paused by
+        /// the owner), if it isn't. Work already running finishes.
+        #[serde(default)]
+        paused: Option<String>,
     },
     Ping {
         seq: u64,
@@ -404,6 +412,13 @@ pub enum Message {
         /// The model's `ModelInfo::id`, so a node never mixes up two files with one name.
         #[serde(default)]
         model_id: Option<String>,
+        /// Most requests in flight at once, sized so every stage's KV caches fit in memory.
+        #[serde(default)]
+        max_requests: Option<u32>,
+        /// Memory this stage is expected to use (weights + KV caches + working buffers). The
+        /// node refuses the stage if that would exceed what it may use.
+        #[serde(default)]
+        need_bytes: Option<u64>,
     },
     /// Download progress of a stage's slice.
     ShardProgress {
@@ -506,7 +521,7 @@ mod tests {
 
     #[test]
     fn hello_roundtrip() {
-        let msg = Message::Hello { proto: PROTOCOL_VERSION, info: sample_info(), bench_port: 7422, join_token: None, build: None, models: vec![ModelInfo { name: "m.gguf".into(), size: 9, id: "ab".into() }], share_port: Some(7423) };
+        let msg = Message::Hello { proto: PROTOCOL_VERSION, info: sample_info(), bench_port: 7422, join_token: None, build: None, models: vec![ModelInfo { name: "m.gguf".into(), size: 9, id: "ab".into() }], share_port: Some(7423), policy: None };
         let mut buf = Vec::new();
         write_frame(&mut buf, &msg).unwrap();
         let back = read_frame(&mut buf.as_slice()).unwrap();
@@ -543,8 +558,8 @@ mod tests {
     fn older_hello_and_heartbeat_still_parse() {
         let hb = r#"{"type":"heartbeat","cpu_load":0.5,"ram_available_bytes":1,"power":null,"running_tasks":0}"#;
         assert!(matches!(decode(hb.as_bytes()).unwrap(), Message::Heartbeat { update_available: None, .. }));
-        let mut hello = serde_json::to_value(Message::Hello { proto: PROTOCOL_VERSION, info: sample_info(), bench_port: 1, join_token: None, build: None, models: vec![], share_port: None }).unwrap();
-        for k in ["build", "models", "share_port"] {
+        let mut hello = serde_json::to_value(Message::Hello { proto: PROTOCOL_VERSION, info: sample_info(), bench_port: 1, join_token: None, build: None, models: vec![], share_port: None, policy: None }).unwrap();
+        for k in ["build", "models", "share_port", "policy"] {
             hello.as_object_mut().unwrap().remove(k);
         }
         assert!(matches!(decode(hello.to_string().as_bytes()).unwrap(), Message::Hello { build: None, .. }));
@@ -568,6 +583,8 @@ mod tests {
             sampling: SamplingParams { temperature: 0.7, top_k: 40, seed: 5 },
             source: Some("http://192.168.1.20:7423".into()),
             model_id: Some("ab12".into()),
+            max_requests: Some(4),
+            need_bytes: Some(1 << 30),
         };
         let mut buf = Vec::new();
         write_frame(&mut buf, &msg).unwrap();

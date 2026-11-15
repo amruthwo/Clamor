@@ -96,6 +96,12 @@ pub struct Assignment {
     /// Fetch this stage's slice from here (`http://host:port`) instead of a local file.
     pub source: Option<String>,
     pub model_id: Option<String>,
+    /// Most requests in flight at once (sized by the coordinator to fit memory).
+    pub max_requests: Option<u32>,
+    /// Expected memory use; refused if it does not fit this device's budget.
+    pub need_bytes: Option<u64>,
+    /// This device's policy (RAM and CPU shares). Not sent: each node knows its own.
+    pub policy: clamor_proto::Policy,
 }
 
 pub struct Started {
@@ -110,6 +116,21 @@ pub struct Started {
 /// Load this stage's layers, bind its data port and join the ring. Returns once loaded; the
 /// links to the neighbours come up in the background as they start too.
 pub async fn start(cfg: &EngineConfig, a: &Assignment, progress: impl FnMut(u64, u64) + Send + 'static) -> Result<Started> {
+    // Check memory before downloading or loading anything: swapping would freeze the machine.
+    if let Some(need) = a.need_bytes {
+        let load = tokio::task::spawn_blocking(|| clamor_muster::probe::LoadSampler::new().sample_load()).await?;
+        let budget = crate::neighbour::ram_budget(&a.policy, load.ram_available, load.ram_total);
+        if need > budget {
+            bail!(
+                "not enough memory: this stage needs {:.1} GB, and this device may use {:.1} GB right now ({}% of its {:.1} GB, keeping {} MB free)",
+                need as f64 / 1e9,
+                budget as f64 / 1e9,
+                (a.policy.max_ram_fraction * 100.0).round(),
+                load.ram_total as f64 / 1e9,
+                crate::neighbour::RAM_MARGIN >> 20
+            );
+        }
+    }
     let path = match (&a.source, &a.model_id) {
         // No local copy: fetch just this stage's slice (or reuse it from the cache).
         (Some(src), Some(id)) => {
@@ -124,7 +145,13 @@ pub async fn start(cfg: &EngineConfig, a: &Assignment, progress: impl FnMut(u64,
         _ => resolve_model(&cfg.models_dir, &a.model)?,
     };
     let mut opts = ExecutorOptions {
-        stage: StageOptions { device: 0, n_ctx: a.n_ctx, n_threads: cfg.threads, embed: Some(a.embed) },
+        stage: StageOptions {
+            device: 0,
+            n_ctx: a.n_ctx,
+            n_threads: crate::neighbour::threads_for(&a.policy, cfg.threads, clamor_engine_ggml::default_threads()),
+            embed: Some(a.embed),
+            ..Default::default()
+        },
         wire: match a.act_dtype {
             ActDType::F16 => DType::F16,
             ActDType::I8 => DType::I8,
@@ -157,9 +184,10 @@ pub async fn start(cfg: &EngineConfig, a: &Assignment, progress: impl FnMut(u64,
         epoch: a.epoch,
         session: a.session,
         downstream,
-        window: 8,
+        window: a.max_requests.unwrap_or(8).clamp(1, 64),
         // Neighbours may still be loading their layers.
         connect_timeout: Duration::from_secs(300),
+        stall_timeout: clamor_transport::stage::DEFAULT_STALL_TIMEOUT,
     };
     let h = run_stage(stage_cfg, listener, exec);
     Ok(Started { head: h.head, abort: h.task.abort_handle(), task: h.task, load_ms })

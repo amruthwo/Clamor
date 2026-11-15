@@ -39,6 +39,8 @@ pub struct NodeEntry {
     /// Models the node holds, and the port it shares them on.
     pub models: Vec<ModelInfo>,
     pub share_port: Option<u16>,
+    /// Why the node is not taking new work (on battery, owner busy, paused), if it isn't.
+    pub paused: Option<String>,
 }
 
 pub struct Swarm {
@@ -77,7 +79,7 @@ impl Swarm {
 pub type Shared = Arc<Mutex<Swarm>>;
 
 /// Add the coordinator's own hardware to the roster so it takes part in planning.
-pub async fn register_self(shared: Shared, id: NodeId) {
+pub async fn register_self(shared: Shared, id: NodeId, owner_policy: Option<Policy>) {
     let models_dir = shared.lock().unwrap().engine.models_dir.clone();
     let result = tokio::task::spawn_blocking(move || {
         let info = probe::probe_node(id);
@@ -88,7 +90,7 @@ pub async fn register_self(shared: Shared, id: NodeId) {
     let Ok((info, bench_report, models)) = result else { return };
     let mut sw = shared.lock().unwrap();
     let share_port = sw.share_port;
-    let policy = Policy::default_for(info.class);
+    let policy = owner_policy.unwrap_or_else(|| Policy::default_for(info.class));
     let generation = sw.next_generation;
     sw.next_generation += 1;
     let id = info.id.clone();
@@ -109,8 +111,36 @@ pub async fn register_self(shared: Shared, id: NodeId) {
             update_available: None,
             models,
             share_port,
+            paused: None,
         },
     );
+}
+
+/// The coordinator's own device: keep its load, memory, power and pause state current, as a
+/// member's heartbeats do for theirs.
+pub async fn monitor_self(shared: Shared) {
+    let mut sampler = probe::LoadSampler::new();
+    let mut pause = crate::neighbour::PauseState::default();
+    loop {
+        sleep(Duration::from_secs(HEARTBEAT_SECS as u64)).await;
+        let load = sampler.sample_load();
+        let power = probe::read_power();
+        let mut sw = shared.lock().unwrap();
+        let me = sw.coordinator.clone();
+        let Some(e) = sw.nodes.get_mut(&me) else { continue };
+        let paused = pause.update(&e.report.policy, &load, power.as_ref());
+        if paused != e.paused {
+            match &paused {
+                Some(why) => println!("coordinator device not taking new work: {why}"),
+                None => println!("coordinator device taking work again"),
+            }
+        }
+        e.paused = paused;
+        e.cpu_load = Some(load.total);
+        e.report.info.ram_available_bytes = load.ram_available;
+        e.report.info.power = power;
+        e.last_seen = unix_now();
+    }
 }
 
 pub async fn run_listener(bind: &str, shared: Shared) -> Result<()> {
@@ -138,7 +168,7 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
     let (mut rd, mut wr) = stream.into_split();
 
     let hello = timeout(Duration::from_secs(10), read_msg(&mut rd)).await??;
-    let Message::Hello { proto, info, bench_port, join_token, build, models, share_port } = hello else {
+    let Message::Hello { proto, info, bench_port, join_token, build, models, share_port, policy: owner_policy } = hello else {
         write_msg(&mut wr, &Message::Reject { reason: "expected hello".into() }).await?;
         return Ok(());
     };
@@ -166,6 +196,8 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
                 Some(p) => (p.report.policy, p.report.bench, p.report.link),
                 None => (Policy::default_for(info.class), None, None),
             };
+            // The device owner's own settings win.
+            let policy = owner_policy.unwrap_or(policy);
             let cached = bench.is_some();
             sw.nodes.insert(
                 id.clone(),
@@ -184,6 +216,7 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
                     update_available: None,
                     models,
                     share_port,
+                    paused: None,
                 },
             );
             Admission::Ok { generation, swarm, coordinator, cached_bench: cached, quick: sw.quick_bench }
@@ -199,6 +232,11 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
     println!("{id} joined from {addr}{}", if cached_bench { " (cached benchmark)" } else { "" });
 
     let _ = tx.send(Message::Welcome { swarm, coordinator, heartbeat_secs: HEARTBEAT_SECS });
+    // The node starts from its class defaults; send the policy we hold for it (it may have been
+    // changed in the dashboard, and survives the node reconnecting).
+    if let Some(policy) = shared.lock().unwrap().nodes.get(&id).map(|e| e.report.policy) {
+        let _ = tx.send(Message::SetPolicy { policy });
+    }
     if !cached_bench {
         set_state(&shared, &id, generation, NodeState::Benchmarking);
         let _ = tx.send(Message::BenchRequest { quick });
@@ -221,10 +259,11 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
             }
         }
         match msg {
-            Message::Heartbeat { cpu_load, ram_available_bytes, power, running_tasks, update_available } => {
+            Message::Heartbeat { cpu_load, ram_available_bytes, power, running_tasks, update_available, paused } => {
                 let mut sw = shared.lock().unwrap();
                 if let Some(e) = sw.nodes.get_mut(&id) {
                     e.update_available = update_available;
+                    e.paused = paused;
                     e.cpu_load = Some(cpu_load);
                     e.running_tasks = running_tasks;
                     e.report.info.ram_available_bytes = ram_available_bytes;
@@ -300,6 +339,7 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
                 e.state = NodeState::Away;
                 e.tx = None;
                 e.cpu_load = None;
+                e.paused = None;
                 e.note = Some(leave_note.clone());
                 lost = true;
             }

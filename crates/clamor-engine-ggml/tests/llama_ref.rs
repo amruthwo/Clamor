@@ -368,3 +368,32 @@ fn architecture_variants_match_reference() {
         }
     }
 }
+
+/// Prompts longer than `prefill_chunk` go through in chunks (bounding working memory); the
+/// result must match the reference, through a split, and decoding must carry on from it.
+#[test]
+fn long_prompts_are_processed_in_chunks() {
+    let Some(f) = fixture() else { return };
+    let o = |embed: Option<bool>| StageOptions { device: cpu(), n_ctx: 32, embed, prefill_chunk: 2, ..Default::default() };
+    // One stage, all logits and last-only.
+    let mut s = LlamaStage::load(&f.model, 0..N_LAYER, o(None)).unwrap();
+    assert!(max_err(&logits(s.forward_logits(1, 0, LlamaInput::Tokens(&TOKENS), Logits::All).unwrap()), &f.logits) < 1e-4);
+    let mut s2 = LlamaStage::load(&f.model, 0..N_LAYER, o(None)).unwrap();
+    let last = logits(s2.forward_logits(1, 0, LlamaInput::Tokens(&TOKENS), Logits::Last).unwrap());
+    assert!(max_err(&last, rows(&f.logits, V, TOKENS.len() - 1..TOKENS.len())) < 1e-4);
+    assert_eq!(s2.n_past(1), TOKENS.len() as u32, "every chunk landed in the KV cache");
+    // A split: the hidden states of every chunk are passed on.
+    let mut a = LlamaStage::load(&f.model, 0..2, o(None)).unwrap();
+    let mut b = LlamaStage::load(&f.model, 2..N_LAYER, o(None)).unwrap();
+    let h = hidden(a.forward(1, 0, LlamaInput::Tokens(&TOKENS)).unwrap());
+    assert_eq!(h.len(), TOKENS.len() * E);
+    assert!(max_err(&logits(b.forward(1, 0, LlamaInput::Hidden(&h)).unwrap()), &f.logits) < 1e-4, "split + chunks");
+    // Decode continues from a chunked prefill exactly as from a single pass.
+    let mut one = stage(f, 0..N_LAYER, cpu());
+    one.forward(2, 0, LlamaInput::Tokens(&TOKENS[..5])).unwrap();
+    let want = logits(one.forward(2, 5, LlamaInput::Tokens(&TOKENS[5..])).unwrap());
+    let mut ch = LlamaStage::load(&f.model, 0..N_LAYER, o(None)).unwrap();
+    ch.forward(2, 0, LlamaInput::Tokens(&TOKENS[..5])).unwrap();
+    let got = logits(ch.forward(2, 5, LlamaInput::Tokens(&TOKENS[5..])).unwrap());
+    assert!(max_err(&got, &want) < 1e-5);
+}

@@ -70,9 +70,38 @@ impl LoadSampler {
 
     /// Returns (cpu load 0.0..1.0, available RAM in bytes).
     pub fn sample(&mut self) -> (f32, u64) {
+        let l = self.sample_load();
+        (l.total, l.ram_available)
+    }
+
+    /// Whole-machine load, and how much of it is this process.
+    pub fn sample_load(&mut self) -> Load {
         self.sys.refresh_cpu_usage();
         self.sys.refresh_memory();
-        (self.sys.global_cpu_usage() / 100.0, self.sys.available_memory())
+        let pid = sysinfo::Pid::from_u32(std::process::id());
+        self.sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+        let ncpu = self.sys.cpus().len().max(1) as f32;
+        // A process's usage is in percent of one CPU.
+        let own = self.sys.process(pid).map(|p| p.cpu_usage() / 100.0 / ncpu).unwrap_or(0.0);
+        let total = self.sys.global_cpu_usage() / 100.0;
+        Load { total, own: own.min(total), ram_available: self.sys.available_memory(), ram_total: self.sys.total_memory() }
+    }
+}
+
+/// One load sample. Fractions are of the whole machine (all CPUs).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Load {
+    pub total: f32,
+    /// This process's share (Clamor's own work).
+    pub own: f32,
+    pub ram_available: u64,
+    pub ram_total: u64,
+}
+
+impl Load {
+    /// What everything except Clamor is using: how busy the owner keeps the machine.
+    pub fn others(&self) -> f32 {
+        (self.total - self.own).max(0.0)
     }
 }
 
@@ -124,32 +153,115 @@ fn detect_accelerators(os: Os, arch: &str, ram_total: u64) -> Vec<Accelerator> {
     out
 }
 
-#[cfg(target_os = "linux")]
-fn read_power() -> Option<PowerState> {
-    let dir = std::fs::read_dir("/sys/class/power_supply").ok()?;
-    for entry in dir.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if !name.starts_with("BAT") {
-            continue;
-        }
-        let p = entry.path();
-        let pct = std::fs::read_to_string(p.join("capacity")).ok().and_then(|s| s.trim().parse::<u8>().ok());
-        let status = std::fs::read_to_string(p.join("status")).unwrap_or_default();
-        return Some(PowerState { on_battery: status.trim() == "Discharging", battery_pct: pct });
+/// Battery state, or None on a machine without a battery.
+pub fn read_power() -> Option<PowerState> {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        read_power_sysfs(std::path::Path::new("/sys/class/power_supply"))
     }
-    None
+    #[cfg(target_os = "windows")]
+    {
+        read_power_windows()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        read_power_macos()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "windows", target_os = "macos")))]
+    {
+        None
+    }
 }
 
-#[cfg(not(target_os = "linux"))]
-fn read_power() -> Option<PowerState> {
-    // macOS, Windows and Android battery state need platform APIs; the Android app
-    // reports its own PowerState, and desktop support is on the roadmap.
-    None
+/// Linux power supplies, identified by their `type` file, not their name: batteries are called
+/// BAT0 on most PCs but `macsmc-battery` on Apple silicon under Asahi, and differently again on
+/// phones. On mains when any Mains or USB supply is online, or the battery says it is charging.
+#[cfg(any(target_os = "linux", target_os = "android", test))]
+pub(crate) fn read_power_sysfs(root: &std::path::Path) -> Option<PowerState> {
+    let read = |p: &std::path::Path, f: &str| std::fs::read_to_string(p.join(f)).map(|s| s.trim().to_string()).unwrap_or_default();
+    let mut battery: Option<(Option<u8>, String)> = None;
+    let mut mains_online = false;
+    for entry in std::fs::read_dir(root).ok()?.flatten() {
+        let p = entry.path();
+        match read(&p, "type").as_str() {
+            "Battery" if read(&p, "scope") != "Device" => {
+                // A device battery (a mouse, a pen) is not this machine's battery.
+                if battery.is_none() {
+                    battery = Some((read(&p, "capacity").parse().ok(), read(&p, "status")));
+                }
+            }
+            "Mains" | "USB" | "USB_C" | "USB_PD" => {
+                if read(&p, "online") == "1" {
+                    mains_online = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    let (pct, status) = battery?;
+    let charging = matches!(status.as_str(), "Charging" | "Full" | "Not charging");
+    Some(PowerState { on_battery: !(mains_online || charging), battery_pct: pct })
+}
+
+#[cfg(target_os = "windows")]
+fn read_power_windows() -> Option<PowerState> {
+    use windows_sys::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
+    let mut s: SYSTEM_POWER_STATUS = unsafe { std::mem::zeroed() };
+    if unsafe { GetSystemPowerStatus(&mut s) } == 0 {
+        return None;
+    }
+    // BatteryFlag 128: no system battery; 255: unknown.
+    if s.BatteryFlag == 128 || s.BatteryFlag == 255 {
+        return None;
+    }
+    Some(PowerState { on_battery: s.ACLineStatus == 0, battery_pct: (s.BatteryLifePercent <= 100).then_some(s.BatteryLifePercent) })
+}
+
+#[cfg(target_os = "macos")]
+fn read_power_macos() -> Option<PowerState> {
+    // `pmset -g batt`: "Now drawing from 'Battery Power'" / "'AC Power'", then " 85%; ...".
+    let out = std::process::Command::new("pmset").args(["-g", "batt"]).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    if !text.contains("InternalBattery") {
+        return None;
+    }
+    let pct = text.split('%').next().and_then(|s| s.rsplit(|c: char| !c.is_ascii_digit()).next()).and_then(|d| d.parse().ok());
+    Some(PowerState { on_battery: text.contains("'Battery Power'"), battery_pct: pct })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fake_supply(root: &std::path::Path, name: &str, files: &[(&str, &str)]) {
+        let d = root.join(name);
+        std::fs::create_dir_all(&d).unwrap();
+        for (f, v) in files {
+            std::fs::write(d.join(f), format!("{v}\n")).unwrap();
+        }
+    }
+
+    /// Regression: only supplies named BAT* were checked, so an Apple silicon laptop under
+    /// Asahi (battery `macsmc-battery`) looked like a desktop with no battery.
+    #[test]
+    fn batteries_are_found_by_type_not_name() {
+        let root = std::env::temp_dir().join(format!("clamor-psy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        // Asahi M1, plugged in and full.
+        fake_supply(&root, "macsmc-ac", &[("type", "Mains"), ("online", "1")]);
+        fake_supply(&root, "macsmc-battery", &[("type", "Battery"), ("status", "Full"), ("capacity", "100")]);
+        fake_supply(&root, "tps6598x-source-psy-0-0038", &[("type", "USB"), ("online", "1")]);
+        assert_eq!(read_power_sysfs(&root), Some(PowerState { on_battery: false, battery_pct: Some(100) }));
+        // Unplugged.
+        fake_supply(&root, "macsmc-ac", &[("type", "Mains"), ("online", "0")]);
+        fake_supply(&root, "tps6598x-source-psy-0-0038", &[("type", "USB"), ("online", "0")]);
+        fake_supply(&root, "macsmc-battery", &[("type", "Battery"), ("status", "Discharging"), ("capacity", "57")]);
+        assert_eq!(read_power_sysfs(&root), Some(PowerState { on_battery: true, battery_pct: Some(57) }));
+        // A wireless mouse's battery is not the machine's.
+        let desk = root.join("desk");
+        fake_supply(&desk, "hidpp_battery_0", &[("type", "Battery"), ("scope", "Device"), ("status", "Discharging"), ("capacity", "40")]);
+        assert_eq!(read_power_sysfs(&desk), None, "a desktop with a wireless mouse has no battery");
+    }
 
     #[test]
     fn probe_reports_sane_values() {

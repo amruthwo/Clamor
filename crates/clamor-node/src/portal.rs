@@ -54,6 +54,7 @@ struct RosterRow {
     update_available: Option<String>,
     models: Vec<ModelInfo>,
     share_port: Option<u16>,
+    paused: Option<String>,
     report: NodeReport,
 }
 
@@ -70,6 +71,7 @@ fn row(entry: &NodeEntry, id: &NodeId, coordinator: &NodeId) -> RosterRow {
         update_available: entry.update_available.clone(),
         models: entry.models.clone(),
         share_port: entry.share_port,
+        paused: entry.paused.clone(),
         report: entry.report.clone(),
     }
 }
@@ -234,6 +236,12 @@ fn ready_pipeline(shared: &Shared) -> Result<(HeadHandle, u32, u32, Option<Arc<T
     }
     if !p.ready() {
         return Err((StatusCode::SERVICE_UNAVAILABLE, "pipeline is still loading".to_string()));
+    }
+    // A paused device (on battery, owner busy) takes no new requests; running ones finish.
+    for s in &p.stages {
+        if let Some(why) = sw.nodes.get(&s.node).and_then(|e| e.paused.as_ref()) {
+            return Err((StatusCode::SERVICE_UNAVAILABLE, format!("paused: {} is not taking work right now ({why})", s.node)));
+        }
     }
     Ok((p.head.clone().unwrap(), p.epoch, p.n_ctx, p.tokenizer.clone()))
 }

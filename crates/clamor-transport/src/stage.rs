@@ -50,7 +50,13 @@ pub struct StageConfig {
     /// Data frames buffered per link.
     pub window: u32,
     pub connect_timeout: Duration,
+    /// The head fails a request that makes no progress for this long (a stage froze, or a
+    /// link half-died). Generous: a slow device can take minutes over a long prompt.
+    pub stall_timeout: Duration,
 }
+
+/// Default for `StageConfig::stall_timeout`.
+pub const DEFAULT_STALL_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub enum StageInput<'a> {
     Tokens(&'a [u32]),
@@ -171,6 +177,8 @@ struct ReqState {
     generated: u32,
     max_new: u32,
     out: mpsc::UnboundedSender<Event>,
+    /// Last time this request moved forward (sent on, or a token back).
+    progress: Instant,
 }
 
 struct Pending {
@@ -198,6 +206,9 @@ impl<E: StageExecutor> Head<E> {
     /// Run the head's layers for `tokens` and push the result downstream. In solo mode the
     /// output is a token, which loops back into the next decode step without any network.
     async fn forward(&mut self, req: u64, pos: u32, tokens: Vec<u32>) -> Result<()> {
+        if let Some(st) = self.reqs.get_mut(&req) {
+            st.progress = Instant::now();
+        }
         let mut next = Some((pos, tokens));
         while let Some((pos, toks)) = next.take() {
             let t0 = Instant::now();
@@ -231,6 +242,7 @@ impl<E: StageExecutor> Head<E> {
     fn on_token(&mut self, req: u64, pos: u32, id: u32, eos: bool) -> Option<(u32, Vec<u32>)> {
         let st = self.reqs.get_mut(&req)?; // cancelled or finished: ignore late tokens
         st.generated += 1;
+        st.progress = Instant::now();
         let _ = st.out.send(Event::Token { id, pos });
         let reason = if eos {
             Some(DoneReason::Eos)
@@ -270,7 +282,7 @@ impl<E: StageExecutor> Head<E> {
     async fn drain_pending(&mut self) -> Result<()> {
         while self.reqs.len() < self.max_active {
             let Some(p) = self.pending.pop_front() else { break };
-            self.reqs.insert(p.req, ReqState { generated: 0, max_new: p.max_new, out: p.out });
+            self.reqs.insert(p.req, ReqState { generated: 0, max_new: p.max_new, out: p.out, progress: Instant::now() });
             self.forward(p.req, 0, p.prompt).await?;
         }
         Ok(())
@@ -296,9 +308,18 @@ async fn recv_opt(l: &mut Option<Link>) -> Option<Frame> {
 async fn head_loop<E: StageExecutor>(cfg: StageConfig, exec: E, mut up: Option<Link>, down: Option<Link>, mut cmd_rx: mpsc::UnboundedReceiver<HeadCmd>, stats: Arc<StageStats>) -> Result<()> {
     let max_active = (cfg.window as usize).max(1);
     let mut head = Head { cfg, exec, down, reqs: HashMap::new(), pending: VecDeque::new(), max_active, stats };
+    let mut watchdog = tokio::time::interval(Duration::from_secs(1).min(head.cfg.stall_timeout));
     let result: Result<()> = async {
         loop {
             tokio::select! {
+                _ = watchdog.tick() => {
+                    let limit = head.cfg.stall_timeout;
+                    let stalled: Vec<u64> = head.reqs.iter().filter(|(_, st)| st.progress.elapsed() > limit).map(|(r, _)| *r).collect();
+                    for r in stalled {
+                        head.fail(r, format!("no progress for {} s: a stage may have stalled", limit.as_secs()));
+                    }
+                    head.drain_pending().await?;
+                }
                 cmd = cmd_rx.recv() => match cmd {
                     None => return Ok(()),
                     Some(HeadCmd::Submit { req, prompt, max_new, out }) => {

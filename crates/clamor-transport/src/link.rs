@@ -40,6 +40,16 @@ fn err(kind: io::ErrorKind, msg: impl Into<String>) -> io::Error {
     io::Error::new(kind, msg.into())
 }
 
+/// No Nagle delay, and TCP keepalive: a neighbour that vanishes without closing the connection
+/// (power loss, Wi-Fi gone) is noticed in about 25 s instead of whenever the OS gets round to it.
+fn tune(stream: &TcpStream) -> io::Result<()> {
+    stream.set_nodelay(true)?;
+    let ka = socket2::TcpKeepalive::new().with_time(Duration::from_secs(10)).with_interval(Duration::from_secs(5));
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "ios", target_os = "freebsd"))]
+    let ka = ka.with_retries(3);
+    socket2::SockRef::from(stream).set_tcp_keepalive(&ka)
+}
+
 impl Link {
     /// Connect to `addr`, retrying until `timeout` (neighbours start in any order).
     pub async fn connect(addr: SocketAddr, p: LinkParams, timeout: Duration) -> io::Result<Link> {
@@ -51,7 +61,7 @@ impl Link {
                 Err(_) => tokio::time::sleep(Duration::from_millis(40)).await,
             }
         };
-        stream.set_nodelay(true)?;
+        tune(&stream)?;
         write_frame(&mut stream, &Frame::ctrl(Kind::Hello, p.epoch, p.session, p.stage).with_window(p.window)).await?;
         stream.flush().await?;
         let ack = tokio::time::timeout(timeout, read_frame(&mut stream)).await.map_err(|_| err(io::ErrorKind::TimedOut, "no hello ack"))??;
@@ -65,7 +75,7 @@ impl Link {
     pub async fn accept(listener: &TcpListener, p: LinkParams) -> io::Result<Link> {
         loop {
             let (mut stream, _) = listener.accept().await?;
-            stream.set_nodelay(true)?;
+            tune(&stream)?;
             let hello = match tokio::time::timeout(Duration::from_secs(10), read_frame(&mut stream)).await {
                 Ok(Ok(f)) if f.header.kind == Kind::Hello => f,
                 _ => continue, // stray connection; keep waiting for the real neighbour

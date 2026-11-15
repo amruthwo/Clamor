@@ -163,6 +163,44 @@ async fn slice(State(s): State<Shared>, UrlPath(name): UrlPath<String>, Query(q)
         .unwrap()
 }
 
+/// Every tensor's name and size in bytes: enough to estimate a stage's memory without the file.
+async fn tensors(State(s): State<Shared>, UrlPath(name): UrlPath<String>, headers: HeaderMap) -> Response {
+    if !authorized(&s, &headers) {
+        return (StatusCode::UNAUTHORIZED, "swarm token required").into_response();
+    }
+    let path = match crate::stage::resolve_model(&s.models_dir, &name) {
+        Ok(p) => p,
+        Err(e) => return (StatusCode::NOT_FOUND, e.to_string()).into_response(),
+    };
+    match tokio::task::spawn_blocking(move || tensor_table(&path)).await {
+        Ok(Ok(t)) => Json(t).into_response(),
+        Ok(Err(e)) => (StatusCode::BAD_REQUEST, format!("{e:#}")).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// (name, bytes) for every tensor in a GGUF file.
+pub fn tensor_table(path: &Path) -> Result<Vec<(String, u64)>> {
+    let g = GgufFile::open(&path.display().to_string()).map_err(|e| anyhow!("{e}"))?;
+    Ok(g.tensors().into_iter().map(|t| (t.name, t.n_bytes)).collect())
+}
+
+/// Fetch another node's tensor table for `name` (checking it is model `model_id`).
+pub fn fetch_tensor_table(source: &str, name: &str, token: Option<&str>) -> Result<Vec<(String, u64)>> {
+    let url = format!("{}/models/{}/tensors", source.trim_end_matches('/'), url_escape(name));
+    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(30))).http_status_as_error(false).build().into();
+    let mut req = agent.get(&url);
+    if let Some(t) = token {
+        req = req.header(TOKEN_HEADER, t);
+    }
+    let mut resp = req.call().with_context(|| format!("GET {url}"))?;
+    if !resp.status().is_success() {
+        let msg = resp.body_mut().read_to_string().unwrap_or_default();
+        bail!("{source} refused the tensor list ({}): {msg}", resp.status());
+    }
+    Ok(serde_json::from_reader(resp.body_mut().as_reader())?)
+}
+
 /// Serve the models in `models_dir`, on `port` if free, else on any free port. Returns the port.
 pub async fn serve(port: u16, models_dir: PathBuf, token: Option<String>) -> Result<u16> {
     let listener = match tokio::net::TcpListener::bind(("0.0.0.0", port)).await {
@@ -170,7 +208,11 @@ pub async fn serve(port: u16, models_dir: PathBuf, token: Option<String>) -> Res
         Err(_) => tokio::net::TcpListener::bind(("0.0.0.0", 0)).await?,
     };
     let port = listener.local_addr()?.port();
-    let app = Router::new().route("/models", get(list)).route("/models/{name}/slice", get(slice)).with_state(Shared { models_dir, token });
+    let app = Router::new()
+        .route("/models", get(list))
+        .route("/models/{name}/slice", get(slice))
+        .route("/models/{name}/tensors", get(tensors))
+        .with_state(Shared { models_dir, token });
     tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
             eprintln!("model sharing stopped: {e}");

@@ -77,7 +77,7 @@ enum Exit {
     Update,
 }
 
-pub async fn join(addr: String, token: Option<String>, id: Option<String>, engine: EngineConfig, updates: update::Policy) -> Result<()> {
+pub async fn join(addr: String, token: Option<String>, id: Option<String>, engine: EngineConfig, updates: update::Policy, owner_policy: Option<Policy>) -> Result<()> {
     let update_flag: update::UpdateFlag = Default::default();
     if updates.check || updates.auto {
         update::spawn_checker(update_flag.clone());
@@ -94,7 +94,7 @@ pub async fn join(addr: String, token: Option<String>, id: Option<String>, engin
     let id = NodeId(id.unwrap_or_else(|| probe::default_node_id().0));
     let mut backoff = 2u64;
     loop {
-        match session(&addr, &token, &id, bench_port, share_port, &mut backoff, &engine, &update_flag, updates.auto).await {
+        match session(&addr, &token, &id, bench_port, share_port, &mut backoff, &engine, &update_flag, updates.auto, owner_policy).await {
             Ok(Exit::Update) => {
                 // Returns only if the update failed; then carry on with this version.
                 if let Err(e) = update::update_and_restart().await {
@@ -129,7 +129,7 @@ pub async fn join(addr: String, token: Option<String>, id: Option<String>, engin
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn session(addr: &str, token: &Option<String>, id: &NodeId, bench_port: u16, share_port: u16, backoff: &mut u64, engine: &EngineConfig, update_flag: &update::UpdateFlag, auto_update: bool) -> Result<Exit> {
+async fn session(addr: &str, token: &Option<String>, id: &NodeId, bench_port: u16, share_port: u16, backoff: &mut u64, engine: &EngineConfig, update_flag: &update::UpdateFlag, auto_update: bool, owner_policy: Option<Policy>) -> Result<Exit> {
     let scan = |dir: std::path::PathBuf| async move { tokio::task::spawn_blocking(move || share::scan(&dir)).await.unwrap_or_default() };
     let mut models = scan(engine.models_dir.clone()).await;
     let id2 = id.clone();
@@ -139,7 +139,7 @@ async fn session(addr: &str, token: &Option<String>, id: &NodeId, bench_port: u1
     let stream = TcpStream::connect(addr).await?;
     stream.set_nodelay(true)?;
     let (mut rd, mut wr) = stream.into_split();
-    write_msg(&mut wr, &Message::Hello { proto: PROTOCOL_VERSION, info, bench_port, join_token: token.clone(), build: Some(crate::build_info::current()), models: models.clone(), share_port: Some(share_port) }).await?;
+    write_msg(&mut wr, &Message::Hello { proto: PROTOCOL_VERSION, info, bench_port, join_token: token.clone(), build: Some(crate::build_info::current()), models: models.clone(), share_port: Some(share_port), policy: owner_policy }).await?;
 
     let heartbeat_secs = match timeout(Duration::from_secs(10), read_msg(&mut rd)).await?? {
         Message::Welcome { swarm, coordinator, heartbeat_secs } => {
@@ -168,7 +168,10 @@ async fn session(addr: &str, token: &Option<String>, id: &NodeId, bench_port: u1
     let mut rescan = interval(Duration::from_secs(30));
     rescan.tick().await;
     let mut sampler = probe::LoadSampler::new();
-    let mut policy = Policy::default_for(class);
+    // Until the coordinator sends this device's stored policy (right after Welcome).
+    let mut policy = owner_policy.unwrap_or_else(|| Policy::default_for(class));
+    let mut pause = crate::neighbour::PauseState::default();
+    let mut paused_reason: Option<String> = None;
     let (stx, mut srx) = unbounded_channel::<StageEvent>();
     let mut slot = Slot::default();
 
@@ -206,7 +209,17 @@ async fn session(addr: &str, token: &Option<String>, id: &NodeId, bench_port: u1
                 }
             },
             _ = hb.tick() => {
-                let (cpu, ram) = sampler.sample();
+                let load = sampler.sample_load();
+                let power = probe::read_power();
+                let now = pause.update(&policy, &load, power.as_ref());
+                if now != paused_reason {
+                    match &now {
+                        Some(why) => println!("not taking new work: {why}"),
+                        None => println!("taking work again"),
+                    }
+                    paused_reason = now.clone();
+                }
+                let (cpu, ram) = (load.total, load.ram_available);
                 let update_available = update_flag.lock().unwrap().clone();
                 // Update only between pipelines, never under a running stage.
                 if auto_update && update_available.is_some() && slot.epoch.is_none() {
@@ -214,7 +227,7 @@ async fn session(addr: &str, token: &Option<String>, id: &NodeId, bench_port: u1
                     let _ = write_msg(&mut wr, &Message::Leave).await;
                     return Ok(Exit::Update);
                 }
-                write_msg(&mut wr, &Message::Heartbeat { cpu_load: cpu, ram_available_bytes: ram, power: None, running_tasks: 0, update_available }).await?;
+                write_msg(&mut wr, &Message::Heartbeat { cpu_load: cpu, ram_available_bytes: ram, power, running_tasks: 0, update_available, paused: now }).await?;
             }
             _ = tokio::signal::ctrl_c() => {
                 let _ = write_msg(&mut wr, &Message::Leave).await;
@@ -241,13 +254,13 @@ async fn session(addr: &str, token: &Option<String>, id: &NodeId, bench_port: u1
                     Message::Ping { seq, sent_unix_ms } => {
                         write_msg(&mut wr, &Message::Pong { seq, sent_unix_ms }).await?;
                     }
-                    Message::ShardAssign { model, epoch, session, stage_index, stage_count, layer_start, layer_end, listen_port, downstream, act_dtype, n_ctx, embed, sampling, source, model_id } => {
+                    Message::ShardAssign { model, epoch, session, stage_index, stage_count, layer_start, layer_end, listen_port, downstream, act_dtype, n_ctx, embed, sampling, source, model_id, max_requests, need_bytes } => {
                         println!("assigned stage {stage_index}/{stage_count}: layers {layer_start}..{layer_end} of {model} (epoch {epoch})");
                         slot.stop(); // a new epoch supersedes whatever ran before
                         if let Some(src) = &source {
                             println!("  fetching the slice from {src}");
                         }
-                        let a = Assignment { model, epoch, session, stage_index, stage_count, layer_start, layer_end, listen_port, downstream, act_dtype, n_ctx, embed, sampling, source, model_id };
+                        let a = Assignment { model, epoch, session, stage_index, stage_count, layer_start, layer_end, listen_port, downstream, act_dtype, n_ctx, embed, sampling, source, model_id, max_requests, need_bytes, policy };
                         slot.epoch = Some(epoch);
                         slot.loading = Some(spawn_stage(engine.clone(), a, stx.clone()));
                     }

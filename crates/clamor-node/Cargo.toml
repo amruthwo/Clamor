@@ -35,3 +35,9 @@ vulkan = ["clamor-engine-ggml/vulkan"]
 metal = ["clamor-engine-ggml/metal"]
 hip = ["clamor-engine-ggml/hip"]
 opencl = ["clamor-engine-ggml/opencl"]
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_System_Threading"] }

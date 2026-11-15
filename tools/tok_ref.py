@@ -26,7 +26,7 @@ for i, a in added.items():
     types[i] = 3 if a["special"] else 4
 merges = [m if isinstance(m, str) else " ".join(m) for m in spec["model"]["merges"]]
 
-corpus = json.load(open(corpus_path))
+corpus = json.load(open(corpus_path, encoding="utf-8"))
 cases = []
 for text in corpus:
     tk.encode_special_tokens = False
@@ -34,5 +34,5 @@ for text in corpus:
     tk.encode_special_tokens = True
     plain = tk.encode(text, add_special_tokens=False).ids
     cases.append({"text": text, "special": special, "plain": plain})
-json.dump({"tokens": tokens, "merges": merges, "types": types, "cases": cases}, open(out_path, "w"))
+json.dump({"tokens": tokens, "merges": merges, "types": types, "cases": cases}, open(out_path, "w", encoding="utf-8"))
 print(f"{src}: {n} tokens, {len(merges)} merges, {len(cases)} cases")

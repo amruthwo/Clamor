@@ -44,7 +44,15 @@ const FAMILIES: &[Family] = &[
     Family { repo: "openai-community/gpt2", pre: "gpt2" },
 ];
 
+/// Each family's reference, generated once per test process. Tests run in parallel: without
+/// the cache they all wrote the same file at once and could read it half-written (seen on CI).
 fn reference(f: &Family) -> Option<Value> {
+    static CACHE: std::sync::Mutex<Option<std::collections::HashMap<&'static str, Option<Value>>>> = std::sync::Mutex::new(None);
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    cache.get_or_insert_with(Default::default).entry(f.repo).or_insert_with(|| generate_reference(f)).clone()
+}
+
+fn generate_reference(f: &Family) -> Option<Value> {
     let dir = std::env::temp_dir().join(format!("clamor-tok-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let corpus = dir.join("corpus.json");

@@ -93,7 +93,7 @@ if a.raw:
     os.makedirs(a.raw, exist_ok=True)
     np.stack(hidden).astype("<f4").tofile(os.path.join(a.raw, "hidden.f32"))
     logits.astype("<f4").tofile(os.path.join(a.raw, "logits.f32"))
-    with open(os.path.join(a.raw, "generated.txt"), "w") as f:
+    with open(os.path.join(a.raw, "generated.txt"), "w", encoding="utf-8") as f:
         f.write(",".join(map(str, generated)))
 print("next-token argmax:", int(logits[-1].argmax()), "saved", a.out)
 if generated:

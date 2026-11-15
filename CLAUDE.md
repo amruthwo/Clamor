@@ -17,7 +17,11 @@ ggml builds and runs matmul on CPU, GGUF metadata read.
 Step 1 done: `LlamaStage` (crates/clamor-engine-ggml/src/llama.rs) runs layers [a,b) of an f32 Llama GGUF with a
 per-request KV cache; matches tools/ref_forward.py to ~1e-6 on CPU, per layer, for full, 2- and 3-stage splits,
 and incremental decode (tests/llama_ref.rs). Tied lm_head (no output.weight) supported.
-NOT done: StageExecutor wiring, tokenizer, quantized weights, real models.
+Step 2 done: `GgmlExecutor` (src/executor.rs) puts a `LlamaStage` behind `StageExecutor`: f16/int8 activations
+on the wire, tail samples (greedy, or temperature/top-k with a per-request seeded RNG), EOS ids from GGUF.
+tests/ring_e2e.rs runs real rings on loopback: 1-4 stages match numpy greedy generation, and the ring is
+bit-exact with the same executors called in-process; cancel, EOS, concurrency, context overflow.
+NOT done: node wiring (ShardAssign), tokenizer, quantized weights, real models.
 
 ## Next steps, in order
 1. DONE. `tools/gen_tiny_llama.py` + `tools/ref_forward.py` give a random-weight Llama model and numpy reference
@@ -25,7 +29,7 @@ NOT done: StageExecutor wiring, tokenizer, quantized weights, real models.
    embed (head only) → layers [a,b) with KV cache → output norm + lm_head (tail only). Match the reference
    per layer (f32 tolerance ~1e-4), then check split-equals-full (layers 0..2 then 2..4 == 0..4).
    Convention is ggml's (RoPE on adjacent pairs, weights [out,in]).
-2. `GgmlExecutor: StageExecutor` (crates/clamor-transport/src/stage.rs defines the trait). One KV cache per request id; `release()` frees it.
+2. DONE. `GgmlExecutor: StageExecutor` (crates/clamor-transport/src/stage.rs defines the trait). One KV cache per request id; `release()` frees it.
 3. Wire executor into `clamor-node` via the `ShardAssign` message; add a real tokenizer path (GGUF vocab).
 4. Quantized weights (Q4_K etc.) loaded from real GGUF; then real small model (e.g. a ~1B Llama) end to end on 2 local processes.
 5. Per-device GPU benchmark → `BenchReport` → planner (planner currently ignores accelerators until benchmarked).
@@ -41,6 +45,12 @@ NOT done: StageExecutor wiring, tokenizer, quantized weights, real models.
   "Apple Paravirtual device" without simdgroup reduction, so RMS_NORM/SOFT_MAX are unsupported there:
   the macos CI job does not prove Metal inference works. Verify on a real Mac.
 - Device order: GPUs first. Index 0 is the CPU only in a CPU-only build.
+- Engine errors fail one request, not the ring: a failing stage releases the request and sends a `Token` frame
+  with `FLAG_FAILED` (payload = message) on around the ring; the head ends that request `Failed(msg)` and
+  cancels it everywhere. Before this, any `forward` error ended the stage loop and broke every request.
+- The tail computes logits for the last token only (`Logits::Last`); `Logits::All` exists for tests.
+- `tools/ref_forward.py --generate N` gives numpy greedy tokens (and prints the smallest top-1/top-2 gap,
+  which bounds how much activation rounding greedy text can tolerate).
 
 ## Rules
 - Do not claim platform support that CI has not exercised. CI build-only jobs prove compilation only.

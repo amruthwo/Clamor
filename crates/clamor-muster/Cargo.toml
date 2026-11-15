@@ -1,12 +1,12 @@
 [package]
 name = "clamor-muster"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 license.workspace = true
 
 [dependencies]
 anyhow = "1.0.104"
-clamor-proto = { version = "0.1.0", path = "../clamor-proto" }
+clamor-proto = { path = "../clamor-proto" }
 clap = { version = "4.6.7", features = ["derive"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"

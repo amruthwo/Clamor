@@ -21,9 +21,35 @@ fn main() {
         .define("CMAKE_POSITION_INDEPENDENT_CODE", "ON")
         .profile("Release");
 
-    // Native tuning is wrong for CI artifacts that run on other machines.
-    let native = env::var("CLAMOR_GGML_NATIVE").map(|v| v == "1").unwrap_or(false);
-    cfg.define("GGML_NATIVE", if native { "ON" } else { "OFF" });
+    // CPU instruction sets. With GGML_NATIVE off, ggml enables *no* SIMD extensions on x86 (no
+    // AVX/AVX2/FMA), which is several times slower. CLAMOR_GGML_CPU picks a level:
+    //   native        tune for this machine (don't copy the binary elsewhere)
+    //   x86-64-v3     AVX2, FMA, F16C, BMI2: Intel Haswell (2013) / AMD Zen (2017) and newer
+    //   generic       baseline only (SSE2 on x86, NEON on arm64)
+    //   armv8.x-a...  passed to -march on arm64, e.g. armv8.2-a+dotprod+fp16
+    // Default: x86-64-v3 on x86_64, generic elsewhere. CLAMOR_GGML_NATIVE=1 still means native.
+    println!("cargo:rerun-if-env-changed=CLAMOR_GGML_CPU");
+    println!("cargo:rerun-if-env-changed=CLAMOR_GGML_NATIVE");
+    let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    let level = match (env::var("CLAMOR_GGML_CPU"), env::var("CLAMOR_GGML_NATIVE").as_deref()) {
+        (Ok(l), _) => l,
+        (Err(_), Ok("1")) => "native".to_string(),
+        _ if arch == "x86_64" => "x86-64-v3".to_string(),
+        _ => "generic".to_string(),
+    };
+    cfg.define("GGML_NATIVE", if level == "native" { "ON" } else { "OFF" });
+    match level.as_str() {
+        "native" | "generic" => {}
+        "x86-64-v3" if arch == "x86_64" => {
+            for o in ["GGML_SSE42", "GGML_AVX", "GGML_AVX2", "GGML_FMA", "GGML_F16C", "GGML_BMI2"] {
+                cfg.define(o, "ON");
+            }
+        }
+        l if l.starts_with("armv") && arch == "aarch64" => {
+            cfg.define("GGML_CPU_ARM_ARCH", l);
+        }
+        l => panic!("CLAMOR_GGML_CPU={l} does not apply to target arch {arch}"),
+    }
 
     let mut libs: Vec<&str> = vec!["ggml", "ggml-cpu", "ggml-base"];
     if on("cuda") {
@@ -74,6 +100,17 @@ fn main() {
     match target_os.as_str() {
         "macos" | "ios" => {
             println!("cargo:rustc-link-lib=c++");
+            // ggml's Objective-C checks the OS version (@available), which needs
+            // ___isPlatformVersionAtLeast from clang's runtime library. Rust does not link it,
+            // and the check is only compiled out when building for the current macOS release.
+            if let Ok(out) = std::process::Command::new("clang").arg("--print-runtime-dir").output() {
+                let dir = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                let lib = if target_os == "ios" { "clang_rt.ios" } else { "clang_rt.osx" };
+                if std::path::Path::new(&dir).join(format!("lib{lib}.a")).exists() {
+                    println!("cargo:rustc-link-search=native={dir}");
+                    println!("cargo:rustc-link-lib=static={lib}");
+                }
+            }
             println!("cargo:rustc-link-lib=framework=Accelerate");
             if on("metal") {
                 for f in ["Foundation", "Metal", "MetalKit"] {

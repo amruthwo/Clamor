@@ -1,5 +1,6 @@
 //! `clamor-node`: run a coordinator (roster + web portal) or join one as a member.
 
+mod build_info;
 mod coordinator;
 mod member;
 mod pipeline;
@@ -22,6 +23,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Show this build: version, platform, GPU variant, CPU level.
+    Version {
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List the compute devices this build can use, and check each computes correctly.
+    Devices,
     /// Start a swarm: control plane, muster, and web portal.
     Coordinator {
         #[arg(long, default_value = "clamor")]
@@ -80,6 +89,27 @@ impl EngineArgs {
 #[tokio::main]
 async fn main() -> Result<()> {
     match Cli::parse().cmd {
+        Cmd::Version { json } => {
+            let b = build_info::current();
+            if json {
+                println!("{}", serde_json::to_string_pretty(&b)?);
+            } else {
+                println!("{b}");
+            }
+            Ok(())
+        }
+        Cmd::Devices => {
+            println!("{}", build_info::current());
+            println!("default CPU threads: {} (the performance cores; override with --threads)", clamor_engine_ggml::default_threads());
+            for d in clamor_engine_ggml::list_devices() {
+                println!("[{}] {}: {} ({:?}, {} MiB)", d.index, d.name, d.description, d.kind, d.memory_total >> 20);
+                match clamor_engine_ggml::matmul_check(d.index) {
+                    Ok(r) => println!("    matmul ok (max error {:.1e})", r.max_abs_err),
+                    Err(e) => println!("    cannot be used: {e}"),
+                }
+            }
+            Ok(())
+        }
         Cmd::Coordinator { swarm, bind, portal, token, id, engine, data_port, quick_bench } => {
             let id = NodeId(id.unwrap_or_else(|| probe::default_node_id().0));
             let engine = engine.config();

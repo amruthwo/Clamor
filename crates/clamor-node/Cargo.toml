@@ -1,6 +1,6 @@
 [package]
 name = "clamor-node"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 license.workspace = true
 
@@ -8,8 +8,8 @@ license.workspace = true
 anyhow = "1.0.104"
 axum = "0.8.9"
 clamor-engine-ggml = { path = "../clamor-engine-ggml" }
-clamor-muster = { version = "0.1.0", path = "../clamor-muster" }
-clamor-proto = { version = "0.1.0", path = "../clamor-proto" }
+clamor-muster = { path = "../clamor-muster" }
+clamor-proto = { path = "../clamor-proto" }
 clamor-transport = { path = "../clamor-transport" }
 clap = { version = "4.6.7", features = ["derive"] }
 serde = { version = "1.0.229", features = ["derive"] }

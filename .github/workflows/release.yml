@@ -1,0 +1,106 @@
+name: release
+# Build clamor-node for every supported platform.
+#  - Push a tag vX.Y.Z: build everything and create a DRAFT GitHub release (publish it by hand).
+#  - Run manually (Actions -> release -> Run workflow): build everything and keep the archives as
+#    workflow artifacts, without a release. Use this to test builds before tagging.
+#  - Pull requests that change the release pipeline build everything too (never a release).
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+  pull_request:
+    paths: [".github/workflows/release.yml", "scripts/package-release.sh", "crates/clamor-node/build.rs", "crates/clamor-engine-ggml/build.rs"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.target }} (${{ matrix.variant }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux: Vulkan builds need libvulkan.so.1 at run time (every desktop has it);
+          # the cpu builds run anywhere, e.g. headless servers.
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu, variant: vulkan, cpu: x86-64-v3, features: vulkan }
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu, variant: cpu, cpu: x86-64-v3, features: "" }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, variant: vulkan, cpu: armv8.2-a+dotprod+fp16, features: vulkan }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, variant: cpu, cpu: armv8.2-a+dotprod+fp16, features: "" }
+          # Apple's arm64 default already includes dotprod/fp16 (it targets the M1).
+          - { os: macos-15, target: aarch64-apple-darwin, variant: metal, cpu: generic, features: metal }
+          - { os: windows-2022, target: x86_64-pc-windows-msvc, variant: cpu, cpu: x86-64-v3, features: "" }
+          # Android (Termux) until the app exists.
+          - { os: ubuntu-24.04, target: aarch64-linux-android, variant: cpu, cpu: armv8.2-a+dotprod+fp16, features: "", android: true }
+    env:
+      CLAMOR_GGML_CPU: ${{ matrix.cpu }}
+      MACOSX_DEPLOYMENT_TARGET: "14.0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: "${{ matrix.target }}" }
+      - name: Vulkan SDK (Linux)
+        if: matrix.variant == 'vulkan'
+        run: sudo apt-get update && sudo apt-get install -y libvulkan-dev glslc spirv-headers
+      - name: Android NDK
+        if: matrix.android
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with: { ndk-version: r27c }
+      - name: Build
+        shell: bash
+        run: |
+          F="${{ matrix.features }}"
+          ARGS=(--release -p clamor-node -p clamor-muster)
+          [ -n "$F" ] && ARGS+=(--features "clamor-node/$F")
+          if [ "${{ matrix.android }}" = "true" ]; then
+            cargo install cargo-ndk --locked
+            # API 30 (Android 11): older C libraries lack statx, which a dependency calls.
+            ANDROID_NDK_HOME="${{ steps.ndk.outputs.ndk-path }}" cargo ndk -t arm64-v8a -P 30 build "${ARGS[@]}"
+          else
+            cargo build --target ${{ matrix.target }} "${ARGS[@]}"
+          fi
+      - name: Smoke test
+        if: ${{ !matrix.android }}
+        shell: bash
+        run: |
+          B=target/${{ matrix.target }}/release/clamor-node
+          $B version
+          $B version --json | grep -q '"variant": "${{ matrix.variant }}"'
+          $B devices
+      - name: Package
+        shell: bash
+        run: scripts/package-release.sh ${{ matrix.target }} ${{ matrix.variant }} ${{ matrix.cpu }} target/${{ matrix.target }}/release dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clamor-${{ matrix.target }}-${{ matrix.variant }}
+          path: dist/*
+
+  release:
+    name: draft release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: dist, merge-multiple: true }
+      - name: Check the tag matches the version
+        run: |
+          v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          [ "v$v" = "${GITHUB_REF_NAME}" ] || { echo "tag ${GITHUB_REF_NAME} but Cargo.toml says $v"; exit 1; }
+      - name: Manifest
+        run: |
+          v=${GITHUB_REF_NAME#v}
+          jq -s --arg v "$v" --arg c "$GITHUB_SHA" '{version: $v, commit: $c, assets: .}' dist/*.json > dist/manifest.json
+          rm dist/clamor-*.json
+          (cd dist && sha256sum clamor-* manifest.json > SHA256SUMS)
+          cat dist/manifest.json
+      - name: Create draft release
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* --draft --title "Clamor ${GITHUB_REF_NAME}" --generate-notes

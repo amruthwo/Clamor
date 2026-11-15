@@ -170,7 +170,7 @@ checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
 name = "clamor-engine-ggml"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -187,7 +187,7 @@ dependencies = [
 
 [[package]]
 name = "clamor-muster"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "clamor-proto",
@@ -199,7 +199,7 @@ dependencies = [
 
 [[package]]
 name = "clamor-node"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -215,7 +215,7 @@ dependencies = [
 
 [[package]]
 name = "clamor-proto"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -223,7 +223,7 @@ dependencies = [
 
 [[package]]
 name = "clamor-transport"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "bytes",

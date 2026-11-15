@@ -2,7 +2,7 @@
 //! gracefully on `Drain` or Ctrl-C. Reconnects with backoff if the connection drops.
 
 use crate::stage::{self, Assignment, EngineConfig};
-use crate::update;
+use crate::{share, update};
 use crate::wire::{read_msg, write_msg};
 use anyhow::{bail, Result};
 use clamor_muster::{bench, net, probe};
@@ -18,6 +18,8 @@ use tokio::time::{interval, sleep, timeout};
 enum StageEvent {
     Loaded { model: String, epoch: u32, stage_index: u32, load_ms: u64, abort: AbortHandle },
     Failed { model: String, epoch: u32, stage_index: u32, error: String, stopped: bool },
+    /// Fetching the stage's slice from another node.
+    Progress { epoch: u32, stage_index: u32, done: u64, total: u64 },
 }
 
 /// This node's (at most one) pipeline stage. Dropping it stops the stage.
@@ -44,7 +46,11 @@ impl Drop for Slot {
 fn spawn_stage(engine: EngineConfig, a: Assignment, tx: UnboundedSender<StageEvent>) -> AbortHandle {
     tokio::spawn(async move {
         let (model, epoch, stage_index) = (a.model.clone(), a.epoch, a.stage_index);
-        match stage::start(&engine, &a).await {
+        let ptx = tx.clone();
+        let progress = move |done, total| {
+            let _ = ptx.send(StageEvent::Progress { epoch, stage_index, done, total });
+        };
+        match stage::start(&engine, &a, progress).await {
             Ok(s) => {
                 let _ = tx.send(StageEvent::Loaded { model: model.clone(), epoch, stage_index, load_ms: s.load_ms, abort: s.abort.clone() });
                 let error = match s.task.await {
@@ -82,11 +88,13 @@ pub async fn join(addr: String, token: Option<String>, id: Option<String>, engin
     std::thread::spawn(move || {
         let _ = net::serve(listener);
     });
+    // Serve our models to the rest of the swarm (layer slices), protected by the join token.
+    let share_port = share::serve(DEFAULT_SHARE_PORT, engine.models_dir.clone(), token.clone()).await?;
 
     let id = NodeId(id.unwrap_or_else(|| probe::default_node_id().0));
     let mut backoff = 2u64;
     loop {
-        match session(&addr, &token, &id, bench_port, &mut backoff, &engine, &update_flag, updates.auto).await {
+        match session(&addr, &token, &id, bench_port, share_port, &mut backoff, &engine, &update_flag, updates.auto).await {
             Ok(Exit::Update) => {
                 // Returns only if the update failed; then carry on with this version.
                 if let Err(e) = update::update_and_restart().await {
@@ -121,7 +129,9 @@ pub async fn join(addr: String, token: Option<String>, id: Option<String>, engin
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn session(addr: &str, token: &Option<String>, id: &NodeId, bench_port: u16, backoff: &mut u64, engine: &EngineConfig, update_flag: &update::UpdateFlag, auto_update: bool) -> Result<Exit> {
+async fn session(addr: &str, token: &Option<String>, id: &NodeId, bench_port: u16, share_port: u16, backoff: &mut u64, engine: &EngineConfig, update_flag: &update::UpdateFlag, auto_update: bool) -> Result<Exit> {
+    let scan = |dir: std::path::PathBuf| async move { tokio::task::spawn_blocking(move || share::scan(&dir)).await.unwrap_or_default() };
+    let mut models = scan(engine.models_dir.clone()).await;
     let id2 = id.clone();
     let info = tokio::task::spawn_blocking(move || probe::probe_node(id2)).await?;
     let class = info.class;
@@ -129,7 +139,7 @@ async fn session(addr: &str, token: &Option<String>, id: &NodeId, bench_port: u1
     let stream = TcpStream::connect(addr).await?;
     stream.set_nodelay(true)?;
     let (mut rd, mut wr) = stream.into_split();
-    write_msg(&mut wr, &Message::Hello { proto: PROTOCOL_VERSION, info, bench_port, join_token: token.clone(), build: Some(crate::build_info::current()) }).await?;
+    write_msg(&mut wr, &Message::Hello { proto: PROTOCOL_VERSION, info, bench_port, join_token: token.clone(), build: Some(crate::build_info::current()), models: models.clone(), share_port: Some(share_port) }).await?;
 
     let heartbeat_secs = match timeout(Duration::from_secs(10), read_msg(&mut rd)).await?? {
         Message::Welcome { swarm, coordinator, heartbeat_secs } => {
@@ -154,6 +164,9 @@ async fn session(addr: &str, token: &Option<String>, id: &NodeId, bench_port: u1
     });
 
     let mut hb = interval(Duration::from_secs(heartbeat_secs.max(1) as u64));
+    // Notice models added to or removed from --models.
+    let mut rescan = interval(Duration::from_secs(30));
+    rescan.tick().await;
     let mut sampler = probe::LoadSampler::new();
     let mut policy = Policy::default_for(class);
     let (stx, mut srx) = unbounded_channel::<StageEvent>();
@@ -161,7 +174,19 @@ async fn session(addr: &str, token: &Option<String>, id: &NodeId, bench_port: u1
 
     loop {
         tokio::select! {
+            _ = rescan.tick() => {
+                let now = scan(engine.models_dir.clone()).await;
+                if now != models {
+                    models = now;
+                    write_msg(&mut wr, &Message::Inventory { models: models.clone() }).await?;
+                }
+            }
             Some(ev) = srx.recv() => match ev {
+                StageEvent::Progress { epoch, stage_index, done, total } => {
+                    if slot.epoch == Some(epoch) {
+                        write_msg(&mut wr, &Message::ShardProgress { epoch, stage_index, done_bytes: done, total_bytes: total }).await?;
+                    }
+                }
                 StageEvent::Loaded { model, epoch, stage_index, load_ms, abort } => {
                     if slot.epoch == Some(epoch) {
                         println!("stage {stage_index} of {model} ready (epoch {epoch}, loaded in {load_ms} ms)");
@@ -216,10 +241,13 @@ async fn session(addr: &str, token: &Option<String>, id: &NodeId, bench_port: u1
                     Message::Ping { seq, sent_unix_ms } => {
                         write_msg(&mut wr, &Message::Pong { seq, sent_unix_ms }).await?;
                     }
-                    Message::ShardAssign { model, epoch, session, stage_index, stage_count, layer_start, layer_end, listen_port, downstream, act_dtype, n_ctx, embed, sampling } => {
+                    Message::ShardAssign { model, epoch, session, stage_index, stage_count, layer_start, layer_end, listen_port, downstream, act_dtype, n_ctx, embed, sampling, source, model_id } => {
                         println!("assigned stage {stage_index}/{stage_count}: layers {layer_start}..{layer_end} of {model} (epoch {epoch})");
                         slot.stop(); // a new epoch supersedes whatever ran before
-                        let a = Assignment { model, epoch, session, stage_index, stage_count, layer_start, layer_end, listen_port, downstream, act_dtype, n_ctx, embed, sampling };
+                        if let Some(src) = &source {
+                            println!("  fetching the slice from {src}");
+                        }
+                        let a = Assignment { model, epoch, session, stage_index, stage_count, layer_start, layer_end, listen_port, downstream, act_dtype, n_ctx, embed, sampling, source, model_id };
                         slot.epoch = Some(epoch);
                         slot.loading = Some(spawn_stage(engine.clone(), a, stx.clone()));
                     }

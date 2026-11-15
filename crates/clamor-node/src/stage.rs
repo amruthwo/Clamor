@@ -19,6 +19,10 @@ pub struct EngineConfig {
     pub device: String,
     /// CPU threads per stage; 0 picks the performance cores.
     pub threads: usize,
+    /// Where layer slices fetched from other nodes are kept.
+    pub cache_dir: PathBuf,
+    /// Presented when fetching slices (the swarm's join token).
+    pub share_token: Option<String>,
 }
 
 impl EngineConfig {
@@ -50,7 +54,8 @@ impl EngineConfig {
 /// A model is named by its bare file name inside the models directory. Anything that could
 /// point elsewhere (separators, `..`, absolute paths) is refused, so a coordinator cannot make a
 /// member open arbitrary files.
-pub fn resolve_model(dir: &Path, name: &str) -> Result<PathBuf> {
+/// Model names are bare `.gguf` file names, never paths.
+pub fn validate_model_name(name: &str) -> Result<()> {
     let ok = !name.is_empty()
         && name != "."
         && name != ".."
@@ -60,6 +65,11 @@ pub fn resolve_model(dir: &Path, name: &str) -> Result<PathBuf> {
     if !ok {
         bail!("model must be a plain .gguf file name, got {name:?}");
     }
+    Ok(())
+}
+
+pub fn resolve_model(dir: &Path, name: &str) -> Result<PathBuf> {
+    validate_model_name(name)?;
     let p = dir.join(name);
     if !p.is_file() {
         bail!("model {name} not found in {}", dir.display());
@@ -83,6 +93,9 @@ pub struct Assignment {
     pub n_ctx: u32,
     pub embed: bool,
     pub sampling: SamplingParams,
+    /// Fetch this stage's slice from here (`http://host:port`) instead of a local file.
+    pub source: Option<String>,
+    pub model_id: Option<String>,
 }
 
 pub struct Started {
@@ -96,8 +109,20 @@ pub struct Started {
 
 /// Load this stage's layers, bind its data port and join the ring. Returns once loaded; the
 /// links to the neighbours come up in the background as they start too.
-pub async fn start(cfg: &EngineConfig, a: &Assignment) -> Result<Started> {
-    let path = resolve_model(&cfg.models_dir, &a.model)?;
+pub async fn start(cfg: &EngineConfig, a: &Assignment, progress: impl FnMut(u64, u64) + Send + 'static) -> Result<Started> {
+    let path = match (&a.source, &a.model_id) {
+        // No local copy: fetch just this stage's slice (or reuse it from the cache).
+        (Some(src), Some(id)) => {
+            validate_model_name(&a.model)?;
+            let dest = crate::share::cached_slice_path(&cfg.cache_dir, id, &a.model, a.layer_start..a.layer_end, a.embed);
+            let (src, id, name, layers, embed, token, d) = (src.clone(), id.clone(), a.model.clone(), a.layer_start..a.layer_end, a.embed, cfg.share_token.clone(), dest.clone());
+            tokio::task::spawn_blocking(move || crate::share::fetch_slice(&src, &name, &id, layers, embed, token.as_deref(), &d, progress))
+                .await?
+                .with_context(|| format!("fetching layers {}..{} of {} from {}", a.layer_start, a.layer_end, a.model, a.source.as_deref().unwrap_or("")))?;
+            dest
+        }
+        _ => resolve_model(&cfg.models_dir, &a.model)?,
+    };
     let mut opts = ExecutorOptions {
         stage: StageOptions { device: 0, n_ctx: a.n_ctx, n_threads: cfg.threads, embed: Some(a.embed) },
         wire: match a.act_dtype {

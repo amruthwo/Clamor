@@ -73,7 +73,9 @@ drops off can rejoin later without benchmarking again.
 | **Works** | Splitting a real model across machines: the coordinator hands out layers, each machine loads its share, and they pass the work around the ring |
 | **Works** | Text chat through the API, using the model's own tokenizer and chat template (both checked against Hugging Face's) |
 | **Works** | Llama 3.x, Qwen 2.5 and SmolLM2 models, including compressed (quantized) files; checked against a reference implementation |
-| **In progress** | Installable releases, easier joining (generated passphrases, remembered swarms), sharing one copy of a model file between machines |
+| **Works** | One copy of a model is enough: other machines fetch only their share of the layers from the one that has it |
+| **Works** | Downloadable releases for Linux, macOS, Windows and Android (Termux), which can update themselves (signed) |
+| **In progress** | Easier joining: generated passphrases, remembered swarms, finding the swarm without an IP address |
 | **Planned** | Chat in the dashboard, an OpenAI-compatible API for agent tools, installers and a desktop app, a phone app, automatic discovery and coordinator hand-over, encryption between devices |
 
 CI runs the tests on Linux (x86_64 and arm64), Windows and macOS. The Vulkan, CUDA and Android builds are
@@ -105,8 +107,9 @@ measure itself and suggest models.
 
 ### Chat with a model
 
-For now every machine needs its own copy of the model file in a `models` folder next to where you run
-`clamor-node` (sharing one copy is coming next). A small one to start with is
+Put the model file in a `models` folder next to where you run `clamor-node`, on **any one** of your machines.
+The others fetch just the layers they need from it, keep them in their cache, and reuse them next time. A
+small model to start with is
 [SmolLM2 360M Instruct](https://huggingface.co/HuggingFaceTB/SmolLM2-360M-Instruct-GGUF) (386 MB, Apache-2.0):
 
 ```bash

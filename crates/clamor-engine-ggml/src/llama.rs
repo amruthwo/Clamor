@@ -55,10 +55,14 @@ impl LlamaHparams {
         let req = |k: &str| g.get_u32(&key(k)).ok_or_else(|| Error::Gguf(format!("missing {}", key(k))));
         let n_embd = req("embedding_length")?;
         let n_head = req("attention.head_count")?;
-        let n_vocab = match g.get_u32(&key("vocab_size")) {
-            Some(v) => v,
-            None => g.tensor_ne("token_embd.weight").map(|ne| ne[1] as u32).ok_or_else(|| Error::Gguf("no vocab size".into()))?,
-        };
+        // Not every converter writes vocab_size (Qwen2 GGUFs omit it), and a slice may hold
+        // neither the embedding nor lm_head, so fall back through what is there.
+        let n_vocab = g
+            .get_u32(&key("vocab_size"))
+            .or_else(|| g.tensor_ne("token_embd.weight").map(|ne| ne[1] as u32))
+            .or_else(|| g.tensor_ne("output.weight").map(|ne| ne[1] as u32))
+            .or_else(|| g.get_arr_str("tokenizer.ggml.tokens").map(|t| t.len() as u32))
+            .ok_or_else(|| Error::Gguf("no vocab size".into()))?;
         Ok(Self {
             n_layer: req("block_count")?,
             n_embd,
@@ -197,54 +201,73 @@ fn cname(s: &str) -> CString {
     CString::new(s).expect("tensor names have no NUL")
 }
 
+/// Write the GGUF slice a stage needs: all of `src`'s metadata, but only the tensors for layers
+/// `layers` (see [`stage_tensors`]). A stage loads it exactly like the full file. With
+/// `layers = 0..0, embed = false` it is metadata only: hyperparameters, tokenizer, chat template.
+pub fn plan_stage_slice(src: &GgufFile, layers: Range<u32>, embed: bool) -> Result<crate::gguf::SlicePlan> {
+    let hp = LlamaHparams::from_gguf(src)?;
+    let names = if layers == (0..0) && !embed { Vec::new() } else { stage_tensors(src, &hp, layers, embed)? };
+    // Record the vocabulary size explicitly: a middle slice has neither embedding nor lm_head.
+    let key = format!("{}.vocab_size", hp.arch);
+    src.plan_slice(&names, &[(key.as_str(), hp.n_vocab)])
+}
+
+/// The tensors a stage needs: layers `layers`, plus the embedding if it embeds, the output norm
+/// and lm_head if it holds the last layer, and RoPE frequency factors if it holds any layer.
+/// Shared by the loader and by slice building (`write_stage_slice`), so they always agree.
+pub fn stage_tensors(g: &GgufFile, hp: &LlamaHparams, layers: Range<u32>, embed: bool) -> Result<Vec<String>> {
+    // An empty range is allowed only at the start: an embedding-only head (0..0), so the
+    // coordinator can own the request table without holding any layers.
+    let embed_only = layers == (0..0) && embed;
+    if (layers.start >= layers.end && !embed_only) || layers.end > hp.n_layer {
+        return Err(Error::Ggml(format!("bad layer range {layers:?} for a {}-layer model", hp.n_layer)));
+    }
+    if embed && layers.start != 0 {
+        return Err(Error::Ggml(format!("a stage starting at layer {} cannot embed tokens", layers.start)));
+    }
+    if hp.n_embd % hp.n_head != 0 || hp.n_head % hp.n_head_kv != 0 {
+        return Err(Error::Gguf("head counts do not divide evenly".into()));
+    }
+    let is_tail = layers.end == hp.n_layer && !embed_only;
+    let mut names: Vec<String> = Vec::new();
+    if embed {
+        names.push("token_embd.weight".into());
+    }
+    for l in layers.clone() {
+        for s in ["attn_norm", "attn_q", "attn_k", "attn_v", "attn_output", "ffn_norm", "ffn_gate", "ffn_up", "ffn_down"] {
+            names.push(format!("blk.{l}.{s}.weight"));
+        }
+        for s in ["attn_q", "attn_k", "attn_v"] {
+            let b = format!("blk.{l}.{s}.bias");
+            if g.tensor_ne(&b).is_some() {
+                names.push(b);
+            }
+        }
+    }
+    // Every stage with layers applies RoPE, so each needs the (global) frequency divisors.
+    if !layers.is_empty() && g.tensor_ne("rope_freqs.weight").is_some() {
+        names.push("rope_freqs.weight".into());
+    }
+    if is_tail {
+        names.push("output_norm.weight".into());
+        // Some models tie lm_head to the embedding and omit output.weight.
+        let lm_head = if g.tensor_ne("output.weight").is_some() { "output.weight" } else { "token_embd.weight" };
+        if !names.iter().any(|n| n == lm_head) {
+            names.push(lm_head.into());
+        }
+    }
+    Ok(names)
+}
+
 impl LlamaStage {
     /// Load layers `layers` of the GGUF model at `path` onto `opts.device`.
     pub fn load(path: &str, layers: Range<u32>, opts: StageOptions) -> Result<Self> {
         let g = GgufFile::open_with_meta(path)?;
         let hp = LlamaHparams::from_gguf(&g)?;
-        // An empty range is allowed only at the start: an embedding-only head (0..0), so the
-        // coordinator can own the request table without holding any layers.
         let is_head = opts.embed.unwrap_or(layers.start == 0);
-        let embed_only = layers == (0..0) && is_head;
-        if (layers.start >= layers.end && !embed_only) || layers.end > hp.n_layer {
-            return Err(Error::Ggml(format!("bad layer range {layers:?} for a {}-layer model", hp.n_layer)));
-        }
-        if is_head && layers.start != 0 {
-            return Err(Error::Ggml(format!("a stage starting at layer {} cannot embed tokens", layers.start)));
-        }
-        if hp.n_embd % hp.n_head != 0 || hp.n_head % hp.n_head_kv != 0 {
-            return Err(Error::Gguf("head counts do not divide evenly".into()));
-        }
+        let names = stage_tensors(&g, &hp, layers.clone(), is_head)?;
         let n_ctx = if opts.n_ctx == 0 { hp.n_ctx_train } else { opts.n_ctx };
-        let is_tail = layers.end == hp.n_layer && !embed_only;
-
-        let mut names: Vec<String> = Vec::new();
-        if is_head {
-            names.push("token_embd.weight".into());
-        }
-        for l in layers.clone() {
-            for s in ["attn_norm", "attn_q", "attn_k", "attn_v", "attn_output", "ffn_norm", "ffn_gate", "ffn_up", "ffn_down"] {
-                names.push(format!("blk.{l}.{s}.weight"));
-            }
-            for s in ["attn_q", "attn_k", "attn_v"] {
-                let b = format!("blk.{l}.{s}.bias");
-                if g.tensor_ne(&b).is_some() {
-                    names.push(b);
-                }
-            }
-        }
-        // Every stage with layers applies RoPE, so each needs the (global) frequency divisors.
-        if !layers.is_empty() && g.tensor_ne("rope_freqs.weight").is_some() {
-            names.push("rope_freqs.weight".into());
-        }
-        if is_tail {
-            names.push("output_norm.weight".into());
-            // Some models tie lm_head to the embedding and omit output.weight.
-            let lm_head = if g.tensor_ne("output.weight").is_some() { "output.weight" } else { "token_embd.weight" };
-            if !names.iter().any(|n| n == lm_head) {
-                names.push(lm_head.into());
-            }
-        }
+        let is_tail = layers.end == hp.n_layer && !(layers == (0..0) && is_head);
 
         unsafe {
             let dev = sys::ggml_backend_dev_get(opts.device);

@@ -52,6 +52,8 @@ struct RosterRow {
     note: Option<String>,
     build: Option<BuildInfo>,
     update_available: Option<String>,
+    models: Vec<ModelInfo>,
+    share_port: Option<u16>,
     report: NodeReport,
 }
 
@@ -66,6 +68,8 @@ fn row(entry: &NodeEntry, id: &NodeId, coordinator: &NodeId) -> RosterRow {
         note: entry.note.clone(),
         build: entry.build.clone(),
         update_available: entry.update_available.clone(),
+        models: entry.models.clone(),
+        share_port: entry.share_port,
         report: entry.report.clone(),
     }
 }

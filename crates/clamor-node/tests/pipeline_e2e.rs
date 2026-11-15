@@ -42,11 +42,24 @@ fn free_port() -> u16 {
     TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
 }
 
-/// A run of `n` consecutive free ports (data ports for the stages).
+/// A run of `n` consecutive free ports (data ports for the stages). Chosen from 20000-32000,
+/// below every OS's ephemeral range: ports from that range get reused for the test processes'
+/// own outgoing connections (seen on macOS and Windows CI). Tests in this binary run in
+/// parallel, so ranges handed out here are remembered and never given out twice.
 fn free_port_run(n: u16) -> u16 {
-    for _ in 0..200 {
-        let base = 20_000 + (std::process::id() as u16 % 20_000) + (Instant::now().elapsed().subsec_nanos() % 997) as u16;
+    static TAKEN: std::sync::Mutex<Vec<u16>> = std::sync::Mutex::new(Vec::new());
+    let mut seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos() as u64 ^ (std::process::id() as u64) << 20;
+    for _ in 0..500 {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        let base = 20_000 + (seed % 12_000) as u16;
+        let mut taken = TAKEN.lock().unwrap();
+        if taken.iter().any(|&t| base < t + n && t < base + n) {
+            continue;
+        }
         if (0..n).all(|i| TcpListener::bind(("0.0.0.0", base + i)).is_ok()) {
+            taken.push(base);
             return base;
         }
     }
@@ -200,4 +213,87 @@ fn coordinator_and_two_members_generate_through_the_api() {
     let (_, r) = http(portal, "GET", "/api/pipeline", None);
     assert!(r["pipeline"].is_null(), "{r}");
     drop(a);
+}
+
+/// One copy of the model, on member b only. The coordinator (head) and member a fetch just
+/// their layer slices from b, cache them, and the pipeline answers exactly as before.
+#[test]
+fn a_model_on_one_device_is_shared_with_the_others() {
+    let dir = std::env::temp_dir().join(format!("clamor-node-share-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let Some(greedy) = python_fixture(&dir) else { return };
+    let d = |n: &str| {
+        let p = dir.join(n);
+        std::fs::create_dir_all(&p).unwrap();
+        p.display().to_string()
+    };
+    let (coord_models, a_models, b_models) = (d("coord-models"), d("a-models"), d("b-models"));
+    let (coord_cache, a_cache, b_cache) = (d("coord-cache"), d("a-cache"), d("b-cache"));
+    std::fs::rename(dir.join("tiny.gguf"), Path::new(&b_models).join("tiny.gguf")).unwrap();
+
+    let (ctrl, portal, data) = (free_port(), free_port(), free_port_run(3));
+    let (ctrl_s, portal_s, data_s) = (format!("127.0.0.1:{ctrl}"), format!("127.0.0.1:{portal}"), data.to_string());
+    let coord = spawn(&dir, "coordinator", &["coordinator", "--token", "T", "--id", "coord", "--bind", &ctrl_s, "--portal", &portal_s, "--models", &coord_models, "--cache-dir", &coord_cache, "--data-port", &data_s, "--quick-bench", "--no-update-check"]);
+    wait_for("the portal", Duration::from_secs(30), &[&coord], || TcpStream::connect(("127.0.0.1", portal)).is_ok());
+    let a = spawn(&dir, "member-a", &["join", &ctrl_s, "--token", "T", "--id", "a", "--models", &a_models, "--cache-dir", &a_cache, "--no-update-check"]);
+    let b = spawn(&dir, "member-b", &["join", &ctrl_s, "--token", "T", "--id", "b", "--models", &b_models, "--cache-dir", &b_cache, "--no-update-check"]);
+    let all = [&coord, &a, &b];
+    let mut b_share = 0;
+    wait_for("members to finish the muster", Duration::from_secs(120), &all, || {
+        let (_, r) = http(portal, "GET", "/api/roster", None);
+        let nodes = r["nodes"].as_array().cloned().unwrap_or_default();
+        if let Some(bn) = nodes.iter().find(|n| n["id"] == "b") {
+            b_share = bn["share_port"].as_u64().unwrap_or(0) as u16;
+        }
+        ["a", "b"].iter().all(|id| nodes.iter().any(|n| n["id"] == *id && n["state"] == "ready"))
+    });
+    let (_, r) = http(portal, "GET", "/api/roster", None);
+    let holds = |id: &str| r["nodes"].as_array().unwrap().iter().find(|n| n["id"] == id).unwrap()["models"].as_array().unwrap().len();
+    assert_eq!((holds("coord"), holds("a"), holds("b")), (0, 0, 1), "only b has the model: {r}");
+
+    // b's model server wants the swarm token.
+    let (st, _) = http(b_share, "GET", "/models", None);
+    assert_eq!(st, 401, "model sharing must require the token");
+
+    // Nobody has this one.
+    let (st, r) = http(portal, "POST", "/api/pipeline", Some(json!({ "model": "nope.gguf" })));
+    assert_eq!(st, 400, "{r}");
+    assert!(r["text"].as_str().unwrap_or("").contains("no device"), "{r}");
+
+    let start = || {
+        let (st, r) = http(portal, "POST", "/api/pipeline", Some(json!({ "model": "tiny.gguf", "ctx": 64, "stages": [{ "node": "a", "layers": [0, 2] }, { "node": "b", "layers": [2, 4] }] })));
+        assert_eq!(st, 200, "{r}");
+        wait_for("the pipeline", Duration::from_secs(180), &all, || {
+            let (_, r) = http(portal, "GET", "/api/pipeline", None);
+            assert!(r["failure"].is_null(), "pipeline failed: {r}");
+            r["ready"] == true
+        });
+    };
+    start();
+    let (st, r) = http(portal, "POST", "/api/generate", Some(json!({ "tokens": PROMPT, "max_new": N_GEN })));
+    assert_eq!(st, 200, "{r}");
+    let tokens: Vec<u32> = r["tokens"].as_array().unwrap().iter().map(|t| t.as_u64().unwrap() as u32).collect();
+    assert_eq!(tokens, greedy, "shared slices must compute exactly what the full file does");
+    let (st, r) = http(portal, "POST", "/api/chat", Some(json!({ "messages": [{ "role": "user", "content": "Hi" }], "max_new": 4 })));
+    assert_eq!(st, 200, "chat works from the fetched metadata: {r}");
+
+    // The slices landed in the caches: a has layers 0..2, the coordinator its embedding slice
+    // and the metadata; b, which holds the file, cached nothing.
+    let files = |p: &str| -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(p).unwrap().flatten().flat_map(|d| std::fs::read_dir(d.path()).unwrap().flatten().map(|f| f.file_name().to_string_lossy().into_owned())).collect();
+        v.sort();
+        v
+    };
+    assert_eq!(files(&a_cache), vec!["tiny.layers-0-2.gguf"]);
+    assert_eq!(files(&coord_cache), vec!["tiny.layers-0-0-embed.gguf", "tiny.layers-0-0.gguf"]);
+    assert!(files(&b_cache).is_empty(), "b used its own file");
+
+    // A second pipeline with the same layout loads from the cache: no new download.
+    let a_slice = std::fs::read_dir(&a_cache).unwrap().next().unwrap().unwrap().path().join("tiny.layers-0-2.gguf");
+    let before = std::fs::metadata(&a_slice).unwrap().modified().unwrap();
+    std::thread::sleep(Duration::from_millis(1100));
+    start();
+    assert_eq!(std::fs::metadata(&a_slice).unwrap().modified().unwrap(), before, "cached slice reused");
+    drop((a, b));
 }

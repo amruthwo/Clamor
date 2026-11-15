@@ -1,6 +1,7 @@
 //! Member node: joins a coordinator, runs benchmarks on request, heartbeats, and leaves
 //! gracefully on `Drain` or Ctrl-C. Reconnects with backoff if the connection drops.
 
+use crate::stage::{self, Assignment, EngineConfig};
 use crate::wire::{read_msg, write_msg};
 use anyhow::{bail, Result};
 use clamor_muster::{bench, net, probe};
@@ -8,8 +9,58 @@ use clamor_proto::*;
 use std::net::TcpListener;
 use std::time::Duration;
 use tokio::net::TcpStream;
-use tokio::sync::mpsc::unbounded_channel;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
+use tokio::task::AbortHandle;
 use tokio::time::{interval, sleep, timeout};
+
+/// Progress of this node's pipeline stage, reported back into the session loop.
+enum StageEvent {
+    Loaded { model: String, epoch: u32, stage_index: u32, load_ms: u64, abort: AbortHandle },
+    Failed { model: String, epoch: u32, stage_index: u32, error: String, stopped: bool },
+}
+
+/// This node's (at most one) pipeline stage. Dropping it stops the stage.
+#[derive(Default)]
+struct Slot {
+    epoch: Option<u32>,
+    loading: Option<AbortHandle>,
+    running: Option<AbortHandle>,
+}
+impl Slot {
+    fn stop(&mut self) {
+        for h in [self.loading.take(), self.running.take()].into_iter().flatten() {
+            h.abort();
+        }
+        self.epoch = None;
+    }
+}
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+fn spawn_stage(engine: EngineConfig, a: Assignment, tx: UnboundedSender<StageEvent>) -> AbortHandle {
+    tokio::spawn(async move {
+        let (model, epoch, stage_index) = (a.model.clone(), a.epoch, a.stage_index);
+        match stage::start(&engine, &a).await {
+            Ok(s) => {
+                let _ = tx.send(StageEvent::Loaded { model: model.clone(), epoch, stage_index, load_ms: s.load_ms, abort: s.abort.clone() });
+                let error = match s.task.await {
+                    Ok(Ok(())) => "stage stopped".to_string(),
+                    Ok(Err(e)) => format!("{e:#}"),
+                    Err(e) if e.is_cancelled() => return, // released on purpose
+                    Err(e) => e.to_string(),
+                };
+                let _ = tx.send(StageEvent::Failed { model, epoch, stage_index, error, stopped: true });
+            }
+            Err(e) => {
+                let _ = tx.send(StageEvent::Failed { model, epoch, stage_index, error: format!("{e:#}"), stopped: false });
+            }
+        }
+    })
+    .abort_handle()
+}
 
 enum Exit {
     Drained,
@@ -17,7 +68,7 @@ enum Exit {
     Rejected(String),
 }
 
-pub async fn join(addr: String, token: Option<String>, id: Option<String>) -> Result<()> {
+pub async fn join(addr: String, token: Option<String>, id: Option<String>, engine: EngineConfig) -> Result<()> {
     // Network-benchmark server the coordinator measures this device against.
     let listener = TcpListener::bind(("0.0.0.0", DEFAULT_BENCH_PORT)).or_else(|_| TcpListener::bind("0.0.0.0:0"))?;
     let bench_port = listener.local_addr()?.port();
@@ -28,7 +79,7 @@ pub async fn join(addr: String, token: Option<String>, id: Option<String>) -> Re
     let id = NodeId(id.unwrap_or_else(|| probe::default_node_id().0));
     let mut backoff = 2u64;
     loop {
-        match session(&addr, &token, &id, bench_port, &mut backoff).await {
+        match session(&addr, &token, &id, bench_port, &mut backoff, &engine).await {
             Ok(Exit::Drained) => {
                 println!("drained: left the swarm. Run `clamor-node join {addr}` to rejoin.");
                 return Ok(());
@@ -48,7 +99,7 @@ pub async fn join(addr: String, token: Option<String>, id: Option<String>) -> Re
     }
 }
 
-async fn session(addr: &str, token: &Option<String>, id: &NodeId, bench_port: u16, backoff: &mut u64) -> Result<Exit> {
+async fn session(addr: &str, token: &Option<String>, id: &NodeId, bench_port: u16, backoff: &mut u64, engine: &EngineConfig) -> Result<Exit> {
     let id2 = id.clone();
     let info = tokio::task::spawn_blocking(move || probe::probe_node(id2)).await?;
     let class = info.class;
@@ -83,9 +134,30 @@ async fn session(addr: &str, token: &Option<String>, id: &NodeId, bench_port: u1
     let mut hb = interval(Duration::from_secs(heartbeat_secs.max(1) as u64));
     let mut sampler = probe::LoadSampler::new();
     let mut policy = Policy::default_for(class);
+    let (stx, mut srx) = unbounded_channel::<StageEvent>();
+    let mut slot = Slot::default();
 
     loop {
         tokio::select! {
+            Some(ev) = srx.recv() => match ev {
+                StageEvent::Loaded { model, epoch, stage_index, load_ms, abort } => {
+                    if slot.epoch == Some(epoch) {
+                        println!("stage {stage_index} of {model} ready (epoch {epoch}, loaded in {load_ms} ms)");
+                        slot.loading = None;
+                        slot.running = Some(abort);
+                        write_msg(&mut wr, &Message::ShardReady { model, epoch, stage_index, load_ms }).await?;
+                    } else {
+                        abort.abort(); // superseded or released while loading
+                    }
+                }
+                StageEvent::Failed { model, epoch, stage_index, error, stopped } => {
+                    if slot.epoch == Some(epoch) {
+                        eprintln!("stage {stage_index} of {model} failed: {error}");
+                        slot.stop();
+                        write_msg(&mut wr, &Message::ShardFailed { model, epoch, stage_index, error, stopped }).await?;
+                    }
+                }
+            },
             _ = hb.tick() => {
                 let (cpu, ram) = sampler.sample();
                 write_msg(&mut wr, &Message::Heartbeat { cpu_load: cpu, ram_available_bytes: ram, power: None, running_tasks: 0 }).await?;
@@ -115,7 +187,21 @@ async fn session(addr: &str, token: &Option<String>, id: &NodeId, bench_port: u1
                     Message::Ping { seq, sent_unix_ms } => {
                         write_msg(&mut wr, &Message::Pong { seq, sent_unix_ms }).await?;
                     }
+                    Message::ShardAssign { model, epoch, session, stage_index, stage_count, layer_start, layer_end, listen_port, downstream, act_dtype, n_ctx, embed, sampling } => {
+                        println!("assigned stage {stage_index}/{stage_count}: layers {layer_start}..{layer_end} of {model} (epoch {epoch})");
+                        slot.stop(); // a new epoch supersedes whatever ran before
+                        let a = Assignment { model, epoch, session, stage_index, stage_count, layer_start, layer_end, listen_port, downstream, act_dtype, n_ctx, embed, sampling };
+                        slot.epoch = Some(epoch);
+                        slot.loading = Some(spawn_stage(engine.clone(), a, stx.clone()));
+                    }
+                    Message::ShardRelease { model, epoch } => {
+                        if slot.epoch.is_some_and(|e| e <= epoch) {
+                            println!("released {model} (epoch {epoch})");
+                            slot.stop();
+                        }
+                    }
                     Message::Drain { grace_secs } => {
+                        slot.stop();
                         println!("drain requested (grace {grace_secs}s); no work in flight, leaving");
                         write_msg(&mut wr, &Message::Drained).await?;
                         return Ok(Exit::Drained);

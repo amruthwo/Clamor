@@ -63,7 +63,7 @@ fn cpu() -> usize {
 }
 
 fn opts(wire: DType, n_ctx: u32) -> ExecutorOptions {
-    ExecutorOptions { stage: StageOptions { device: cpu(), n_ctx, n_threads: 2 }, wire, sampling: Sampling::default(), eos: Some(vec![]) }
+    ExecutorOptions { stage: StageOptions { device: cpu(), n_ctx, n_threads: 2, embed: None }, wire, sampling: Sampling::default(), eos: Some(vec![]) }
 }
 
 fn executors(f: &Fixture, bounds: &[u32], o: &ExecutorOptions) -> Vec<GgmlExecutor> {
@@ -287,7 +287,7 @@ fn sampling_is_seeded_and_top_k_1_is_greedy() {
 #[test]
 fn last_token_logits_match_full_logits() {
     let Some(f) = fixture() else { return };
-    let o = StageOptions { device: cpu(), n_ctx: 32, n_threads: 0 };
+    let o = StageOptions { device: cpu(), n_ctx: 32, ..Default::default() };
     let mut a = LlamaStage::load(&f.model, 0..4, o.clone()).unwrap();
     let mut b = LlamaStage::load(&f.model, 0..4, o).unwrap();
     let (LlamaOutput::Logits(all), LlamaOutput::Logits(last)) = (

@@ -78,10 +78,13 @@ pub struct StageOptions {
     pub n_ctx: u32,
     /// CPU threads (CPU device only). 0 means all available.
     pub n_threads: usize,
+    /// Whether this stage owns the token embedding and takes token ids. `None`: it does if it
+    /// holds layer 0. Set `Some(false)` for a stage holding `0..k` behind an embedding-only head.
+    pub embed: Option<bool>,
 }
 impl Default for StageOptions {
     fn default() -> Self {
-        Self { device: 0, n_ctx: 0, n_threads: 0 }
+        Self { device: 0, n_ctx: 0, n_threads: 0, embed: None }
     }
 }
 
@@ -142,6 +145,7 @@ impl Drop for KvCache {
 pub struct LlamaStage {
     hp: LlamaHparams,
     layers: Range<u32>,
+    embed: bool,
     n_ctx: u32,
     backend: sys::ggml_backend_t,
     galloc: sys::ggml_gallocr_t,
@@ -178,15 +182,21 @@ impl LlamaStage {
     pub fn load(path: &str, layers: Range<u32>, opts: StageOptions) -> Result<Self> {
         let g = GgufFile::open_with_meta(path)?;
         let hp = LlamaHparams::from_gguf(&g)?;
-        if layers.start >= layers.end || layers.end > hp.n_layer {
+        // An empty range is allowed only at the start: an embedding-only head (0..0), so the
+        // coordinator can own the request table without holding any layers.
+        let is_head = opts.embed.unwrap_or(layers.start == 0);
+        let embed_only = layers == (0..0) && is_head;
+        if (layers.start >= layers.end && !embed_only) || layers.end > hp.n_layer {
             return Err(Error::Ggml(format!("bad layer range {layers:?} for a {}-layer model", hp.n_layer)));
+        }
+        if is_head && layers.start != 0 {
+            return Err(Error::Ggml(format!("a stage starting at layer {} cannot embed tokens", layers.start)));
         }
         if hp.n_embd % hp.n_head != 0 || hp.n_head % hp.n_head_kv != 0 {
             return Err(Error::Gguf("head counts do not divide evenly".into()));
         }
         let n_ctx = if opts.n_ctx == 0 { hp.n_ctx_train } else { opts.n_ctx };
-        let is_head = layers.start == 0;
-        let is_tail = layers.end == hp.n_layer;
+        let is_tail = layers.end == hp.n_layer && !embed_only;
 
         let mut names: Vec<String> = Vec::new();
         if is_head {
@@ -223,6 +233,7 @@ impl LlamaStage {
             let mut stage = LlamaStage {
                 hp: hp.clone(),
                 layers: layers.clone(),
+                embed: is_head,
                 n_ctx,
                 backend,
                 galloc: sys::ggml_gallocr_new(sys::ggml_backend_get_default_buffer_type(backend)),
@@ -296,8 +307,9 @@ impl LlamaStage {
     pub fn layers(&self) -> Range<u32> {
         self.layers.clone()
     }
+    /// Owns the token embedding: takes token ids instead of hidden states.
     pub fn is_head(&self) -> bool {
-        self.layers.start == 0
+        self.embed
     }
     pub fn is_tail(&self) -> bool {
         self.layers.end == self.hp.n_layer
@@ -339,6 +351,11 @@ impl LlamaStage {
     fn kv_for(&mut self, request: u64) -> Result<&mut KvCache> {
         if !self.caches.contains_key(&request) {
             let n = self.blocks.len();
+            if n == 0 {
+                // Embedding-only head: nothing to cache, but track the position.
+                self.caches.insert(request, KvCache { ctx: null_mut(), buf: null_mut(), k: Vec::new(), v: Vec::new(), n_past: 0 });
+                return Ok(self.caches.get_mut(&request).unwrap());
+            }
             unsafe {
                 let ctx = sys::ggml_init(sys::ggml_init_params { mem_size: sys::ggml_tensor_overhead() * 2 * n, mem_buffer: null_mut(), no_alloc: true });
                 let mut k = Vec::with_capacity(n);
@@ -507,18 +524,21 @@ impl LlamaStage {
                 }
                 LlamaInput::Hidden(h) => sys::ggml_backend_tensor_set(in_x, h.as_ptr().cast(), 0, h.len() * 4),
             }
-            let positions: Vec<i32> = (pos..pos + n).map(|p| p as i32).collect();
-            sys::ggml_backend_tensor_set(in_pos, positions.as_ptr().cast(), 0, positions.len() * 4);
-            let rows: Vec<i64> = (pos..pos + n).map(|p| p as i64).collect();
-            sys::ggml_backend_tensor_set(in_rows, rows.as_ptr().cast(), 0, rows.len() * 8);
-            // Causal mask: token i (absolute position pos+i) sees cache cells 0..=pos+i.
-            let mut mask = vec![0f32; (n_kv * n64) as usize];
-            for i in 0..n as usize {
-                for j in (pos as usize + i + 1)..n_kv as usize {
-                    mask[i * n_kv as usize + j] = f32::NEG_INFINITY;
+            // With no layers these inputs are not in the graph and have no memory: skip them.
+            if !self.blocks.is_empty() {
+                let positions: Vec<i32> = (pos..pos + n).map(|p| p as i32).collect();
+                sys::ggml_backend_tensor_set(in_pos, positions.as_ptr().cast(), 0, positions.len() * 4);
+                let rows: Vec<i64> = (pos..pos + n).map(|p| p as i64).collect();
+                sys::ggml_backend_tensor_set(in_rows, rows.as_ptr().cast(), 0, rows.len() * 8);
+                // Causal mask: token i (absolute position pos+i) sees cache cells 0..=pos+i.
+                let mut mask = vec![0f32; (n_kv * n64) as usize];
+                for i in 0..n as usize {
+                    for j in (pos as usize + i + 1)..n_kv as usize {
+                        mask[i * n_kv as usize + j] = f32::NEG_INFINITY;
+                    }
                 }
+                sys::ggml_backend_tensor_set(in_mask, mask.as_ptr().cast(), 0, mask.len() * 4);
             }
-            sys::ggml_backend_tensor_set(in_mask, mask.as_ptr().cast(), 0, mask.len() * 4);
 
             let st = sys::ggml_backend_graph_compute(self.backend, gf);
             if !matches!(st, sys::ggml_status::GGML_STATUS_SUCCESS) {

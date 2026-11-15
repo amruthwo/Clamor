@@ -20,6 +20,16 @@ pub struct EngineConfig {
 }
 
 impl EngineConfig {
+    /// Check `--device` at startup. `cpu` needs no check, and skipping it matters: enumerating
+    /// devices initialises every GPU backend, and Metal compiles its shaders on first use
+    /// (21 s on a CI Mac), which would delay the coordinator's portal for nothing.
+    pub fn validate(&self) -> Result<()> {
+        if self.device.trim().eq_ignore_ascii_case("cpu") {
+            return Ok(());
+        }
+        self.device_index().map(|_| ())
+    }
+
     pub fn device_index(&self) -> Result<usize> {
         let devs = list_devices();
         let d = self.device.trim();
@@ -86,9 +96,8 @@ pub struct Started {
 /// links to the neighbours come up in the background as they start too.
 pub async fn start(cfg: &EngineConfig, a: &Assignment) -> Result<Started> {
     let path = resolve_model(&cfg.models_dir, &a.model)?;
-    let device = cfg.device_index()?;
-    let opts = ExecutorOptions {
-        stage: StageOptions { device, n_ctx: a.n_ctx, n_threads: 0, embed: Some(a.embed) },
+    let mut opts = ExecutorOptions {
+        stage: StageOptions { device: 0, n_ctx: a.n_ctx, n_threads: 0, embed: Some(a.embed) },
         wire: match a.act_dtype {
             ActDType::F16 => DType::F16,
             ActDType::I8 => DType::I8,
@@ -98,8 +107,14 @@ pub async fn start(cfg: &EngineConfig, a: &Assignment) -> Result<Started> {
     };
     let (layers, p) = (a.layer_start..a.layer_end, path.display().to_string());
     let t0 = Instant::now();
-    let exec = tokio::task::spawn_blocking(move || GgmlExecutor::load(&p, layers, opts))
-        .await?
+    let cfg2 = cfg.clone();
+    // Looking up the device starts every compiled-in GPU backend, which can be slow (Metal
+    // compiles its shaders on first use). Keep it on the blocking pool, next to the load.
+    let exec = tokio::task::spawn_blocking(move || -> Result<GgmlExecutor> {
+        opts.stage.device = cfg2.device_index()?;
+        Ok(GgmlExecutor::load(&p, layers, opts)?)
+    })
+    .await?
         .with_context(|| format!("loading layers {}..{} of {}", a.layer_start, a.layer_end, a.model))?;
     let load_ms = t0.elapsed().as_millis() as u64;
 

@@ -79,7 +79,7 @@ async fn main() -> Result<()> {
         Cmd::Coordinator { swarm, bind, portal, token, id, engine, data_port, quick_bench } => {
             let id = NodeId(id.unwrap_or_else(|| probe::default_node_id().0));
             let engine = engine.config();
-            engine.device_index()?; // fail fast on a bad --device
+            engine.validate()?; // fail fast on a bad --device
             let shared = Arc::new(Mutex::new(coordinator::Swarm::new(swarm, token, id.clone(), engine, data_port, quick_bench)));
             tokio::spawn(coordinator::register_self(shared.clone(), id));
             tokio::spawn(coordinator::reaper(shared.clone()));
@@ -94,7 +94,7 @@ async fn main() -> Result<()> {
         Cmd::Join { addr, token, id, engine } => {
             let addr = if addr.contains(':') { addr } else { format!("{addr}:{DEFAULT_PORT}") };
             let engine = engine.config();
-            engine.device_index()?;
+            engine.validate()?;
             member::join(addr, token, id, engine).await
         }
     }

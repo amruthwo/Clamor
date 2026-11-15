@@ -120,7 +120,9 @@ fn coordinator_and_two_members_generate_through_the_api() {
     let start = |stages: Value| {
         let (st, r) = http(portal, "POST", "/api/pipeline", Some(json!({ "model": "tiny.gguf", "ctx": 64, "stages": stages })));
         assert_eq!(st, 200, "{r}");
-        wait_for("the pipeline", Duration::from_secs(60), &all, || {
+        // Generous: the first GPU-backend start in a new binary can compile shaders (macOS Metal
+        // took 21 s on a CI runner) even when the stages run on the CPU.
+        wait_for("the pipeline", Duration::from_secs(180), &all, || {
             let (_, r) = http(portal, "GET", "/api/pipeline", None);
             assert!(r["failure"].is_null(), "pipeline failed: {r}");
             r["ready"] == true

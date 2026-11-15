@@ -1,8 +1,8 @@
 //! Clamor's ggml engine: raw bindings plus a small safe layer.
 //!
-//! Scope of this scaffold: enumerate compute devices, run a matmul on any
-//! backend (smoke test + micro-benchmark), and read GGUF metadata. The layer-range
-//! Llama graph and the `StageExecutor` implementation come next (see CLAUDE.md).
+//! Enumerate compute devices, run a matmul on any backend (smoke test + micro-benchmark),
+//! read GGUF metadata, and run a layer range of a Llama model (`LlamaStage`). The
+//! `StageExecutor` implementation comes next (see CLAUDE.md).
 #![allow(non_camel_case_types, non_snake_case, non_upper_case_globals, dead_code, clippy::all)]
 #[allow(warnings)]
 pub mod bindings;
@@ -10,10 +10,12 @@ pub use bindings as sys;
 
 mod devices;
 mod gguf;
+mod llama;
 mod smoke;
 
 pub use devices::{list_devices, DeviceInfo, DeviceKind};
 pub use gguf::{GgufFile, GgufTensorInfo};
+pub use llama::{LlamaHparams, LlamaInput, LlamaOutput, LlamaStage, StageOptions};
 pub use smoke::{matmul_check, matmul_gflops, MatmulReport};
 
 #[derive(Debug, thiserror::Error)]

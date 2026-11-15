@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Write a tiny random-weight Llama-architecture GGUF (f32) for engine tests.
 
-Usage: gen_tiny_llama.py OUT.gguf [--layers 4] [--seed 0]
+Usage: gen_tiny_llama.py OUT.gguf [--layers 4] [--seed 0] [--tied]
+--tied omits output.weight, so lm_head reuses token_embd.weight (as many small models do).
 Weights are in ggml convention (RoPE on adjacent pairs), so ref_forward.py and the
 Rust graph must agree on exactly this definition.
 """
@@ -13,6 +14,7 @@ p = argparse.ArgumentParser()
 p.add_argument("out")
 p.add_argument("--layers", type=int, default=4)
 p.add_argument("--seed", type=int, default=0)
+p.add_argument("--tied", action="store_true", help="omit output.weight (lm_head tied to token_embd)")
 a = p.parse_args()
 
 E, H, HKV, FF, V, CTX = 64, 4, 2, 128, 128, 64
@@ -48,7 +50,8 @@ for i in range(a.layers):
     wr.add_tensor(f"blk.{i}.ffn_up.weight", w(FF, E))
     wr.add_tensor(f"blk.{i}.ffn_down.weight", w(E, FF))
 wr.add_tensor("output_norm.weight", (1 + 0.1 * rng.standard_normal(E)).astype(np.float32))
-wr.add_tensor("output.weight", w(V, E))
+if not a.tied:
+    wr.add_tensor("output.weight", w(V, E))
 
 wr.write_header_to_file()
 wr.write_kv_data_to_file()

@@ -12,7 +12,7 @@ machine, runs at low priority, and steps aside when you need the device.
 | **Work on battery** | Off: a laptop or phone pauses whenever it is unplugged, and resumes when you plug it back in. |
 | **Memory Clamor may use** | A share of the device's RAM. Clamor also always leaves 512 MB free, whatever the share. |
 | **CPU Clamor may use** | A share of the device's fast cores. One fast core always stays free for you. |
-| **Priority** | **Low**: your own apps always get the CPU first, so the device never feels slow. **Normal**: Clamor competes with them equally. |
+| **Priority** | **Low**: your own apps always get the CPU first, so the device never feels slow. **Normal**: Clamor competes with them equally. Either way, only Clamor's model computation is affected: its connection to the swarm always runs at normal priority, so a busy device never looks disconnected. |
 
 "Pausing" never interrupts a reply that is already being written: it finishes, and then the
 device takes no new requests until it is available again.
@@ -48,11 +48,8 @@ otherwise a device uses the settings it was last given from the dashboard; other
 ## When changes take effect
 
 - **Take part, work on battery:** within a few seconds.
-- **Memory and CPU:** from the next pipeline (a model that is already loaded keeps its layout).
-- **Priority, Low:** immediately.
-- **Priority, Normal:** immediately on Windows. On Linux and macOS a program may lower its own
-  priority but not raise it again, so going back to Normal takes effect the next time Clamor
-  starts on that device. The dashboard says so.
+- **Memory, CPU and priority:** from the next pipeline (a model that is already loaded keeps
+  running as it was set up). No restart is needed on any system.
 
 ## Messages you may see
 

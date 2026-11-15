@@ -22,8 +22,9 @@ use std::sync::{Arc, Mutex};
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
-    /// CPU priority for Clamor's work. `low` (default) lets your own apps always go first, so a
-    /// busy swarm never makes this machine unresponsive; `normal` competes with them equally.
+    /// CPU priority for Clamor's model computation. `low` (default) lets your own apps always go
+    /// first, so a busy swarm never makes this machine unresponsive; `normal` competes with them
+    /// equally. Heartbeats and networking always run at normal priority.
     #[arg(long, global = true, value_enum)]
     priority: Option<Priority>,
     /// Where this device keeps its settings (default: the system config folder, e.g.
@@ -36,28 +37,6 @@ struct Cli {
 enum Priority {
     Low,
     Normal,
-}
-
-/// Lower this process's CPU priority. Called before the async runtime starts, because on Linux
-/// priority is per thread and new threads inherit their creator's.
-fn lower_priority() {
-    if neighbour::set_priority(true).is_ok() {
-        return;
-    }
-    #[cfg(unix)]
-    unsafe {
-        // nice 10: below interactive apps, above batch jobs.
-        if libc::setpriority(libc::PRIO_PROCESS, 0, 10) != 0 {
-            eprintln!("could not lower CPU priority (continuing at normal priority)");
-        }
-    }
-    #[cfg(windows)]
-    unsafe {
-        use windows_sys::Win32::System::Threading::{GetCurrentProcess, SetPriorityClass, BELOW_NORMAL_PRIORITY_CLASS};
-        if SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS) == 0 {
-            eprintln!("could not lower CPU priority (continuing at normal priority)");
-        }
-    }
 }
 
 #[derive(Subcommand)]
@@ -227,14 +206,6 @@ impl EngineArgs {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     neighbour::set_config_dir(cli.config_dir.clone());
-    // --priority, else the setting saved from the dashboard, else low.
-    let low = match cli.priority {
-        Some(p) => p == Priority::Low,
-        None => neighbour::saved_settings().map(|p| p.low_priority).unwrap_or(true),
-    };
-    if low && matches!(cli.cmd, Cmd::Coordinator { .. } | Cmd::Join { .. }) {
-        lower_priority();
-    }
     tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(run(cli.cmd, cli.priority))
 }
 
@@ -299,7 +270,8 @@ async fn run(cmd: Cmd, priority: Option<Priority>) -> Result<()> {
             // Share our models with members that lack them (layer slices), behind the join token.
             let share_port = share::serve(DEFAULT_SHARE_PORT, engine.models_dir.clone(), token.clone()).await?;
             let shared = Arc::new(Mutex::new(coordinator::Swarm::new(swarm, token, id.clone(), engine, data_port, quick_bench, Some(share_port))));
-            tokio::spawn(coordinator::register_self(shared.clone(), id, policy.policy(priority)));
+            coordinator::register_self(shared.clone(), id, policy.policy(priority)).await;
+            tokio::spawn(coordinator::bench_self(shared.clone()));
             tokio::spawn(coordinator::reaper(shared.clone()));
             tokio::spawn(coordinator::monitor_self(shared.clone()));
             tokio::spawn(coordinator::updates(shared.clone(), updates.policy()));

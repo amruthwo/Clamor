@@ -143,54 +143,32 @@ mod tests {
     }
 }
 
-static LOW_PRIORITY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// Whether Clamor currently runs at low priority.
-pub fn is_low_priority() -> bool {
-    LOW_PRIORITY.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-/// Switch Clamor's CPU priority while it runs. Lowering always works. Raising it back needs
-/// administrator rights on Linux and macOS, so there it takes effect at the next start.
-pub fn set_priority(low: bool) -> Result<(), String> {
-    if low == is_low_priority() {
-        return Ok(());
-    }
-    let restart = "returning to normal priority takes effect when Clamor restarts (Linux and macOS only let a program lower its own priority)";
+/// Lower the *calling thread's* CPU priority. Each stage computes on its own thread that calls
+/// this, so only the number-crunching runs at low priority: heartbeats, the API and networking
+/// stay at normal priority and cannot be starved when the owner's apps load the machine.
+/// ggml's worker threads inherit it on Linux (nice is per thread) and macOS (QoS); on Windows
+/// they are lowered by ggml itself (`StageOptions::low_priority`).
+pub fn lower_this_thread() -> Result<(), String> {
     #[cfg(any(target_os = "linux", target_os = "android"))]
-    {
-        // Priority is per thread on Linux: change every existing thread. New ones inherit it.
-        let nice = if low { 10 } else { 0 };
-        let mut failed = false;
-        if let Ok(tasks) = std::fs::read_dir("/proc/self/task") {
-            for t in tasks.flatten() {
-                if let Some(tid) = t.file_name().to_str().and_then(|s| s.parse::<libc::id_t>().ok()) {
-                    if unsafe { libc::setpriority(libc::PRIO_PROCESS, tid, nice) } != 0 {
-                        failed = true;
-                    }
-                }
-            }
-        }
-        if failed {
-            return Err(if low { "could not lower Clamor's priority".into() } else { restart.into() });
+    unsafe {
+        let tid = libc::syscall(libc::SYS_gettid) as libc::id_t;
+        if libc::setpriority(libc::PRIO_PROCESS, tid, 10) != 0 {
+            return Err("could not lower the compute thread's priority".into());
         }
     }
-    #[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
-    {
-        if unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, if low { 10 } else { 0 }) } != 0 {
-            return Err(if low { "could not lower Clamor's priority".into() } else { restart.into() });
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    unsafe {
+        if libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0) != 0 {
+            return Err("could not lower the compute thread's priority".into());
         }
     }
     #[cfg(windows)]
     unsafe {
-        use windows_sys::Win32::System::Threading::{GetCurrentProcess, SetPriorityClass, BELOW_NORMAL_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS};
-        let class = if low { BELOW_NORMAL_PRIORITY_CLASS } else { NORMAL_PRIORITY_CLASS };
-        if SetPriorityClass(GetCurrentProcess(), class) == 0 {
-            return Err("could not change Clamor's priority".into());
+        use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL};
+        if SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL) == 0 {
+            return Err("could not lower the compute thread's priority".into());
         }
     }
-    let _ = restart;
-    LOW_PRIORITY.store(low, std::sync::atomic::Ordering::Relaxed);
     Ok(())
 }
 

@@ -25,7 +25,14 @@ a = p.parse_args()
 toks = [int(t) for t in a.tokens.split(",")]
 
 r = gguf.GGUFReader(a.model)
-T = {t.name: np.array(t.data, dtype=np.float32).reshape(tuple(reversed(t.shape.tolist()))) for t in r.tensors}
+def tensor_f32(t):
+    """Any GGUF tensor as f32 numpy, shaped [out, in] (quantized types dequantized by the gguf package)."""
+    if t.tensor_type in (gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16):
+        x = np.array(t.data, dtype=np.float32)
+    else:
+        x = gguf.quants.dequantize(t.data, t.tensor_type).astype(np.float32)
+    return x.reshape(tuple(reversed(t.shape.tolist())))
+T = {t.name: tensor_f32(t) for t in r.tensors}
 def kv(k):
     f = r.fields[k]
     return f.contents()

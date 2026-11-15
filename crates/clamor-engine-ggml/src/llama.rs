@@ -76,7 +76,7 @@ pub struct StageOptions {
     pub device: usize,
     /// KV cache length per request. 0 means the model's training context.
     pub n_ctx: u32,
-    /// CPU threads (CPU device only). 0 means all available.
+    /// CPU threads (CPU device only). 0 means `default_threads()`: the performance cores.
     pub n_threads: usize,
     /// Whether this stage owns the token embedding and takes token ids. `None`: it does if it
     /// holds layer 0. Set `Some(false)` for a stage holding `0..k` behind an embedding-only head.
@@ -226,7 +226,7 @@ impl LlamaStage {
                 return Err(Error::Ggml("backend init failed".into()));
             }
             if sys::ggml_backend_is_cpu(backend) {
-                let n = if opts.n_threads == 0 { std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4) } else { opts.n_threads };
+                let n = if opts.n_threads == 0 { crate::cpu::default_threads() } else { opts.n_threads };
                 sys::ggml_backend_cpu_set_n_threads(backend, n as i32);
             }
             // From here on, `stage` owns everything, so an early return frees it.

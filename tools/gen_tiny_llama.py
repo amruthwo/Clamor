@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Write a tiny random-weight Llama-architecture GGUF (f32) for engine tests.
 
-Usage: gen_tiny_llama.py OUT.gguf [--layers 4] [--seed 0] [--tied]
+Usage: gen_tiny_llama.py OUT.gguf [--layers 4] [--seed 0] [--tied] [--bytes-vocab]
 --tied omits output.weight, so lm_head reuses token_embd.weight (as many small models do).
 Weights are in ggml convention (RoPE on adjacent pairs), so ref_forward.py and the
 Rust graph must agree on exactly this definition.
@@ -15,9 +15,13 @@ p.add_argument("out")
 p.add_argument("--layers", type=int, default=4)
 p.add_argument("--seed", type=int, default=0)
 p.add_argument("--tied", action="store_true", help="omit output.weight (lm_head tied to token_embd)")
+p.add_argument("--bytes-vocab", action="store_true",
+               help="add a byte-level BPE tokenizer: the 256 byte tokens + ChatML specials, no merges (vocab 259)")
 a = p.parse_args()
 
 E, H, HKV, FF, V, CTX = 64, 4, 2, 128, 128, 64
+if a.bytes_vocab:
+    V = 259
 HD = E // H
 rng = np.random.default_rng(a.seed)
 
@@ -37,6 +41,24 @@ wr.add_layer_norm_rms_eps(1e-5)
 wr.add_rope_dimension_count(HD)
 wr.add_rope_freq_base(10000.0)
 wr.add_vocab_size(V)
+if a.bytes_vocab:
+    # GPT-2's byte alphabet, in byte order, then the ChatML control tokens.
+    printable = list(range(ord("!"), ord("~") + 1)) + list(range(0xA1, 0xAD)) + list(range(0xAE, 0x100))
+    enc, n = {}, 0
+    for b in range(256):
+        if b in printable:
+            enc[b] = chr(b)
+        else:
+            n += 1
+            enc[b] = chr(255 + n)
+    tokens = [enc[b] for b in range(256)] + ["<|endoftext|>", "<|im_start|>", "<|im_end|>"]
+    wr.add_tokenizer_model("gpt2")
+    wr.add_tokenizer_pre("gpt2")
+    wr.add_token_list(tokens)
+    wr.add_token_types([1] * 256 + [3, 3, 3])
+    wr.add_token_merges([])
+    wr.add_bos_token_id(256)
+    wr.add_eos_token_id(258)
 
 wr.add_tensor("token_embd.weight", w(V, E, scale=0.5))
 for i in range(a.layers):

@@ -19,8 +19,13 @@ thiserror = "2"
 anyhow = "1.0.104"
 bytes = "1.12.1"
 clamor-transport = { path = "../clamor-transport" }
+fancy-regex = "0.14"
+minijinja = { version = "3.1.0", features = ["json", "loop_controls", "serde"] }
+minijinja-contrib = { version = "3.1.0", features = ["pycompat"] }
+serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
+serde_json = "1"
 tokio = { version = "1.54.1", features = ["full"] }
 
 [build-dependencies]

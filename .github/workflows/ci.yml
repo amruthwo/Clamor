@@ -13,6 +13,9 @@ env:
   CARGO_TERM_COLOR: always
   # Fail (not skip) the engine reference tests if numpy/gguf are missing.
   CLAMOR_REQUIRE_PY: "1"
+  # Same for the tokenizer and chat-template tests, which compare against Hugging Face's
+  # reference implementations (needs network access to huggingface.co).
+  CLAMOR_REQUIRE_HF: "1"
 
 jobs:
   test:
@@ -33,7 +36,7 @@ jobs:
         with: { key: "${{ matrix.name }}" }
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
-      - run: pip install numpy gguf
+      - run: pip install numpy gguf tokenizers jinja2 huggingface_hub
       - name: Test workspace
         shell: bash
         run: |

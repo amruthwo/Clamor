@@ -4,6 +4,8 @@
 use crate::coordinator::{NodeEntry, Shared};
 use crate::pipeline::{self, PipelineRequest};
 use clamor_transport::stage::{DoneReason, Event, HeadHandle};
+use clamor_engine_ggml::{encode_chat, ChatMessage, Tokenizer};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -27,7 +29,7 @@ pub async fn serve(bind: String, shared: Shared) -> anyhow::Result<()> {
         .route("/api/nodes/{id}/policy", post(set_policy))
         .route("/api/pipeline", get(pipeline_status).post(pipeline_start).delete(pipeline_stop))
         .route("/api/generate", post(generate))
-        .route("/api/chat", post(chat_stub))
+        .route("/api/chat", post(chat))
         .with_state(shared);
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     println!("web portal on http://{bind}/");
@@ -215,21 +217,32 @@ impl Drop for CancelOnDrop {
     }
 }
 
-async fn generate(State(shared): State<Shared>, Json(g): Json<GenerateRequest>) -> ApiResult {
-    let (head, epoch) = {
-        let sw = shared.lock().unwrap();
-        let p = sw.pipeline.as_ref().ok_or((StatusCode::SERVICE_UNAVAILABLE, "no pipeline: POST /api/pipeline first".to_string()))?;
-        if let Some(f) = p.failure() {
-            return Err((StatusCode::SERVICE_UNAVAILABLE, format!("pipeline failed: {f}")));
-        }
-        if !p.ready() {
-            return Err((StatusCode::SERVICE_UNAVAILABLE, "pipeline is still loading".to_string()));
-        }
-        (p.head.clone().unwrap(), p.epoch)
-    };
-    let max_new = g.max_new.unwrap_or(64).min(1 << 16);
+/// The running pipeline's head, its epoch, context length and tokenizer, if it can take requests.
+fn ready_pipeline(shared: &Shared) -> Result<(HeadHandle, u32, u32, Option<Arc<Tokenizer>>), (StatusCode, String)> {
+    let sw = shared.lock().unwrap();
+    let p = sw.pipeline.as_ref().ok_or((StatusCode::SERVICE_UNAVAILABLE, "no pipeline: POST /api/pipeline first".to_string()))?;
+    if let Some(f) = p.failure() {
+        return Err((StatusCode::SERVICE_UNAVAILABLE, format!("pipeline failed: {f}")));
+    }
+    if !p.ready() {
+        return Err((StatusCode::SERVICE_UNAVAILABLE, "pipeline is still loading".to_string()));
+    }
+    Ok((p.head.clone().unwrap(), p.epoch, p.n_ctx, p.tokenizer.clone()))
+}
+
+struct Run {
+    tokens: Vec<u32>,
+    done: &'static str,
+    error: Option<String>,
+    ms: u64,
+    first_token_ms: Option<u64>,
+    decode_tok_s: Option<f64>,
+}
+
+/// Submit a prompt to the head and collect the reply.
+async fn run(head: HeadHandle, prompt: Vec<u32>, max_new: u32) -> Run {
     let t0 = Instant::now();
-    let (req, mut rx) = head.submit(g.tokens, max_new);
+    let (req, mut rx) = head.submit(prompt, max_new);
     let mut guard = CancelOnDrop { head, req, done: false };
     let mut tokens = Vec::new();
     let mut first_ms = None;
@@ -257,9 +270,40 @@ async fn generate(State(shared): State<Shared>, Json(g): Json<GenerateRequest>) 
         (Some(f), n) if n > 1 && ms > f => Some((n - 1) as f64 / ((ms - f) as f64 / 1000.0)),
         _ => None,
     };
-    Ok(Json(json!({ "tokens": tokens, "done": done, "error": error, "epoch": epoch, "ms": ms, "first_token_ms": first_ms, "decode_tok_s": decode_tok_s })))
+    Run { tokens, done, error, ms, first_token_ms: first_ms, decode_tok_s }
 }
 
-async fn chat_stub() -> (StatusCode, Json<Value>) {
-    (StatusCode::NOT_IMPLEMENTED, Json(json!({ "error": "chat and task console arrive in v0.2" })))
+async fn generate(State(shared): State<Shared>, Json(g): Json<GenerateRequest>) -> ApiResult {
+    let (head, epoch, _, _) = ready_pipeline(&shared)?;
+    let r = run(head, g.tokens, g.max_new.unwrap_or(64).min(1 << 16)).await;
+    Ok(Json(json!({ "tokens": r.tokens, "done": r.done, "error": r.error, "epoch": epoch, "ms": r.ms, "first_token_ms": r.first_token_ms, "decode_tok_s": r.decode_tok_s })))
+}
+
+#[derive(Deserialize)]
+struct ChatRequest {
+    messages: Vec<ChatMessage>,
+    max_new: Option<u32>,
+}
+
+/// `{"messages": [{"role": "user", "content": "Hi"}]}` -> the assistant's reply as text, using
+/// the model's own chat template and tokenizer.
+async fn chat(State(shared): State<Shared>, Json(c): Json<ChatRequest>) -> ApiResult {
+    let (head, epoch, n_ctx, tok) = ready_pipeline(&shared)?;
+    let tok = tok.ok_or((StatusCode::NOT_IMPLEMENTED, "this model's tokenizer is not supported yet; use /api/generate with token ids".to_string()))?;
+    if c.messages.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "messages is empty".into()));
+    }
+    let prompt = encode_chat(&tok, &c.messages).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let room = n_ctx.saturating_sub(prompt.len() as u32);
+    if room == 0 {
+        return Err((StatusCode::BAD_REQUEST, format!("the conversation is {} tokens; the context holds {n_ctx}", prompt.len())));
+    }
+    let r = run(head, prompt.clone(), c.max_new.unwrap_or(512).min(room)).await;
+    let text = tok.decode(&r.tokens, true);
+    Ok(Json(json!({
+        "message": { "role": "assistant", "content": text },
+        "done": r.done, "error": r.error, "epoch": epoch,
+        "prompt_tokens": prompt.len(), "completion_tokens": r.tokens.len(),
+        "ms": r.ms, "first_token_ms": r.first_token_ms, "decode_tok_s": r.decode_tok_s,
+    })))
 }

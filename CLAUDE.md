@@ -8,7 +8,7 @@ Read `README.md` first, then this file. Design doc lives in Matt's Claude Docs (
 - `clamor-muster`: probe/benchmark/plan CLI + library. Planner picks stage splits and ring/hub topology.
 - `clamor-node`: coordinator + member + portal (7421). `clamor-node coordinator|join`.
 - `clamor-transport`: own binary ring transport between stages; engine boundary is `trait StageExecutor`.
-- `clamor-engine-ggml`: vendored ggml (`vendor/ggml`, pinned in `vendor/ggml/VERSION`) built by CMake from build.rs.
+- `clamor-engine-ggml`: vendored ggml (`vendor/ggml`, pinned in `vendor/ggml.VERSION`) built by CMake from build.rs.
   Backends are cargo features: `cuda vulkan metal hip opencl`. Bindings are checked in; regenerate with `scripts/gen-bindings.sh`.
 
 ## State (v0.3)
@@ -40,4 +40,4 @@ NOT done: StageExecutor wiring, tokenizer, quantized weights, real models.
 ## Rules
 - Do not claim platform support that CI has not exercised. CI build-only jobs prove compilation only.
 - Keep `cargo test --workspace --release` green; every bug found gets a regression test.
-- Don't edit `vendor/ggml` except by re-vendoring (update VERSION). Don't change checked-in bindings by hand.
+- Don't edit `vendor/ggml` except by re-vendoring (update `vendor/ggml.VERSION`). Never put a file named `version` (any case) inside `vendor/ggml`: on case-insensitive macOS it shadows the C++ `<version>` header. Don't change checked-in bindings by hand.

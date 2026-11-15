@@ -465,6 +465,14 @@ impl LlamaStage {
             sys::ggml_set_output(out);
             sys::ggml_build_forward_expand(gf, out);
 
+            // Fail clearly instead of letting the backend log an error and return garbage.
+            for i in 0..sys::ggml_graph_n_nodes(gf) {
+                let node = sys::ggml_graph_node(gf, i);
+                if !sys::ggml_backend_supports_op(self.backend, node) {
+                    let device = crate::cstr(sys::ggml_backend_name(self.backend));
+                    return Err(Error::Unsupported { device, op: crate::cstr(sys::ggml_op_desc(node)) });
+                }
+            }
             if !sys::ggml_gallocr_alloc_graph(self.galloc, gf) {
                 return Err(Error::Ggml("cannot allocate compute graph".into()));
             }

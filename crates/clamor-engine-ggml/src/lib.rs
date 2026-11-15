@@ -26,6 +26,10 @@ pub enum Error {
     NoDevice(String),
     #[error("gguf: {0}")]
     Gguf(String),
+    /// The device cannot run an op this graph needs (e.g. a virtual GPU missing a feature).
+    /// Plan the stage onto another device.
+    #[error("{device} does not support op {op}")]
+    Unsupported { device: String, op: String },
 }
 pub type Result<T> = std::result::Result<T, Error>;
 

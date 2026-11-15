@@ -36,6 +36,11 @@ NOT done: StageExecutor wiring, tokenizer, quantized weights, real models.
   Head takes `Tokens`, others take `Hidden` (`n_tokens * n_embd` f32, token-major); tail returns logits.
 - KV cache is f32, `n_ctx` cells per request, written with `ggml_set_rows` so reads depend on the write.
 - Reference tests skip without python3+numpy+gguf unless `CLAMOR_REQUIRE_PY=1` (CI sets it).
+- Before computing, every graph node is checked with `ggml_backend_supports_op`; a device that can't run one
+  returns `Error::Unsupported` and the tests skip it (CPU must always pass). Hosted macOS runners expose an
+  "Apple Paravirtual device" without simdgroup reduction, so RMS_NORM/SOFT_MAX are unsupported there:
+  the macos CI job does not prove Metal inference works. Verify on a real Mac.
+- Device order: GPUs first. Index 0 is the CPU only in a CPU-only build.
 
 ## Rules
 - Do not claim platform support that CI has not exercised. CI build-only jobs prove compilation only.

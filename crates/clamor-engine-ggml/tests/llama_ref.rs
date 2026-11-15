@@ -88,6 +88,26 @@ fn cpu() -> usize {
     list_devices().iter().find(|d| d.kind == DeviceKind::Cpu).expect("a CPU device").index
 }
 
+/// Devices that can run the Llama graph. A device that reports `Unsupported` (e.g. the
+/// paravirtual GPU on hosted macOS runners, which lacks simdgroup reduction) is skipped with a
+/// note; any other error fails the test. The CPU must always be supported.
+fn usable_devices(f: &Fixture) -> Vec<DeviceInfo> {
+    list_devices()
+        .into_iter()
+        .filter(|d| {
+            let mut s = stage(f, 0..N_LAYER, d.index);
+            match s.forward(0, 0, LlamaInput::Tokens(&TOKENS[..1])) {
+                Ok(_) => true,
+                Err(Error::Unsupported { device, op }) if d.kind != DeviceKind::Cpu => {
+                    eprintln!("NOTE: skipping {device}: does not support {op}");
+                    false
+                }
+                Err(e) => panic!("{}: {e}", d.name),
+            }
+        })
+        .collect()
+}
+
 fn stage(f: &Fixture, layers: std::ops::Range<u32>, device: usize) -> LlamaStage {
     LlamaStage::load(&f.model, layers, StageOptions { device, n_ctx: 32, n_threads: 0 }).unwrap()
 }
@@ -121,7 +141,7 @@ fn hparams_from_gguf() {
 #[test]
 fn full_model_matches_reference_per_layer() {
     let Some(f) = fixture() else { return };
-    for d in list_devices() {
+    for d in usable_devices(f) {
         let mut s = stage(f, 0..N_LAYER, d.index);
         let (out, traced) = s.forward_traced(1, 0, LlamaInput::Tokens(&TOKENS)).unwrap();
         assert_eq!(traced.len(), N_LAYER as usize);
@@ -138,7 +158,7 @@ fn full_model_matches_reference_per_layer() {
 #[test]
 fn split_equals_full() {
     let Some(f) = fixture() else { return };
-    for d in list_devices() {
+    for d in usable_devices(f) {
         let mut full = stage(f, 0..N_LAYER, d.index);
         let want = logits(full.forward(1, 0, LlamaInput::Tokens(&TOKENS)).unwrap());
 
@@ -168,7 +188,7 @@ fn split_equals_full() {
 #[test]
 fn kv_cache_decode_matches_prefill() {
     let Some(f) = fixture() else { return };
-    for d in list_devices() {
+    for d in usable_devices(f) {
         // Single stage.
         let mut s = stage(f, 0..N_LAYER, d.index);
         let got = logits(s.forward(7, 0, LlamaInput::Tokens(&TOKENS[..3])).unwrap());

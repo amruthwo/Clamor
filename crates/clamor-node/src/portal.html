@@ -58,6 +58,8 @@
   dialog { max-height:calc(100dvh - 24px); }
   dialog form { display:flex; flex-direction:column; max-height:calc(100dvh - 26px); }
   .dlg-body { overflow-y:auto; }
+  .code { font:600 34px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing:.08em; text-align:center; padding:8px 0; }
+  .cmd { margin:0; padding:10px 12px; border:1px solid var(--line); border-radius:8px; white-space:pre-wrap; word-break:break-all; font-size:13px; }
   @media (max-width: 520px) {
     .row { flex-wrap:wrap; } .row input[type=range] { flex-basis:100%; } .readout { text-align:left; min-width:0; }
     .dlg-foot { flex-wrap:wrap; } .dlg-foot .spacer { display:none; }
@@ -69,6 +71,7 @@
 <header>
   <h1>Clamor</h1>
   <div class="sub" id="sub">connecting…</div>
+  <button id="add-device">Add device</button>
   <button class="primary" id="muster">Re-muster</button>
 </header>
 <main>
@@ -99,6 +102,21 @@
     <div class="chat"><input disabled placeholder="Chat and task console arrive in v0.2"><button disabled>Send</button></div>
   </section>
 </main>
+<dialog id="invite" aria-labelledby="inv-title">
+  <form method="dialog">
+    <div class="dlg-head"><h3 id="inv-title">Add a device</h3><div class="mute">Run this on the new device, with Clamor installed:</div></div>
+    <div class="dlg-body">
+      <div class="code" id="inv-code" aria-live="polite"></div>
+      <pre class="cmd" id="inv-cmd"></pre>
+      <div class="help" id="inv-help"></div>
+    </div>
+    <div class="dlg-foot">
+      <button type="button" id="inv-copy">Copy command</button>
+      <span class="spacer"></span>
+      <button value="cancel" class="primary">Done</button>
+    </div>
+  </form>
+</dialog>
 <dialog id="settings" aria-labelledby="set-title">
   <form method="dialog" id="set-form">
     <div class="dlg-head"><h3 id="set-title">Device settings</h3><div class="mute" id="set-sub"></div></div>
@@ -222,6 +240,29 @@ $('set-drain').onclick = () => {
   post('/api/nodes/' + encodeURIComponent(editing) + '/remove');
 };
 $('muster').onclick = () => post('/api/muster');
+let inviteTimer;
+$('add-device').onclick = async () => {
+  const r = await fetch('/api/invite', { method:'POST' });
+  const text = await r.text();
+  clearInterval(inviteTimer);
+  if (!r.ok) {
+    $('inv-code').textContent = '';
+    $('inv-cmd').textContent = 'clamor-node join <coordinator> --passphrase <the swarm\'s passphrase>';
+    $('inv-help').textContent = text + ' The passphrase is shown when the coordinator starts, and by “clamor-node swarms” on it.';
+  } else {
+    const j = JSON.parse(text), until = Date.now() + j.expires_in * 1000;
+    $('inv-code').textContent = j.code;
+    $('inv-cmd').textContent = j.command;
+    const tick = () => {
+      const s = Math.max(0, Math.round((until - Date.now()) / 1000));
+      $('inv-help').textContent = s ? `The code works once, for the next ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}. After joining, the device is remembered: “clamor-node join” is enough from then on.` : 'This code has expired. Close and press Add device again for a new one.';
+    };
+    tick(); inviteTimer = setInterval(tick, 1000);
+  }
+  $('invite').showModal();
+};
+$('invite').onclose = () => clearInterval(inviteTimer);
+$('inv-copy').onclick = () => navigator.clipboard?.writeText($('inv-cmd').textContent);
 
 function renderRoster(data) {
   $('sub').textContent = `swarm “${data.swarm}” · coordinator ${data.coordinator}`;
@@ -277,6 +318,7 @@ async function refresh() {
 refresh().then(() => {
   const m = location.hash.match(/^#settings=(.+)$/);
   if (m) openSettings(decodeURIComponent(m[1]));
+  if (location.hash === '#add-device') $('add-device').click();
 });
 setInterval(refresh, 3000);
 </script>

@@ -323,6 +323,9 @@ pub enum Message {
         /// The device's challenge to the coordinator (a fresh random value).
         #[serde(default)]
         auth_nonce: Option<String>,
+        /// The device joins with a one-time code from "Add device", not the passphrase.
+        #[serde(default)]
+        invite: bool,
         /// Models this node holds.
         #[serde(default)]
         models: Vec<ModelInfo>,
@@ -577,7 +580,7 @@ mod tests {
 
     #[test]
     fn hello_roundtrip() {
-        let msg = Message::Hello { proto: PROTOCOL_VERSION, info: sample_info(), bench_port: 7422, build: None, auth_nonce: None, models: vec![ModelInfo { name: "m.gguf".into(), size: 9, id: "ab".into() }], share_port: Some(7423), policy: None };
+        let msg = Message::Hello { proto: PROTOCOL_VERSION, info: sample_info(), bench_port: 7422, build: None, auth_nonce: None, invite: false, models: vec![ModelInfo { name: "m.gguf".into(), size: 9, id: "ab".into() }], share_port: Some(7423), policy: None };
         let mut buf = Vec::new();
         write_frame(&mut buf, &msg).unwrap();
         let back = read_frame(&mut buf.as_slice()).unwrap();
@@ -614,7 +617,7 @@ mod tests {
     fn older_hello_and_heartbeat_still_parse() {
         let hb = r#"{"type":"heartbeat","cpu_load":0.5,"ram_available_bytes":1,"power":null,"running_tasks":0}"#;
         assert!(matches!(decode(hb.as_bytes()).unwrap(), Message::Heartbeat { update_available: None, .. }));
-        let mut hello = serde_json::to_value(Message::Hello { proto: PROTOCOL_VERSION, info: sample_info(), bench_port: 1, build: None, auth_nonce: None, models: vec![], share_port: None, policy: None }).unwrap();
+        let mut hello = serde_json::to_value(Message::Hello { proto: PROTOCOL_VERSION, info: sample_info(), bench_port: 1, build: None, auth_nonce: None, invite: false, models: vec![], share_port: None, policy: None }).unwrap();
         for k in ["build", "models", "share_port", "policy", "auth_nonce"] {
             hello.as_object_mut().unwrap().remove(k);
         }

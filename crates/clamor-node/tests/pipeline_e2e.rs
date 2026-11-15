@@ -548,3 +548,65 @@ fn devices_find_the_swarm_on_the_local_network() {
     assert!(m.log().contains(&format!("found swarm '{swarm}'")), "{}", m.log());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// "Add device": a one-time code lets one device in, once; wrong codes are refused and, after a
+/// few, cancel it; the device then rejoins by its key. Codes come only from the coordinator
+/// itself (the test's requests come from localhost).
+#[test]
+fn devices_join_with_a_one_time_code() {
+    let dir = std::env::temp_dir().join(format!("clamor-node-code-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("models")).unwrap();
+    let models = dir.join("models").display().to_string();
+    let (ctrl, portal, data) = (free_port(), free_port(), free_port_run(1));
+    let (ctrl_s, portal_s, data_s) = (format!("127.0.0.1:{ctrl}"), format!("127.0.0.1:{portal}"), data.to_string());
+    let coord = spawn(&dir, "coordinator", &["coordinator", "--swarm", "codes", "--id", "coord", "--bind", &ctrl_s, "--portal", &portal_s, "--models", &models, "--data-port", &data_s, "--quick-bench", "--no-update-check", "--config-dir", &cfg_dir(&dir, "coordinator"), "--participation", "full", "--allow-battery"]);
+    wait_for("the portal", Duration::from_secs(30), &[&coord], || TcpStream::connect(("127.0.0.1", portal)).is_ok());
+    let member = |name: &'static str, id: &str, extra: &[&str]| {
+        let mut args = vec!["join", &ctrl_s, "--id", id, "--models", &models, "--no-update-check", "--participation", "full", "--allow-battery"];
+        args.extend_from_slice(extra);
+        let cfg = cfg_dir(&dir, id);
+        args.extend_from_slice(&["--config-dir", &cfg]);
+        spawn(&dir, name, &args)
+    };
+    let joined = |id: &str, procs: &[&Proc]| {
+        wait_for("the member to join", Duration::from_secs(60), procs, || {
+            let (_, r) = http(portal, "GET", "/api/roster", None);
+            r["nodes"].as_array().is_some_and(|ns| ns.iter().any(|n| n["id"] == id && n["state"] == "ready"))
+        })
+    };
+
+    let (st, inv) = http(portal, "POST", "/api/invite", None);
+    assert_eq!(st, 200, "{inv}");
+    let code = inv["code"].as_str().unwrap().to_string();
+    assert!(inv["command"].as_str().unwrap().ends_with(&format!("--code {code}")), "{inv}");
+    let mut m = member("wrong-code", "x", &["--code", "000-000"]);
+    assert!(!exits(&mut m, Duration::from_secs(30)));
+    if code != "000-000" {
+        assert!(m.log().contains("wrong code"), "{}", m.log());
+    }
+    let first = member("right-code", "first", &["--code", &code.replace('-', " ")]);
+    joined("first", &[&coord, &first]);
+    // Used up.
+    let mut m = member("used-code", "second", &["--code", &code]);
+    assert!(!exits(&mut m, Duration::from_secs(30)));
+    assert!(m.log().contains("already used"), "{}", m.log());
+    // Rejoins by key, without a code.
+    drop(first);
+    let again = member("rejoin", "first", &[]);
+    joined("first", &[&coord, &again]);
+
+    // Three wrong tries cancel a code.
+    let (_, inv) = http(portal, "POST", "/api/invite", None);
+    let code = inv["code"].as_str().unwrap().to_string();
+    let wrong = if code == "111-111" { "222-222" } else { "111-111" };
+    for _ in 0..3 {
+        let mut m = member("wrong-again", "y", &["--code", wrong]);
+        assert!(!exits(&mut m, Duration::from_secs(30)));
+    }
+    let mut m = member("too-late", "third", &["--code", &code]);
+    assert!(!exits(&mut m, Duration::from_secs(30)));
+    assert!(m.log().contains("already used"), "{}", m.log());
+    drop(again);
+    let _ = std::fs::remove_dir_all(&dir);
+}

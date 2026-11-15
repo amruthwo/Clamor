@@ -100,9 +100,31 @@ impl SwarmAuth {
     }
 }
 
+/// A one-time code for adding a device ("Add device" in the dashboard).
+pub struct Invite {
+    pub code: String,
+    pub expires_unix: u64,
+    pub failures: u32,
+}
+
+/// How long a one-time code works, and how many wrong tries it survives.
+pub const INVITE_SECS: u64 = 600;
+pub const INVITE_TRIES: u32 = 3;
+
+impl Invite {
+    pub fn new() -> Self {
+        let n = u32::from_le_bytes(crate::auth::random_bytes::<4>()) % 1_000_000;
+        Invite { code: format!("{:03}-{:03}", n / 1000, n % 1000), expires_unix: unix_now() + INVITE_SECS, failures: 0 }
+    }
+}
+
 pub struct Swarm {
     pub name: String,
     pub auth: SwarmAuth,
+    /// The one-time code in force, if any.
+    pub invite: Option<Invite>,
+    /// How devices reach the coordinator (`host` or `host:port`), for join commands.
+    pub join_hint: String,
     pub coordinator: NodeId,
     pub nodes: BTreeMap<NodeId, NodeEntry>,
     next_generation: u64,
@@ -119,7 +141,7 @@ pub struct Swarm {
 
 impl Swarm {
     pub fn new(name: String, auth: SwarmAuth, coordinator: NodeId, engine: EngineConfig, data_port: u16, quick_bench: bool, share_port: Option<u16>) -> Self {
-        Swarm { name, auth, coordinator, nodes: BTreeMap::new(), next_generation: 1, engine, data_port, quick_bench, pipeline: None, next_epoch: 1, share_port }
+        Swarm { name, auth, invite: None, join_hint: String::new(), coordinator, nodes: BTreeMap::new(), next_generation: 1, engine, data_port, quick_bench, pipeline: None, next_epoch: 1, share_port }
     }
 
     /// A node that held a pipeline stage is gone: that pipeline cannot run any more.
@@ -263,7 +285,7 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
         Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
         Err(e) => return Err(e.into()),
     };
-    let Message::Hello { proto, info, bench_port, build, models, share_port, policy: owner_policy, auth_nonce } = hello else {
+    let Message::Hello { proto, info, bench_port, build, models, share_port, policy: owner_policy, auth_nonce, invite } = hello else {
         write_msg(&mut wr, &Message::Reject { reason: "expected hello".into() }).await?;
         return Ok(());
     };
@@ -278,9 +300,25 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
     };
 
     // Authenticate: the device proves it is approved (its key) or knows the passphrase (SPAKE2).
+    // The shared secret: the passphrase, or the one-time code from "Add device".
+    let secret = {
+        let mut sw = shared.lock().unwrap();
+        if sw.invite.as_ref().is_some_and(|i| i.expires_unix < unix_now()) {
+            sw.invite = None;
+        }
+        match (invite, &sw.invite) {
+            (false, _) => Some(sw.auth.profile.passphrase.clone()),
+            (true, Some(i)) => Some(i.code.clone()),
+            (true, None) => None,
+        }
+    };
+    let Some(secret) = secret else {
+        write_msg(&mut wr, &Message::Reject { reason: "that code has expired or was already used: ask for a new one (Add device in the dashboard)".into() }).await?;
+        return Ok(());
+    };
     let (hs, ch) = {
         let sw = shared.lock().unwrap();
-        crate::auth::CoordinatorHandshake::start(&sw.auth.profile.swarm_id, &sw.name, &sw.auth.key, &sw.auth.profile.passphrase)
+        crate::auth::CoordinatorHandshake::start(&sw.auth.profile.swarm_id, &sw.name, &sw.auth.key, &secret)
     };
     write_msg(&mut wr, &Message::AuthChallenge { swarm_id: ch.swarm_id, swarm_name: ch.swarm_name, coordinator_key: ch.coordinator_key, nonce: ch.nonce, spake: ch.spake }).await?;
     let proof = match timeout(Duration::from_secs(30), read_msg(&mut rd)).await?? {
@@ -295,24 +333,42 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
         let mut sw = shared.lock().unwrap();
         let key = sw.auth.key.clone();
         let r = hs.verify(&key, &nonce_m, &proof, |k| sw.auth.profile.approved.iter().any(|d| d.key == k));
+        if invite && proof.spake.is_some() {
+            // One-time: used up by a success; a few wrong tries cancel it.
+            match &r {
+                Ok(_) => sw.invite = None,
+                Err(_) => {
+                    if let Some(i) = sw.invite.as_mut() {
+                        i.failures += 1;
+                        if i.failures >= INVITE_TRIES {
+                            println!("one-time code cancelled after {INVITE_TRIES} wrong tries");
+                            sw.invite = None;
+                        }
+                    }
+                }
+            }
+        }
         if let Ok((crate::auth::Verdict::Approve, _)) = &r {
             sw.auth.approve(&proof.device_key, &info.id.0);
-            println!("{} approved: it knows the passphrase (key {}…)", info.id, &proof.device_key[..16]);
+            println!("{} approved with the {} (key {}…)", info.id, if invite { "one-time code" } else { "passphrase" }, &proof.device_key[..16]);
             // Everyone's share servers must now accept the new device.
             sw.broadcast_approved();
         }
-        r.map(|(_, cp)| (cp, sw.auth.approved_keys()))
+        r.map(|(_, cp)| cp)
     };
-    let (cproof, approved_keys) = match verified {
+    let cproof = match verified {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("{} from {addr} refused: {e:#}", info.id);
-            write_msg(&mut wr, &Message::Reject { reason: format!("{e:#}") }).await?;
+            let reason = if invite { format!("{e:#}").replace("wrong passphrase", "wrong code") } else { format!("{e:#}") };
+            eprintln!("{} from {addr} refused: {reason}", info.id);
+            write_msg(&mut wr, &Message::Reject { reason }).await?;
             return Ok(());
         }
     };
     let device_key = proof.device_key.clone();
-    let welcome_auth = WelcomeAuth { signature: cproof.signature, confirm: cproof.confirm, approved_keys };
+    // approved_keys is filled in when the device enters the roster (same lock): from then on it
+    // receives every `Approved` broadcast, so no approval can fall between the two.
+    let mut welcome_auth = WelcomeAuth { signature: cproof.signature, confirm: cproof.confirm, approved_keys: Vec::new() };
 
     let (tx, mut rx) = unbounded_channel::<Message>();
     let id = info.id.clone();
@@ -356,6 +412,7 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
                     key: Some(device_key.clone()),
                 },
             );
+            welcome_auth.approved_keys = sw.auth.approved_keys();
             Admission::Ok { generation, swarm, coordinator, cached_bench: cached, quick: sw.quick_bench }
         }
     };

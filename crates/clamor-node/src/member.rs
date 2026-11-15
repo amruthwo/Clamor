@@ -82,6 +82,8 @@ enum Exit {
 pub struct Credentials {
     pub device: crate::auth::Device,
     pub passphrase: Option<String>,
+    /// A one-time code from "Add device" (instead of the passphrase).
+    pub code: Option<String>,
     pub config_dir: std::path::PathBuf,
 }
 
@@ -169,7 +171,9 @@ async fn session(addr: &str, creds: &Credentials, allowed: &share::AllowedKeys, 
     stream.set_nodelay(true)?;
     let (mut rd, mut wr) = stream.into_split();
     let nonce_m = hex::encode(crate::auth::random_bytes::<16>());
-    write_msg(&mut wr, &Message::Hello { proto: PROTOCOL_VERSION, info, bench_port, build: Some(crate::build_info::current()), auth_nonce: Some(nonce_m.clone()), models: models.clone(), share_port: Some(share_port), policy: owner_policy }).await?;
+    // A one-time code is good for the first join only; reconnects use this device's key.
+    let code = creds.code.as_deref().filter(|_| swarm_id.is_none());
+    write_msg(&mut wr, &Message::Hello { proto: PROTOCOL_VERSION, info, bench_port, build: Some(crate::build_info::current()), auth_nonce: Some(nonce_m.clone()), invite: code.is_some(), models: models.clone(), share_port: Some(share_port), policy: owner_policy }).await?;
 
     // The coordinator's challenge: prove we are approved (or know the passphrase), and check
     // that it is the coordinator we joined before (or knows the passphrase).
@@ -180,7 +184,7 @@ async fn session(addr: &str, creds: &Credentials, allowed: &share::AllowedKeys, 
     };
     let profile = crate::auth::MemberProfile::load(&creds.config_dir, &ch.swarm_id);
     let key = creds.device.swarm_key(&ch.swarm_id);
-    let (hs, proof) = match crate::auth::MemberHandshake::answer(&ch, &nonce_m, &key, profile.as_ref().map(|p| p.coordinator_key.as_str()), creds.passphrase.as_deref()) {
+    let (hs, proof) = match crate::auth::MemberHandshake::answer(&ch, &nonce_m, &key, profile.as_ref().map(|p| p.coordinator_key.as_str()), code.or(creds.passphrase.as_deref())) {
         Ok(v) => v,
         Err(e) => {
             let _ = write_msg(&mut wr, &Message::Leave).await;

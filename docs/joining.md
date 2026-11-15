@@ -40,6 +40,24 @@ clamor-node join --passphrase harbor-velvet-crab-lantern-ninety
 
 If there is more than one swarm on the network, name the one you want with `--swarm home`.
 
+### With a one-time code instead
+
+Rather than handing out the passphrase, you can give a new device a code that works once:
+press **Add device** in the dashboard, or run `clamor-node invite` on the coordinator. You get a
+six-digit code and the command to run:
+
+```bash
+clamor-node join 192.168.1.20 --code 067-944
+```
+
+The code works for one device, for ten minutes; three wrong tries cancel it. Like the
+passphrase, it is never sent over the network. After that first join the device is remembered
+exactly as if it had used the passphrase.
+
+Until the dashboard has sign-in, codes can be made only on the coordinator itself (the dashboard
+opened there, or `clamor-node invite`): anyone on your network can open the dashboard, and a
+code lets a device in.
+
 Capitals, spaces and dashes in the passphrase do not matter: `Harbor Velvet Crab Lantern Ninety`
 works too. If you would rather not type it on the command line (where other users of the same
 computer could see it), put it in the `CLAMOR_PASSPHRASE` environment variable instead.
@@ -117,7 +135,7 @@ you: `device.key` is the device's secret, and `swarms/` holds one file per swarm
 - The connections are not encrypted yet: someone on your network could read what devices send each
   other (prompts and replies included), although they cannot join or pretend to be a device.
 - The dashboard has no login: anyone on your network can open it.
-- Adding a device with a one-time code or QR code from the dashboard is coming next.
+- A QR code for adding phones comes with the phone app.
 - Finding the swarm on the network is tested on Linux. Some networks (guest Wi-Fi, some
   corporate networks) block it; give the address instead.
 
@@ -129,6 +147,7 @@ Only run Clamor on a network you trust until these are done.
 |---|---|
 | `first join: this needs the swarm's passphrase` | This device has not joined this swarm before. Add `--passphrase`. |
 | `wrong passphrase` | The words do not match the swarm's. `clamor-node swarms` on the coordinator shows them. |
+| `wrong code` / `that code has expired or was already used` | Make a new one: **Add device** in the dashboard. |
 | `this swarm's coordinator key changed since you joined` | The coordinator was reinstalled, its config folder was deleted, or something else is answering at its address. If you expected this, join again with `--passphrase`. |
 | `several swarms on the network` | Name the one you want: `--swarm home`. |
 | `no swarm found on the network` | The coordinator is not running, is started with `--no-mdns` or listens on one address only (`--bind`), or your network blocks discovery. Give its address. |

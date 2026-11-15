@@ -97,6 +97,10 @@ enum Cmd {
     Join {
         /// Coordinator address, host:port (default port 7420).
         addr: Option<String>,
+        /// A one-time code from "Add device" in the dashboard (or `clamor-node invite`), instead
+        /// of the passphrase.
+        #[arg(long, conflicts_with = "passphrase")]
+        code: Option<String>,
         /// Without an address: join the swarm with this name.
         #[arg(long)]
         swarm: Option<String>,
@@ -132,6 +136,12 @@ enum Cmd {
         /// The slice cache folder, if not the default.
         #[arg(long)]
         cache_dir: Option<std::path::PathBuf>,
+    },
+    /// On the coordinator: make a one-time code for adding a device (valid 10 minutes, once).
+    Invite {
+        /// The coordinator's web portal on this machine.
+        #[arg(long, default_value_t = format!("127.0.0.1:{DEFAULT_PORTAL_PORT}"))]
+        portal: String,
     },
     /// List the swarms this device coordinates or has joined.
     Swarms {
@@ -336,6 +346,7 @@ async fn run(cmd: Cmd, priority: Option<Priority>) -> Result<()> {
             // Share our models with the swarm's devices (layer slices).
             let share_port = share::serve(DEFAULT_SHARE_PORT, engine.models_dir.clone(), swarm_auth.allowed.clone()).await?;
             let shared = Arc::new(Mutex::new(coordinator::Swarm::new(swarm, swarm_auth, id.clone(), engine, data_port, quick_bench, Some(share_port))));
+            shared.lock().unwrap().join_hint = join_hint(&bind);
             coordinator::register_self(shared.clone(), id, policy.policy(priority)).await;
             tokio::spawn(coordinator::bench_self(shared.clone()));
             tokio::spawn(coordinator::reaper(shared.clone()));
@@ -349,7 +360,7 @@ async fn run(cmd: Cmd, priority: Option<Priority>) -> Result<()> {
             });
             coordinator::run_listener(&bind, shared).await
         }
-        Cmd::Join { addr, swarm, no_mdns, passphrase, id, engine, updates, policy } => {
+        Cmd::Join { addr, swarm, no_mdns, passphrase, code, id, engine, updates, policy } => {
             let config_dir = neighbour::config_dir();
             let addr = match addr {
                 Some(a) if a.contains(':') => a,
@@ -358,7 +369,7 @@ async fn run(cmd: Cmd, priority: Option<Priority>) -> Result<()> {
             };
             let engine = engine.config(None, None); // the key is per swarm: set once joined
             engine.validate()?;
-            let creds = member::Credentials { device: auth::Device::load_or_create(&config_dir)?, passphrase, config_dir };
+            let creds = member::Credentials { device: auth::Device::load_or_create(&config_dir)?, passphrase, code, config_dir };
             member::join(addr, creds, id, engine, updates.policy(), policy.policy(priority), !no_mdns).await
         }
         Cmd::Leave { swarm, purge, delete_swarm, cache_dir } => {
@@ -381,6 +392,22 @@ async fn run(cmd: Cmd, priority: Option<Priority>) -> Result<()> {
                 let (n, bytes) = cache::purge(&cache_dir, &id);
                 println!("removed {n} cached slice(s) of '{name}' ({:.1} GB)", bytes as f64 / 1e9);
             }
+            Ok(())
+        }
+        Cmd::Invite { portal } => {
+            let url = format!("http://{portal}/api/invite");
+            let r = tokio::task::spawn_blocking(move || -> Result<serde_json::Value> {
+                let mut resp = ureq::post(&url).config().http_status_as_error(false).build().send_empty()?;
+                let text = resp.body_mut().read_to_string()?;
+                if !resp.status().is_success() {
+                    anyhow::bail!("{text}");
+                }
+                Ok(serde_json::from_str(&text)?)
+            })
+            .await?
+            .map_err(|e| anyhow::anyhow!("could not reach the coordinator on this machine ({portal}): {e:#}"))?;
+            println!("one-time code: {} (works once, for {} minutes)", r["code"].as_str().unwrap_or("?"), r["expires_in"].as_u64().unwrap_or(0) / 60);
+            println!("on the new device: {}", r["command"].as_str().unwrap_or(""));
             Ok(())
         }
         Cmd::Swarms { scan } => {

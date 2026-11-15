@@ -24,8 +24,12 @@ struct Cli {
     cmd: Cmd,
     /// CPU priority for Clamor's work. `low` (default) lets your own apps always go first, so a
     /// busy swarm never makes this machine unresponsive; `normal` competes with them equally.
-    #[arg(long, global = true, value_enum, default_value_t = Priority::Low)]
-    priority: Priority,
+    #[arg(long, global = true, value_enum)]
+    priority: Option<Priority>,
+    /// Where this device keeps its settings (default: the system config folder, e.g.
+    /// ~/.config/clamor).
+    #[arg(long, global = true)]
+    config_dir: Option<std::path::PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -37,6 +41,9 @@ enum Priority {
 /// Lower this process's CPU priority. Called before the async runtime starts, because on Linux
 /// priority is per thread and new threads inherit their creator's.
 fn lower_priority() {
+    if neighbour::set_priority(true).is_ok() {
+        return;
+    }
     #[cfg(unix)]
     unsafe {
         // nice 10: below interactive apps, above batch jobs.
@@ -144,11 +151,14 @@ enum ParticipationArg {
 impl PolicyArgs {
     /// The owner's settings on top of the defaults for this kind of device, or None if the
     /// owner set nothing (the coordinator then applies its defaults).
-    fn policy(&self) -> Option<Policy> {
-        if self.participation.is_none() && !self.allow_battery && self.ram_share.is_none() && self.cpu_share.is_none() {
+    /// Command-line flags, on top of the settings saved from the dashboard, on top of the
+    /// defaults for this kind of device. None if there are neither flags nor saved settings.
+    fn policy(&self, priority: Option<Priority>) -> Option<Policy> {
+        let saved = neighbour::saved_settings();
+        if saved.is_none() && self.participation.is_none() && !self.allow_battery && self.ram_share.is_none() && self.cpu_share.is_none() && priority.is_none() {
             return None;
         }
-        let mut p = Policy::default_for(clamor_muster::probe::probe_node(NodeId("local".into())).class);
+        let mut p = saved.unwrap_or_else(|| Policy::default_for(clamor_muster::probe::probe_node(NodeId("local".into())).class));
         if let Some(x) = self.participation {
             p.participation = match x {
                 ParticipationArg::Full => Participation::Full,
@@ -163,6 +173,9 @@ impl PolicyArgs {
         }
         if let Some(c) = self.cpu_share {
             p.max_cpu_fraction = c.clamp(0.05, 1.0);
+        }
+        if let Some(pr) = priority {
+            p.low_priority = pr == Priority::Low;
         }
         Some(p)
     }
@@ -213,13 +226,19 @@ impl EngineArgs {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    if cli.priority == Priority::Low && matches!(cli.cmd, Cmd::Coordinator { .. } | Cmd::Join { .. }) {
+    neighbour::set_config_dir(cli.config_dir.clone());
+    // --priority, else the setting saved from the dashboard, else low.
+    let low = match cli.priority {
+        Some(p) => p == Priority::Low,
+        None => neighbour::saved_settings().map(|p| p.low_priority).unwrap_or(true),
+    };
+    if low && matches!(cli.cmd, Cmd::Coordinator { .. } | Cmd::Join { .. }) {
         lower_priority();
     }
-    tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(run(cli.cmd))
+    tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(run(cli.cmd, cli.priority))
 }
 
-async fn run(cmd: Cmd) -> Result<()> {
+async fn run(cmd: Cmd, priority: Option<Priority>) -> Result<()> {
     match cmd {
         Cmd::Version { json } => {
             let b = build_info::current();
@@ -280,7 +299,7 @@ async fn run(cmd: Cmd) -> Result<()> {
             // Share our models with members that lack them (layer slices), behind the join token.
             let share_port = share::serve(DEFAULT_SHARE_PORT, engine.models_dir.clone(), token.clone()).await?;
             let shared = Arc::new(Mutex::new(coordinator::Swarm::new(swarm, token, id.clone(), engine, data_port, quick_bench, Some(share_port))));
-            tokio::spawn(coordinator::register_self(shared.clone(), id, policy.policy()));
+            tokio::spawn(coordinator::register_self(shared.clone(), id, policy.policy(priority)));
             tokio::spawn(coordinator::reaper(shared.clone()));
             tokio::spawn(coordinator::monitor_self(shared.clone()));
             tokio::spawn(coordinator::updates(shared.clone(), updates.policy()));
@@ -296,7 +315,7 @@ async fn run(cmd: Cmd) -> Result<()> {
             let addr = if addr.contains(':') { addr } else { format!("{addr}:{DEFAULT_PORT}") };
             let engine = engine.config(token.clone());
             engine.validate()?;
-            member::join(addr, token, id, engine, updates.policy(), policy.policy()).await
+            member::join(addr, token, id, engine, updates.policy(), policy.policy(priority)).await
         }
     }
 }

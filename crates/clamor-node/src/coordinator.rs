@@ -41,6 +41,8 @@ pub struct NodeEntry {
     pub share_port: Option<u16>,
     /// Why the node is not taking new work (on battery, owner busy, paused), if it isn't.
     pub paused: Option<String>,
+    /// About the last settings change (e.g. it needs a restart to take effect).
+    pub settings_note: Option<String>,
 }
 
 pub struct Swarm {
@@ -82,7 +84,8 @@ pub type Shared = Arc<Mutex<Swarm>>;
 pub async fn register_self(shared: Shared, id: NodeId, owner_policy: Option<Policy>) {
     let models_dir = shared.lock().unwrap().engine.models_dir.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let info = probe::probe_node(id);
+        let mut info = probe::probe_node(id);
+        info.perf_cores = Some(clamor_engine_ggml::default_threads() as u32);
         let report = bench::run(&bench::BenchOptions::quick(), info.ram_available_bytes);
         (info, report, crate::share::scan(&models_dir))
     })
@@ -112,6 +115,7 @@ pub async fn register_self(shared: Shared, id: NodeId, owner_policy: Option<Poli
             models,
             share_port,
             paused: None,
+            settings_note: crate::neighbour::set_priority(policy.low_priority).err(),
         },
     );
 }
@@ -217,6 +221,7 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
                     models,
                     share_port,
                     paused: None,
+                    settings_note: None,
                 },
             );
             Admission::Ok { generation, swarm, coordinator, cached_bench: cached, quick: sw.quick_bench }
@@ -259,10 +264,11 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
             }
         }
         match msg {
-            Message::Heartbeat { cpu_load, ram_available_bytes, power, running_tasks, update_available, paused } => {
+            Message::Heartbeat { cpu_load, ram_available_bytes, power, running_tasks, update_available, paused, note } => {
                 let mut sw = shared.lock().unwrap();
                 if let Some(e) = sw.nodes.get_mut(&id) {
                     e.update_available = update_available;
+                    e.settings_note = note;
                     e.paused = paused;
                     e.cpu_load = Some(cpu_load);
                     e.running_tasks = running_tasks;

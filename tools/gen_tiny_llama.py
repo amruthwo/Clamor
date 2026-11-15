@@ -18,13 +18,14 @@ p.add_argument("--tied", action="store_true", help="omit output.weight (lm_head 
 p.add_argument("--arch", choices=["llama", "qwen2"], default="llama",
                help="qwen2: q/k/v biases and NEOX RoPE (as Qwen2/2.5)")
 p.add_argument("--rope-freqs", action="store_true", help="add a rope_freqs.weight tensor (Llama 3 RoPE scaling)")
+p.add_argument("--ctx", type=int, default=64, help="context_length to declare (the weights do not depend on it)")
 p.add_argument("--alignment", type=int, default=0, help="GGUF data alignment (default: the format's 32)")
 p.add_argument("--q8", action="store_true", help="store the 2-D weights as Q8_0 (as most real GGUFs are quantized)")
 p.add_argument("--bytes-vocab", action="store_true",
                help="add a byte-level BPE tokenizer: the 256 byte tokens + ChatML specials, no merges (vocab 259)")
 a = p.parse_args()
 
-E, H, HKV, FF, V, CTX = 64, 4, 2, 128, 128, 64
+E, H, HKV, FF, V, CTX = 64, 4, 2, 128, 128, a.ctx
 if a.bytes_vocab:
     V = 259
 HD = E // H

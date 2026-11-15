@@ -16,7 +16,9 @@ fn python_fixture(dir: &Path) -> Option<Vec<u32>> {
     let tools = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tools");
     let model = dir.join("tiny.gguf");
     let py = |args: Vec<String>| Command::new("python3").args(&args).output().map(|o| o.status.success()).unwrap_or(false);
-    let ok = py(vec![format!("{tools}/gen_tiny_llama.py"), model.display().to_string(), "--layers".into(), "4".into(), "--bytes-vocab".into()])
+    // A huge declared context (16M tokens) lets a test request a pipeline that cannot fit in
+    // memory; the other tests ask for 64 tokens.
+    let ok = py(vec![format!("{tools}/gen_tiny_llama.py"), model.display().to_string(), "--layers".into(), "4".into(), "--bytes-vocab".into(), "--ctx".into(), "16777216".into()])
         && py(vec![
             format!("{tools}/ref_forward.py"),
             model.display().to_string(),
@@ -79,6 +81,11 @@ impl Proc {
     }
 }
 
+/// A per-process settings folder, so test nodes never touch the real ~/.config/clamor.
+fn cfg_dir(dir: &Path, name: &str) -> String {
+    dir.join(format!("{name}-config")).display().to_string()
+}
+
 fn spawn(dir: &Path, name: &'static str, args: &[&str]) -> Proc {
     let log = dir.join(format!("{name}.log"));
     let f = std::fs::File::create(&log).unwrap();
@@ -120,10 +127,10 @@ fn coordinator_and_two_members_generate_through_the_api() {
     let (ctrl, portal, data) = (free_port(), free_port(), free_port_run(3));
     let (ctrl_s, portal_s, data_s) = (format!("127.0.0.1:{ctrl}"), format!("127.0.0.1:{portal}"), data.to_string());
 
-    let coord = spawn(&dir, "coordinator", &["coordinator", "--swarm", "t", "--token", "T", "--id", "coord", "--bind", &ctrl_s, "--portal", &portal_s, "--models", &models, "--data-port", &data_s, "--quick-bench", "--no-update-check", "--participation", "full", "--allow-battery"]);
+    let coord = spawn(&dir, "coordinator", &["coordinator", "--swarm", "t", "--token", "T", "--id", "coord", "--bind", &ctrl_s, "--portal", &portal_s, "--models", &models, "--data-port", &data_s, "--quick-bench", "--no-update-check", "--config-dir", &cfg_dir(&dir, "coordinator"), "--participation", "full", "--allow-battery"]);
     wait_for("the portal", Duration::from_secs(30), &[&coord], || TcpStream::connect(("127.0.0.1", portal)).is_ok());
-    let a = spawn(&dir, "member-a", &["join", &ctrl_s, "--token", "T", "--id", "a", "--models", &models, "--no-update-check", "--participation", "full", "--allow-battery"]);
-    let b = spawn(&dir, "member-b", &["join", &ctrl_s, "--token", "T", "--id", "b", "--models", &models, "--no-update-check", "--participation", "full", "--allow-battery"]);
+    let a = spawn(&dir, "member-a", &["join", &ctrl_s, "--token", "T", "--id", "a", "--models", &models, "--no-update-check", "--config-dir", &cfg_dir(&dir, "member-a"), "--participation", "full", "--allow-battery"]);
+    let b = spawn(&dir, "member-b", &["join", &ctrl_s, "--token", "T", "--id", "b", "--models", &models, "--no-update-check", "--config-dir", &cfg_dir(&dir, "member-b"), "--participation", "full", "--allow-battery"]);
     let all = [&coord, &a, &b];
     wait_for("members to finish the muster", Duration::from_secs(120), &all, || {
         let (_, r) = http(portal, "GET", "/api/roster", None);
@@ -178,15 +185,16 @@ fn coordinator_and_two_members_generate_through_the_api() {
     assert!(p2["pipeline"]["epoch"].as_u64() > p["pipeline"]["epoch"].as_u64());
     assert_eq!(generate(), greedy, "coordinator with layers + 2 members");
 
-    // Limits: a's RAM share shrunk to almost nothing; a pipeline using a must be refused up
-    // front with the numbers, not loaded until the machine swaps.
+    // Limits: a at the smallest RAM share (5%), asked for a 16M-token context (~8 GB of KV cache
+    // per request for its two layers): refused up front with the numbers, not loaded until the
+    // machine swaps.
     let policy = |id: &str, p: Value| {
         let (st, r) = http(portal, "POST", &format!("/api/nodes/{id}/policy"), Some(p));
         assert_eq!(st, 200, "{r}");
     };
     let full = json!({ "participation": "full", "max_ram_fraction": 0.7, "max_cpu_fraction": 0.8, "require_plugged_in": false });
-    policy("a", json!({ "participation": "full", "max_ram_fraction": 0.0001, "max_cpu_fraction": 0.8, "require_plugged_in": false }));
-    let (st, r) = http(portal, "POST", "/api/pipeline", Some(json!({ "model": "tiny.gguf", "ctx": 64, "stages": [{ "node": "a", "layers": [0, 2] }, { "node": "b", "layers": [2, 4] }] })));
+    policy("a", json!({ "participation": "full", "max_ram_fraction": 0.05, "max_cpu_fraction": 0.8, "require_plugged_in": false }));
+    let (st, r) = http(portal, "POST", "/api/pipeline", Some(json!({ "model": "tiny.gguf", "ctx": 16777216, "stages": [{ "node": "a", "layers": [0, 2] }, { "node": "b", "layers": [2, 4] }] })));
     assert_eq!(st, 400, "{r}");
     let msg = r["text"].as_str().unwrap_or("");
     assert!(msg.contains("on a") && msg.contains("may use"), "explains which device and why: {msg}");
@@ -200,8 +208,23 @@ fn coordinator_and_two_members_generate_through_the_api() {
         let (st, r) = http(portal, "POST", "/api/generate", Some(json!({ "tokens": PROMPT, "max_new": 2 })));
         st == 503 && r["text"].as_str().unwrap_or("").contains("paused")
     });
-    policy("a", full);
+    policy("a", full.clone());
     wait_for("a to resume", Duration::from_secs(20), &all, || http(portal, "POST", "/api/generate", Some(json!({ "tokens": PROMPT, "max_new": 2 }))).0 == 200);
+
+    // Settings: nonsense is refused; a device remembers what it was given (its own folder).
+    let (st, r) = http(portal, "POST", "/api/nodes/a/policy", Some(json!({ "participation": "full", "max_ram_fraction": 1.5, "max_cpu_fraction": 0.5, "require_plugged_in": false })));
+    assert_eq!(st, 400, "{r}");
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("member-a-config/device-settings.json")).expect("a saved its settings")).unwrap();
+    assert_eq!(saved["participation"], "full", "{saved}");
+    // Normal priority cannot be applied while running on Linux/macOS: the device says so.
+    if cfg!(unix) {
+        policy("a", json!({ "participation": "full", "max_ram_fraction": 0.7, "max_cpu_fraction": 0.8, "require_plugged_in": false, "low_priority": false }));
+        wait_for("a's priority note", Duration::from_secs(20), &all, || {
+            let (_, r) = http(portal, "GET", "/api/roster", None);
+            r["nodes"].as_array().unwrap().iter().any(|n| n["id"] == "a" && n["settings_note"].as_str().is_some_and(|s| s.contains("restart")))
+        });
+        policy("a", full);
+    }
 
     // 3. Requests that cannot work are refused up front.
     for (bad, why) in [
@@ -259,10 +282,10 @@ fn a_model_on_one_device_is_shared_with_the_others() {
 
     let (ctrl, portal, data) = (free_port(), free_port(), free_port_run(3));
     let (ctrl_s, portal_s, data_s) = (format!("127.0.0.1:{ctrl}"), format!("127.0.0.1:{portal}"), data.to_string());
-    let coord = spawn(&dir, "coordinator", &["coordinator", "--token", "T", "--id", "coord", "--bind", &ctrl_s, "--portal", &portal_s, "--models", &coord_models, "--cache-dir", &coord_cache, "--data-port", &data_s, "--quick-bench", "--no-update-check", "--participation", "full", "--allow-battery"]);
+    let coord = spawn(&dir, "coordinator", &["coordinator", "--token", "T", "--id", "coord", "--bind", &ctrl_s, "--portal", &portal_s, "--models", &coord_models, "--cache-dir", &coord_cache, "--data-port", &data_s, "--quick-bench", "--no-update-check", "--config-dir", &cfg_dir(&dir, "coordinator"), "--participation", "full", "--allow-battery"]);
     wait_for("the portal", Duration::from_secs(30), &[&coord], || TcpStream::connect(("127.0.0.1", portal)).is_ok());
-    let a = spawn(&dir, "member-a", &["join", &ctrl_s, "--token", "T", "--id", "a", "--models", &a_models, "--cache-dir", &a_cache, "--no-update-check", "--participation", "full", "--allow-battery"]);
-    let b = spawn(&dir, "member-b", &["join", &ctrl_s, "--token", "T", "--id", "b", "--models", &b_models, "--cache-dir", &b_cache, "--no-update-check", "--participation", "full", "--allow-battery"]);
+    let a = spawn(&dir, "member-a", &["join", &ctrl_s, "--token", "T", "--id", "a", "--models", &a_models, "--cache-dir", &a_cache, "--no-update-check", "--config-dir", &cfg_dir(&dir, "member-a"), "--participation", "full", "--allow-battery"]);
+    let b = spawn(&dir, "member-b", &["join", &ctrl_s, "--token", "T", "--id", "b", "--models", &b_models, "--cache-dir", &b_cache, "--no-update-check", "--config-dir", &cfg_dir(&dir, "member-b"), "--participation", "full", "--allow-battery"]);
     let all = [&coord, &a, &b];
     let mut b_share = 0;
     wait_for("members to finish the muster", Duration::from_secs(120), &all, || {

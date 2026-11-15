@@ -52,6 +52,8 @@ pub fn probe_node(id: NodeId) -> NodeInfo {
         disk_free_bytes: disk_free,
         power,
         clamor_version: env!("CARGO_PKG_VERSION").to_string(),
+        // Filled in by clamor-node, which knows how it picks threads.
+        perf_cores: None,
     }
 }
 

@@ -133,7 +133,8 @@ async fn session(addr: &str, token: &Option<String>, id: &NodeId, bench_port: u1
     let scan = |dir: std::path::PathBuf| async move { tokio::task::spawn_blocking(move || share::scan(&dir)).await.unwrap_or_default() };
     let mut models = scan(engine.models_dir.clone()).await;
     let id2 = id.clone();
-    let info = tokio::task::spawn_blocking(move || probe::probe_node(id2)).await?;
+    let mut info = tokio::task::spawn_blocking(move || probe::probe_node(id2)).await?;
+    info.perf_cores = Some(clamor_engine_ggml::default_threads() as u32);
     let class = info.class;
 
     let stream = TcpStream::connect(addr).await?;
@@ -172,6 +173,8 @@ async fn session(addr: &str, token: &Option<String>, id: &NodeId, bench_port: u1
     let mut policy = owner_policy.unwrap_or_else(|| Policy::default_for(class));
     let mut pause = crate::neighbour::PauseState::default();
     let mut paused_reason: Option<String> = None;
+    // Something the owner should know about the last settings change (e.g. needs a restart).
+    let mut settings_note: Option<String> = crate::neighbour::set_priority(policy.low_priority).err();
     let (stx, mut srx) = unbounded_channel::<StageEvent>();
     let mut slot = Slot::default();
 
@@ -227,7 +230,7 @@ async fn session(addr: &str, token: &Option<String>, id: &NodeId, bench_port: u1
                     let _ = write_msg(&mut wr, &Message::Leave).await;
                     return Ok(Exit::Update);
                 }
-                write_msg(&mut wr, &Message::Heartbeat { cpu_load: cpu, ram_available_bytes: ram, power, running_tasks: 0, update_available, paused: now }).await?;
+                write_msg(&mut wr, &Message::Heartbeat { cpu_load: cpu, ram_available_bytes: ram, power, running_tasks: 0, update_available, paused: now, note: settings_note.clone() }).await?;
             }
             _ = tokio::signal::ctrl_c() => {
                 let _ = write_msg(&mut wr, &Message::Leave).await;
@@ -248,7 +251,12 @@ async fn session(addr: &str, token: &Option<String>, id: &NodeId, bench_port: u1
                         write_msg(&mut wr, &Message::BenchResult { report }).await?;
                     }
                     Message::SetPolicy { policy: p } => {
-                        println!("policy updated: {p:?}");
+                        println!("settings updated: {}", describe_policy(&p));
+                        crate::neighbour::save_settings(&p);
+                        settings_note = crate::neighbour::set_priority(p.low_priority).err();
+                        if let Some(n) = &settings_note {
+                            println!("  note: {n}");
+                        }
                         policy = p;
                     }
                     Message::Ping { seq, sent_unix_ms } => {
@@ -285,4 +293,15 @@ async fn session(addr: &str, token: &Option<String>, id: &NodeId, bench_port: u1
             }
         }
     }
+}
+
+fn describe_policy(p: &Policy) -> String {
+    format!(
+        "{:?}, {} battery, RAM {:.0}%, CPU {:.0}%, {} priority",
+        p.participation,
+        if p.require_plugged_in { "not on" } else { "also on" },
+        p.max_ram_fraction * 100.0,
+        p.max_cpu_fraction * 100.0,
+        if p.low_priority { "low" } else { "normal" }
+    )
 }

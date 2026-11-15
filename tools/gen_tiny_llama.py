@@ -18,6 +18,8 @@ p.add_argument("--tied", action="store_true", help="omit output.weight (lm_head 
 p.add_argument("--arch", choices=["llama", "qwen2"], default="llama",
                help="qwen2: q/k/v biases and NEOX RoPE (as Qwen2/2.5)")
 p.add_argument("--rope-freqs", action="store_true", help="add a rope_freqs.weight tensor (Llama 3 RoPE scaling)")
+p.add_argument("--alignment", type=int, default=0, help="GGUF data alignment (default: the format's 32)")
+p.add_argument("--q8", action="store_true", help="store the 2-D weights as Q8_0 (as most real GGUFs are quantized)")
 p.add_argument("--bytes-vocab", action="store_true",
                help="add a byte-level BPE tokenizer: the 256 byte tokens + ChatML specials, no merges (vocab 259)")
 a = p.parse_args()
@@ -33,6 +35,17 @@ def w(*shape, scale=None):
     return (rng.standard_normal(shape) * scale).astype(np.float32)
 
 wr = gguf.GGUFWriter(a.out, a.arch)
+if a.alignment:
+    wr.add_custom_alignment(a.alignment)
+_add = wr.add_tensor
+def add_tensor(name, x):
+    """2-D weights optionally as Q8_0 (34 bytes per 32 values, so sizes need padding)."""
+    if a.q8 and x.ndim == 2 and x.shape[-1] % 32 == 0:
+        q = gguf.quants.quantize(x, gguf.GGMLQuantizationType.Q8_0)
+        _add(name, q, raw_dtype=gguf.GGMLQuantizationType.Q8_0)
+    else:
+        _add(name, x)
+wr.add_tensor = add_tensor
 wr.add_name("clamor-tiny-llama")
 wr.add_context_length(CTX)
 wr.add_embedding_length(E)

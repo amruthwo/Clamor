@@ -21,8 +21,8 @@ pub use chat::{encode_chat, render as render_chat, ChatMessage, CHATML};
 pub use cpu::default_threads;
 pub use devices::{list_devices, DeviceInfo, DeviceKind};
 pub use executor::{ExecutorOptions, GgmlExecutor, Sampling};
-pub use gguf::{GgufFile, GgufTensorInfo};
-pub use llama::{LlamaHparams, LlamaInput, LlamaOutput, LlamaStage, Logits, StageOptions};
+pub use gguf::{GgufFile, GgufTensorInfo, SlicePlan};
+pub use llama::{plan_stage_slice, stage_tensors, LlamaHparams, LlamaInput, LlamaOutput, LlamaStage, Logits, StageOptions};
 pub use smoke::{matmul_check, matmul_gflops, MatmulReport};
 pub use tokenizer::{token_type, StreamDecoder, Tokenizer};
 

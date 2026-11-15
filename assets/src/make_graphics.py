@@ -173,12 +173,13 @@ def two_lanes(t):
 def banner(mark_svg):
     """1280x640 social preview: coral gradient, the crab ring, wordmark and tagline."""
     inner = re.search(r"<svg[^>]*>(.*)</svg>", mark_svg, re.S).group(1)
+    vx, vy, vw, _ = (float(v) for v in re.search(r'viewBox="([^"]*)"', mark_svg).group(1).split())
     W, H = 1280, 640
     b = [
         '<defs><linearGradient id="bg" x1="0" y1="1" x2="0" y2="0"><stop offset="0" stop-color="#fd5453"/><stop offset="1" stop-color="#fc8b61"/></linearGradient></defs>',
         f'<rect width="{W}" height="{H}" fill="url(#bg)"/>',
-        # Mark: its viewBox is 46..466; scale 420 -> 380 px, centred at (290, 320).
-        f'<g transform="translate(100,130) scale({380 / 420}) translate(-46,-46)">{inner}</g>',
+        # Mark: its viewBox scaled to 380 px, centred at (290, 320).
+        f'<g transform="translate(100,130) scale({380 / vw}) translate({-vx},{-vy})">{inner}</g>',
         text(548, 300, "Clamor", 124, "#ffffff", 800, "start", 'letter-spacing="-2"'),
         text(552, 366, "Pool the idle computers on your network", 32, "#fff3ef", 500),
         text(552, 410, "to run AI none of them could run alone.", 32, "#fff3ef", 500),

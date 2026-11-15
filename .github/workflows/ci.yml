@@ -6,11 +6,13 @@ on:
   pull_request:
     paths-ignore: ["**.md", "assets/**"]
   workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1"   # weekly, so the main-only CUDA build runs even in quiet weeks
 
-# A new push to the same PR/branch cancels the run it supersedes.
+# A new push to a PR cancels the run it supersedes. Runs on main always finish.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -75,13 +77,24 @@ jobs:
 
   cuda-build:
     name: build (linux cuda, build-only)
+    # ggml-cuda is hundreds of heavy .cu files: ~1 h on a hosted runner from cold. Too slow to gate
+    # every PR, so it runs on main, weekly, and on demand (Actions -> ci -> Run workflow).
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # rust-cache does not keep our own crate's CMake output, so cache compiler results instead.
+      - uses: hendrikmuhs/ccache-action@v1.2
+        with: { key: cuda-build, max-size: 2G }
       - uses: Jimver/cuda-toolkit@v0.2.19
         with: { cuda: "12.6.2", method: network, sub-packages: '["nvcc","cudart"]', non-cuda-sub-packages: '["libcublas","libcublas-dev"]' }
       - run: cargo build -p clamor-engine-ggml --release --features cuda
         # Build-only: one architecture proves it compiles (three took 50+ min on a hosted runner).
-        env: { CMAKE_CUDA_ARCHITECTURES: "86" }
+        env:
+          CMAKE_CUDA_ARCHITECTURES: "86"
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+          CMAKE_CUDA_COMPILER_LAUNCHER: ccache

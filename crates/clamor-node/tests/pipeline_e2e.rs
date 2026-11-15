@@ -106,6 +106,8 @@ fn http(port: u16, method: &str, path: &str, body: Option<Value>) -> (u16, Value
     (status, serde_json::from_str(payload).unwrap_or_else(|_| json!({ "text": payload })))
 }
 
+/// Timeouts are generous: hosted CI runners (macOS especially) run these tests in parallel with
+/// others that compile GPU shaders, and a coordinator once took over 30 s to open its portal.
 fn wait_for(what: &str, timeout: Duration, procs: &[&Proc], mut f: impl FnMut() -> bool) {
     let t0 = Instant::now();
     while t0.elapsed() < timeout {
@@ -128,7 +130,7 @@ fn coordinator_and_two_members_generate_through_the_api() {
     let (ctrl_s, portal_s, data_s) = (format!("127.0.0.1:{ctrl}"), format!("127.0.0.1:{portal}"), data.to_string());
 
     let coord = spawn(&dir, "coordinator", &["coordinator", "--swarm", "t", "--passphrase", "tiny-test-words", "--id", "coord", "--bind", &ctrl_s, "--portal", &portal_s, "--models", &models, "--data-port", &data_s, "--quick-bench", "--no-update-check", "--config-dir", &cfg_dir(&dir, "coordinator"), "--participation", "full", "--allow-battery", "--priority", "normal"]);
-    wait_for("the portal", Duration::from_secs(30), &[&coord], || TcpStream::connect(("127.0.0.1", portal)).is_ok());
+    wait_for("the portal", Duration::from_secs(120), &[&coord], || TcpStream::connect(("127.0.0.1", portal)).is_ok());
     let a = spawn(&dir, "member-a", &["join", &ctrl_s, "--passphrase", "tiny-test-words", "--id", "a", "--models", &models, "--no-update-check", "--config-dir", &cfg_dir(&dir, "member-a"), "--participation", "full", "--allow-battery", "--priority", "normal"]);
     let b = spawn(&dir, "member-b", &["join", &ctrl_s, "--passphrase", "tiny-test-words", "--id", "b", "--models", &models, "--no-update-check", "--config-dir", &cfg_dir(&dir, "member-b"), "--participation", "full", "--allow-battery", "--priority", "normal"]);
     let all = [&coord, &a, &b];
@@ -280,7 +282,7 @@ fn a_model_on_one_device_is_shared_with_the_others() {
     let (ctrl, portal, data) = (free_port(), free_port(), free_port_run(3));
     let (ctrl_s, portal_s, data_s) = (format!("127.0.0.1:{ctrl}"), format!("127.0.0.1:{portal}"), data.to_string());
     let coord = spawn(&dir, "coordinator", &["coordinator", "--passphrase", "tiny-test-words", "--id", "coord", "--bind", &ctrl_s, "--portal", &portal_s, "--models", &coord_models, "--cache-dir", &coord_cache, "--data-port", &data_s, "--quick-bench", "--no-update-check", "--config-dir", &cfg_dir(&dir, "coordinator"), "--participation", "full", "--allow-battery", "--priority", "normal"]);
-    wait_for("the portal", Duration::from_secs(30), &[&coord], || TcpStream::connect(("127.0.0.1", portal)).is_ok());
+    wait_for("the portal", Duration::from_secs(120), &[&coord], || TcpStream::connect(("127.0.0.1", portal)).is_ok());
     let a = spawn(&dir, "member-a", &["join", &ctrl_s, "--passphrase", "tiny-test-words", "--id", "a", "--models", &a_models, "--cache-dir", &a_cache, "--no-update-check", "--config-dir", &cfg_dir(&dir, "member-a"), "--participation", "full", "--allow-battery", "--priority", "normal"]);
     let b = spawn(&dir, "member-b", &["join", &ctrl_s, "--passphrase", "tiny-test-words", "--id", "b", "--models", &b_models, "--cache-dir", &b_cache, "--no-update-check", "--config-dir", &cfg_dir(&dir, "member-b"), "--participation", "full", "--allow-battery", "--priority", "normal"]);
     let all = [&coord, &a, &b];
@@ -364,7 +366,7 @@ fn only_compute_threads_run_at_low_priority() {
     let (ctrl_s, portal_s, data_s) = (format!("127.0.0.1:{ctrl}"), format!("127.0.0.1:{portal}"), data.to_string());
     // Default priority (low), unlike the other tests.
     let coord = spawn(&dir, "coordinator", &["coordinator", "--id", "c", "--bind", &ctrl_s, "--portal", &portal_s, "--models", &models, "--data-port", &data_s, "--quick-bench", "--no-update-check", "--config-dir", &cfg_dir(&dir, "coordinator"), "--participation", "full", "--allow-battery"]);
-    wait_for("the portal", Duration::from_secs(30), &[&coord], || TcpStream::connect(("127.0.0.1", portal)).is_ok());
+    wait_for("the portal", Duration::from_secs(120), &[&coord], || TcpStream::connect(("127.0.0.1", portal)).is_ok());
     let (st, r) = http(portal, "POST", "/api/pipeline", Some(json!({ "model": "tiny.gguf", "ctx": 64, "stages": [{ "node": "c", "layers": [0, 4] }] })));
     assert_eq!(st, 200, "{r}");
     wait_for("the pipeline", Duration::from_secs(180), &[&coord], || http(portal, "GET", "/api/pipeline", None).1["ready"] == true);
@@ -417,7 +419,7 @@ fn devices_join_by_passphrase_and_rejoin_by_key() {
     let (coord_cfg, member_cfg) = (cfg_dir(&dir, "coordinator"), cfg_dir(&dir, "member"));
     let coordinator = |name: &'static str, cfg: &str| {
         let c = spawn(&dir, name, &["coordinator", "--swarm", "home", "--id", "coord", "--bind", &ctrl_s, "--portal", &portal_s, "--models", &models, "--data-port", &data_s, "--quick-bench", "--no-update-check", "--config-dir", cfg, "--participation", "full", "--allow-battery"]);
-        wait_for("the portal", Duration::from_secs(30), &[&c], || TcpStream::connect(("127.0.0.1", portal)).is_ok());
+        wait_for("the portal", Duration::from_secs(120), &[&c], || TcpStream::connect(("127.0.0.1", portal)).is_ok());
         c
     };
     let member = |name: &'static str, extra: &[&str]| {
@@ -516,7 +518,7 @@ fn devices_find_the_swarm_on_the_local_network() {
     let (ctrl_s, portal_s, data_s) = (format!("0.0.0.0:{ctrl}"), format!("127.0.0.1:{portal}"), data.to_string());
     let swarm = format!("e2e-{}", std::process::id());
     let coord = spawn(&dir, "coordinator", &["coordinator", "--swarm", &swarm, "--passphrase", "find-me-on-the-lan", "--id", "coord", "--bind", &ctrl_s, "--portal", &portal_s, "--models", &models, "--data-port", &data_s, "--quick-bench", "--no-update-check", "--config-dir", &cfg_dir(&dir, "coordinator"), "--participation", "full", "--allow-battery"]);
-    wait_for("the portal", Duration::from_secs(30), &[&coord], || TcpStream::connect(("127.0.0.1", portal)).is_ok());
+    wait_for("the portal", Duration::from_secs(120), &[&coord], || TcpStream::connect(("127.0.0.1", portal)).is_ok());
     assert!(coord.log().contains("advertising"), "{}", coord.log());
     let member_cfg = cfg_dir(&dir, "member");
     let member = |name: &'static str, extra: &[&str]| {
@@ -561,7 +563,7 @@ fn devices_join_with_a_one_time_code() {
     let (ctrl, portal, data) = (free_port(), free_port(), free_port_run(1));
     let (ctrl_s, portal_s, data_s) = (format!("127.0.0.1:{ctrl}"), format!("127.0.0.1:{portal}"), data.to_string());
     let coord = spawn(&dir, "coordinator", &["coordinator", "--swarm", "codes", "--id", "coord", "--bind", &ctrl_s, "--portal", &portal_s, "--models", &models, "--data-port", &data_s, "--quick-bench", "--no-update-check", "--config-dir", &cfg_dir(&dir, "coordinator"), "--participation", "full", "--allow-battery"]);
-    wait_for("the portal", Duration::from_secs(30), &[&coord], || TcpStream::connect(("127.0.0.1", portal)).is_ok());
+    wait_for("the portal", Duration::from_secs(120), &[&coord], || TcpStream::connect(("127.0.0.1", portal)).is_ok());
     let member = |name: &'static str, id: &str, extra: &[&str]| {
         let mut args = vec!["join", &ctrl_s, "--id", id, "--models", &models, "--no-update-check", "--participation", "full", "--allow-battery"];
         args.extend_from_slice(extra);

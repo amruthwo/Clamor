@@ -100,6 +100,17 @@ fn main() {
     match target_os.as_str() {
         "macos" | "ios" => {
             println!("cargo:rustc-link-lib=c++");
+            // ggml's Objective-C checks the OS version (@available), which needs
+            // ___isPlatformVersionAtLeast from clang's runtime library. Rust does not link it,
+            // and the check is only compiled out when building for the current macOS release.
+            if let Ok(out) = std::process::Command::new("clang").arg("--print-runtime-dir").output() {
+                let dir = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                let lib = if target_os == "ios" { "clang_rt.ios" } else { "clang_rt.osx" };
+                if std::path::Path::new(&dir).join(format!("lib{lib}.a")).exists() {
+                    println!("cargo:rustc-link-search=native={dir}");
+                    println!("cargo:rustc-link-lib=static={lib}");
+                }
+            }
             println!("cargo:rustc-link-lib=framework=Accelerate");
             if on("metal") {
                 for f in ["Foundation", "Metal", "MetalKit"] {

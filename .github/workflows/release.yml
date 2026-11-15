@@ -59,7 +59,8 @@ jobs:
           [ -n "$F" ] && ARGS+=(--features "clamor-node/$F")
           if [ "${{ matrix.android }}" = "true" ]; then
             cargo install cargo-ndk --locked
-            ANDROID_NDK_HOME="${{ steps.ndk.outputs.ndk-path }}" cargo ndk -t arm64-v8a build "${ARGS[@]}"
+            # API 30 (Android 11): older C libraries lack statx, which a dependency calls.
+            ANDROID_NDK_HOME="${{ steps.ndk.outputs.ndk-path }}" cargo ndk -t arm64-v8a -P 30 build "${ARGS[@]}"
           else
             cargo build --target ${{ matrix.target }} "${ARGS[@]}"
           fi

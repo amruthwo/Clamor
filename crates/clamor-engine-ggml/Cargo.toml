@@ -1,0 +1,21 @@
+[package]
+name = "clamor-engine-ggml"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ggml-based inference engine for Clamor pipeline stages"
+build = "build.rs"
+
+[features]
+default = []
+cuda = []
+vulkan = []
+metal = []
+hip = []
+opencl = []
+
+[dependencies]
+thiserror = "2"
+
+[build-dependencies]
+cmake = "0.1"

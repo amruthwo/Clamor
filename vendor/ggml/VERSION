@@ -1,0 +1,4 @@
+repo: https://github.com/ggml-org/ggml
+commit: 417a024b4fb6bc3116d41af7c067166a039bdf12
+date: 2026-11-13
+pruned: removed src/ggml-{cann,hexagon,et,openvino,virtgpu,zdnn,zendnn,musa,sycl,webgpu}; tests/examples/docs dropped

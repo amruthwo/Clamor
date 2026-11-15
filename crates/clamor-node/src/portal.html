@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Clamor</title>
+<style>
+  :root { color-scheme: light dark; --bg:#f6f7f9; --card:#fff; --ink:#15181d; --mute:#667085; --line:#e4e7ec; --accent:#2f6fed; --ok:#12805c; --warn:#b54708; --bad:#b42318; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0f1216; --card:#171b21; --ink:#e8ebf0; --mute:#98a2b3; --line:#262c35; --accent:#6b9bff; --ok:#3ccf9a; --warn:#f5a65b; --bad:#ff7a6e; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.45 system-ui,-apple-system,Segoe UI,sans-serif; }
+  header { display:flex; align-items:center; gap:12px; flex-wrap:wrap; padding:14px 18px; border-bottom:1px solid var(--line); background:var(--card); position:sticky; top:0; }
+  header h1 { margin:0; font-size:20px; letter-spacing:.5px; }
+  header .sub { color:var(--mute); flex:1; }
+  main { max-width:1100px; margin:0 auto; padding:16px; display:grid; gap:16px; }
+  section { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px; overflow-x:auto; }
+  h2 { margin:0 0 10px; font-size:13px; text-transform:uppercase; letter-spacing:.08em; color:var(--mute); }
+  table { width:100%; border-collapse:collapse; font-size:14px; }
+  th, td { text-align:left; padding:7px 8px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th { color:var(--mute); font-weight:500; font-size:12px; }
+  td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
+  .dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:7px; background:var(--mute); }
+  .ready .dot { background:var(--ok); } .busy .dot { background:var(--accent); } .benchmarking .dot, .joining .dot, .draining .dot { background:var(--warn); } .away .dot { background:var(--bad); }
+  button, select, input { font:inherit; color:inherit; background:var(--card); border:1px solid var(--line); border-radius:8px; padding:5px 10px; }
+  button { cursor:pointer; } button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+  button:disabled { opacity:.5; cursor:default; }
+  .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; }
+  .stat b { display:block; font-size:22px; } .stat span { color:var(--mute); font-size:12px; }
+  .warn { color:var(--warn); font-size:13px; margin-top:8px; }
+  .controls { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:10px; color:var(--mute); }
+  .controls input[type=number] { width:80px; }
+  .badge { background:var(--accent); color:#fff; border-radius:999px; padding:1px 9px; font-size:12px; margin-left:6px; }
+  .mute { color:var(--mute); } small { color:var(--mute); }
+  .chat { display:flex; gap:8px; } .chat input { flex:1; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Clamor</h1>
+  <div class="sub" id="sub">connecting…</div>
+  <button class="primary" id="muster">Re-muster</button>
+</header>
+<main>
+  <section><h2>Group</h2><div class="stats" id="stats"></div><div id="warnings"></div></section>
+
+  <section><h2>Devices</h2>
+    <table>
+      <thead><tr><th>Device</th><th>State</th><th>Type</th><th class="num">RAM free</th><th class="num">Mem BW</th><th class="num">GFLOP/s</th><th class="num">RTT</th><th class="num">Link</th><th></th></tr></thead>
+      <tbody id="roster"></tbody>
+    </table>
+  </section>
+
+  <section><h2>What can this group run?</h2>
+    <div class="controls">
+      Quant <select id="quant"><option>q4</option><option>q6</option><option>q8</option><option>f16</option></select>
+      Context <select id="ctx"><option>4096</option><option selected>8192</option><option>16384</option><option>32768</option></select>
+      Layout <select id="topology"><option value="ring">ring</option><option value="hub">hub</option></select>
+      Min decode <input type="number" id="target" value="2" min="0.1" step="0.5"> tok/s
+    </div>
+    <table>
+      <thead><tr><th>Model</th><th class="num">Needs</th><th class="num">Decode</th><th class="num">Prefill</th><th>Layout</th><th>Limited by</th></tr></thead>
+      <tbody id="plans"></tbody>
+    </table>
+    <small id="assume"></small>
+  </section>
+
+  <section><h2>Chat and tasks</h2>
+    <div class="chat"><input disabled placeholder="Chat and task console arrive in v0.2"><button disabled>Send</button></div>
+  </section>
+</main>
+<script>
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const gib = b => (b / 2**30).toFixed(1);
+const $ = id => document.getElementById(id);
+let busy = false;
+
+async function post(url, body) {
+  const r = await fetch(url, { method:'POST', headers:{'content-type':'application/json'}, body: body ? JSON.stringify(body) : undefined });
+  if (!r.ok) alert(await r.text());
+  refresh();
+}
+window.drain = id => confirm('Drain ' + id + '? It finishes current work and leaves the swarm.') && post('/api/nodes/' + encodeURIComponent(id) + '/drain');
+window.togglePause = (id, paused, policy) => post('/api/nodes/' + encodeURIComponent(id) + '/policy', { ...policy, participation: paused ? 'full' : 'paused' });
+$('muster').onclick = () => post('/api/muster');
+
+function renderRoster(data) {
+  $('sub').textContent = `swarm “${data.swarm}” · coordinator ${data.coordinator}`;
+  $('roster').innerHTML = data.nodes.map(n => {
+    const r = n.report, b = r.bench, l = r.link, p = r.policy;
+    const paused = p.participation === 'paused';
+    const actions = n.is_coordinator ? '<span class="mute">coordinator</span>'
+      : n.state === 'away' ? `<span class="mute">${esc(n.note || 'away')}</span>`
+      : `<button onclick='togglePause(${JSON.stringify(n.id)}, ${paused}, ${JSON.stringify(p)})'>${paused ? 'Resume' : 'Pause'}</button> <button onclick='drain(${JSON.stringify(n.id)})'>Drain</button>`;
+    return `<tr class="${esc(n.state)}">
+      <td><span class="dot"></span>${esc(n.id)}</td><td>${esc(n.state)}</td>
+      <td>${esc(r.info.class)} · ${esc(r.info.os)}/${esc(r.info.arch)}</td>
+      <td class="num">${gib(r.info.ram_available_bytes)} / ${gib(r.info.ram_total_bytes)} GiB</td>
+      <td class="num">${b ? b.mem_bw_gbps.toFixed(1) + ' GB/s' : '–'}</td>
+      <td class="num">${b ? b.cpu_gflops_mt.toFixed(0) : '–'}</td>
+      <td class="num">${l ? l.rtt_ms_p50.toFixed(1) + ' ms' : (n.is_coordinator ? 'local' : '–')}</td>
+      <td class="num">${l && l.up_mbps ? Math.min(l.up_mbps, l.down_mbps).toFixed(0) + ' Mbit/s' : '–'}</td>
+      <td>${actions}</td></tr>`;
+  }).join('') || '<tr><td colspan="9" class="mute">no devices yet</td></tr>';
+}
+
+function renderPlan(data) {
+  const s = data.summary;
+  $('stats').innerHTML = [
+    [s.devices, 'devices in swarm'], [s.cpu_threads, 'CPU threads'],
+    [gib(s.ram_available_bytes) + ' GiB', 'free RAM'], [s.mem_bw_sum_gbps.toFixed(0) + ' GB/s', 'memory bandwidth (sum)'],
+    [s.gflops_sum.toFixed(0), 'GFLOP/s (sum)']
+  ].map(([v, k]) => `<div class="stat"><b>${esc(v)}</b><span>${esc(k)}</span></div>`).join('');
+  $('warnings').innerHTML = s.warnings.map(w => `<div class="warn">⚠ ${esc(w)}</div>`).join('');
+  $('plans').innerHTML = data.plans.map((p, i) => {
+    const rec = i === data.recommended ? '<span class="badge">recommended</span>' : '';
+    if (!p.feasible) return `<tr><td>${esc(p.model)}</td><td class="num">${gib(p.need_bytes)} GiB</td><td colspan="4" class="mute">does not fit — ${esc(p.notes.join('; '))}</td></tr>`;
+    const layout = p.stages.map(s => `${esc(s.node)} [${s.layer_start}–${s.layer_end})`).join(' → ');
+    return `<tr><td>${esc(p.model)}${rec}</td><td class="num">${gib(p.need_bytes)} GiB</td><td class="num">${p.decode_tok_s.toFixed(1)} tok/s</td><td class="num">${p.prefill_tok_s.toFixed(0)} tok/s</td><td>${layout}</td><td>${esc(p.bottleneck)}</td></tr>`;
+  }).join('');
+  $('assume').textContent = `Estimates assume ${(data.assumptions.mem_efficiency*100).toFixed(0)}% memory-bandwidth and ${(data.assumptions.compute_efficiency*100).toFixed(0)}% compute efficiency. Treat them as planning numbers, not promises.`;
+}
+
+async function refresh() {
+  if (busy) return; busy = true;
+  try {
+    const q = new URLSearchParams({ quant: $('quant').value, ctx: $('ctx').value, target: $('target').value, topology: $('topology').value });
+    const [roster, plan] = await Promise.all([fetch('/api/roster').then(r => r.json()), fetch('/api/plan?' + q).then(r => r.json())]);
+    renderRoster(roster); renderPlan(plan);
+  } catch (e) { $('sub').textContent = 'portal unreachable: ' + e; }
+  busy = false;
+}
+['quant','ctx','target','topology'].forEach(id => $(id).onchange = refresh);
+refresh(); setInterval(refresh, 3000);
+</script>
+</body>
+</html>

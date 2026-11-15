@@ -45,6 +45,12 @@ fn setup(device: usize, m: i64, n: i64, k: i64, a: &[f32], b: &[f32]) -> Result<
         let out = sys::ggml_mul_mat(ctx, ta, tb);
         let gf = sys::ggml_new_graph(ctx);
         sys::ggml_build_forward_expand(gf, out);
+        if !sys::ggml_backend_supports_op(backend, out) {
+            let device = crate::cstr(sys::ggml_backend_name(backend));
+            sys::ggml_free(ctx);
+            sys::ggml_backend_free(backend);
+            return Err(Error::Unsupported { device, op: "MUL_MAT".into() });
+        }
         let buf = sys::ggml_backend_alloc_ctx_tensors(ctx, backend);
         if buf.is_null() {
             sys::ggml_free(ctx);

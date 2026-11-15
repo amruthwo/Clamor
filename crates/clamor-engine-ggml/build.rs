@@ -42,6 +42,14 @@ fn main() {
         cfg.define("GGML_OPENCL", "ON");
         libs.push("ggml-opencl");
     }
+    // ggml turns its BLAS backend on by default for Apple targets (Accelerate). Decide explicitly so
+    // the libraries we link always match what CMake built.
+    if target_os == "macos" || target_os == "ios" {
+        cfg.define("GGML_BLAS", "ON").define("GGML_BLAS_VENDOR", "Apple");
+        libs.push("ggml-blas");
+    } else {
+        cfg.define("GGML_BLAS", "OFF");
+    }
     if on("metal") {
         cfg.define("GGML_METAL", "ON").define("GGML_METAL_EMBED_LIBRARY", "ON");
         libs.push("ggml-metal");
@@ -73,7 +81,8 @@ fn main() {
                 }
             }
         }
-        "windows" => {}
+        // ggml-cpu reads CPU info from the registry (RegOpenKeyExA etc.).
+        "windows" => println!("cargo:rustc-link-lib=advapi32"),
         "android" => {
             println!("cargo:rustc-link-lib=c++_shared");
             println!("cargo:rustc-link-lib=log");

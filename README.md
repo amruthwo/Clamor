@@ -45,5 +45,13 @@ cargo run -p clamor-engine-ggml --release --example devices                  # C
 cargo run -p clamor-engine-ggml --release --features vulkan --example devices
 ```
 
-Not yet implemented: the Llama layer-range graph and the `StageExecutor` that runs it (see `CLAUDE.md`).
+`LlamaStage` runs a layer range of an f32 Llama GGUF (embedding on the head stage, lm_head on the tail) with a KV
+cache per request, checked against a numpy reference (`tools/ref_forward.py`):
+
+```bash
+pip install numpy gguf
+cargo test -p clamor-engine-ggml --release --test llama_ref
+```
+
+Not yet implemented: the `StageExecutor` that puts `LlamaStage` on the ring, tokenizer, quantized weights (see `CLAUDE.md`).
 Building on an Asahi laptop and pushing to GitHub: see `ASAHI_SETUP.md`.

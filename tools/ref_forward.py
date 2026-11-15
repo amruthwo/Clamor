@@ -5,7 +5,10 @@ Saves the hidden state after every layer and the final logits so the Rust engine
 check (a) full-model equality and (b) that running layers [0,k) then [k,n) on two
 "stages" gives the same result as one pass.
 
-Usage: ref_forward.py MODEL.gguf OUT.npz --tokens 1,5,9,23
+Usage: ref_forward.py MODEL.gguf OUT.npz --tokens 1,5,9,23 [--raw DIR]
+
+--raw also writes DIR/hidden.f32 ([layers, tokens, n_embd]) and DIR/logits.f32
+([tokens, n_vocab]) as little-endian f32, for tests that cannot read .npz.
 """
 import argparse
 import numpy as np
@@ -15,6 +18,7 @@ p = argparse.ArgumentParser()
 p.add_argument("model")
 p.add_argument("out")
 p.add_argument("--tokens", default="1,5,9,23,42,7")
+p.add_argument("--raw", help="also write raw little-endian f32 files to this directory")
 a = p.parse_args()
 toks = [int(t) for t in a.tokens.split(",")]
 
@@ -59,6 +63,12 @@ for l in range(n_layer):
     h = rms(x, g("ffn_norm"))
     x = x + (silu(h @ g("ffn_gate").T) * (h @ g("ffn_up").T)) @ g("ffn_down").T
     hidden.append(x.copy())
-logits = rms(x, T["output_norm.weight"]) @ T["output.weight"].T
+lm_head = T.get("output.weight", T["token_embd.weight"])  # tied when output.weight is absent
+logits = rms(x, T["output_norm.weight"]) @ lm_head.T
 np.savez(a.out, tokens=np.array(toks), hidden=np.stack(hidden), logits=logits)
+if a.raw:
+    import os
+    os.makedirs(a.raw, exist_ok=True)
+    np.stack(hidden).astype("<f4").tofile(os.path.join(a.raw, "hidden.f32"))
+    logits.astype("<f4").tofile(os.path.join(a.raw, "logits.f32"))
 print("next-token argmax:", int(logits[-1].argmax()), "saved", a.out)

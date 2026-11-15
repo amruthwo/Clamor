@@ -4,8 +4,15 @@ on:
   pull_request:
   workflow_dispatch:
 
+# A new push to the same PR/branch cancels the run it supersedes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
+  # Fail (not skip) the engine reference tests if numpy/gguf are missing.
+  CLAMOR_REQUIRE_PY: "1"
 
 jobs:
   test:
@@ -17,7 +24,7 @@ jobs:
         include:
           - { name: linux-x86_64, os: ubuntu-24.04, features: "" }
           - { name: linux-aarch64, os: ubuntu-24.04-arm, features: "" }
-          - { name: macos-metal, os: macos-14, features: "metal" }
+          - { name: macos-metal, os: macos-15, features: "metal" }
           - { name: windows-x86_64, os: windows-2022, features: "" }
     steps:
       - uses: actions/checkout@v4
@@ -71,6 +78,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: Jimver/cuda-toolkit@v0.2.19
-        with: { cuda: "12.6.2", method: network, sub-packages: '["nvcc","cudart","cublas","cublas-dev"]' }
+        with: { cuda: "12.6.2", method: network, sub-packages: '["nvcc","cudart"]', non-cuda-sub-packages: '["libcublas","libcublas-dev"]' }
       - run: cargo build -p clamor-engine-ggml --release --features cuda
-        env: { CMAKE_CUDA_ARCHITECTURES: "75;86;89" }
+        # Build-only: one architecture proves it compiles (three took 50+ min on a hosted runner).
+        env: { CMAKE_CUDA_ARCHITECTURES: "86" }

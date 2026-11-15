@@ -9,7 +9,15 @@ fn has_a_cpu_device() {
 #[test]
 fn matmul_matches_reference_on_every_device() {
     for d in list_devices() {
-        let r = matmul_check(d.index).unwrap_or_else(|e| panic!("{}: {e}", d.name));
+        let r = match matmul_check(d.index) {
+            Ok(r) => r,
+            // e.g. the paravirtual GPU on hosted macOS runners. The CPU must always work.
+            Err(Error::Unsupported { device, op }) if d.kind != DeviceKind::Cpu => {
+                eprintln!("NOTE: skipping {device}: does not support {op}");
+                continue;
+            }
+            Err(e) => panic!("{}: {e}", d.name),
+        };
         // GPUs may compute in reduced precision internally.
         let tol = if d.kind == DeviceKind::Cpu { 1e-4 } else { 5e-2 };
         assert!(r.max_abs_err < tol, "{}: err {}", d.name, r.max_abs_err);

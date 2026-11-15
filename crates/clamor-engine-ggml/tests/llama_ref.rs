@@ -320,3 +320,51 @@ fn embedding_only_head_composes() {
     assert!(LlamaStage::load(&f.model, 0..0, o(Some(false))).is_err(), "no layers and no embedding");
     assert!(LlamaStage::load(&f.model, 2..4, o(Some(true))).is_err(), "embedding needs layer 0");
 }
+
+/// Qwen2 (q/k/v biases, NEOX RoPE) and Llama 3 (rope_freqs scaling), alone and together:
+/// every layer, a two-stage split, and token-by-token decode through the KV cache must all
+/// match the numpy reference.
+#[test]
+fn architecture_variants_match_reference() {
+    if fixture().is_none() {
+        return;
+    }
+    let tools = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tools");
+    let toks = TOKENS.map(|t| t.to_string()).join(",");
+    for (label, extra) in [("qwen2", vec!["--arch", "qwen2"]), ("llama3 rope_freqs", vec!["--rope-freqs"]), ("qwen2 + rope_freqs", vec!["--arch", "qwen2", "--rope-freqs"])] {
+        let dir = std::env::temp_dir().join(format!("clamor-arch-{}-{}", std::process::id(), label.replace([' ', '+'], "_")));
+        std::fs::create_dir_all(&dir).unwrap();
+        let model = dir.join("m.gguf").display().to_string();
+        let mut gen_args = vec![format!("{tools}/gen_tiny_llama.py"), model.clone(), "--layers".into(), N_LAYER.to_string()];
+        gen_args.extend(extra.iter().map(|s| s.to_string()));
+        let py = |args: &[String]| assert!(std::process::Command::new("python3").args(args).status().unwrap().success());
+        py(&gen_args);
+        py(&[format!("{tools}/ref_forward.py"), model.clone(), dir.join("r.npz").display().to_string(), "--tokens".into(), toks.clone(), "--raw".into(), dir.display().to_string()]);
+        let ref_hidden = read_f32(dir.join("hidden.f32"));
+        let want = read_f32(dir.join("logits.f32"));
+        let per = TOKENS.len() * E;
+        let o = || StageOptions { device: cpu(), n_ctx: 32, ..Default::default() };
+
+        let mut full = LlamaStage::load(&model, 0..N_LAYER, o()).unwrap();
+        assert_eq!(full.hparams().rope_neox, label.starts_with("qwen2"), "{label}");
+        let (out, traced) = full.forward_traced(1, 0, LlamaInput::Tokens(&TOKENS)).unwrap();
+        for (l, h) in traced.iter().enumerate() {
+            let err = max_err(h, &ref_hidden[l * per..(l + 1) * per]);
+            assert!(err < 1e-4, "{label}: layer {l} err {err}");
+        }
+        assert!(max_err(&logits(out), &want) < 1e-4, "{label}: logits");
+
+        // Split: the second stage needs the biases and rope_freqs too.
+        let mut a = LlamaStage::load(&model, 0..2, o()).unwrap();
+        let mut b = LlamaStage::load(&model, 2..N_LAYER, o()).unwrap();
+        let h = hidden(a.forward(1, 0, LlamaInput::Tokens(&TOKENS)).unwrap());
+        assert!(max_err(&logits(b.forward(1, 0, LlamaInput::Hidden(&h)).unwrap()), &want) < 1e-4, "{label}: split");
+
+        // Decode one token at a time: positions must reach RoPE correctly.
+        let mut s = LlamaStage::load(&model, 0..N_LAYER, o()).unwrap();
+        for p in 0..TOKENS.len() {
+            let got = logits(s.forward(9, p as u32, LlamaInput::Tokens(&TOKENS[p..p + 1])).unwrap());
+            assert!(max_err(&got, rows(&want, V, p..p + 1)) < 1e-4, "{label}: decode pos {p}");
+        }
+    }
+}

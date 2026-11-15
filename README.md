@@ -72,8 +72,8 @@ drops off can rejoin later without benchmarking again.
 | **Works** | Starting a swarm, joining with a token, automatic benchmarks, a web dashboard showing devices and which models fit |
 | **Works** | Splitting a real model across machines: the coordinator hands out layers, each machine loads its share, and they pass the work around the ring |
 | **Works** | Text chat through the API, using the model's own tokenizer and chat template (both checked against Hugging Face's) |
-| **Works** | Compressed (quantized) models, tested with SmolLM2 360M in 8-bit |
-| **In progress** | Llama 3 and Qwen 2.5 support; sharing one copy of a model file between machines |
+| **Works** | Llama 3.x, Qwen 2.5 and SmolLM2 models, including compressed (quantized) files; checked against a reference implementation |
+| **In progress** | Installable releases, easier joining (generated passphrases, remembered swarms), sharing one copy of a model file between machines |
 | **Planned** | Chat in the dashboard, an OpenAI-compatible API for agent tools, installers and a desktop app, a phone app, automatic discovery and coordinator hand-over, encryption between devices |
 
 CI runs the tests on Linux (x86_64 and arm64), Windows and macOS. The Vulkan, CUDA and Android builds are

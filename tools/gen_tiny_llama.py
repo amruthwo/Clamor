@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Write a tiny random-weight Llama-architecture GGUF (f32) for engine tests.
 
-Usage: gen_tiny_llama.py OUT.gguf [--layers 4] [--seed 0] [--tied] [--bytes-vocab]
+Usage: gen_tiny_llama.py OUT.gguf [--layers 4] [--seed 0] [--tied] [--bytes-vocab] [--arch qwen2] [--rope-freqs]
 --tied omits output.weight, so lm_head reuses token_embd.weight (as many small models do).
 Weights are in ggml convention (RoPE on adjacent pairs), so ref_forward.py and the
 Rust graph must agree on exactly this definition.
@@ -15,6 +15,9 @@ p.add_argument("out")
 p.add_argument("--layers", type=int, default=4)
 p.add_argument("--seed", type=int, default=0)
 p.add_argument("--tied", action="store_true", help="omit output.weight (lm_head tied to token_embd)")
+p.add_argument("--arch", choices=["llama", "qwen2"], default="llama",
+               help="qwen2: q/k/v biases and NEOX RoPE (as Qwen2/2.5)")
+p.add_argument("--rope-freqs", action="store_true", help="add a rope_freqs.weight tensor (Llama 3 RoPE scaling)")
 p.add_argument("--bytes-vocab", action="store_true",
                help="add a byte-level BPE tokenizer: the 256 byte tokens + ChatML specials, no merges (vocab 259)")
 a = p.parse_args()
@@ -29,7 +32,7 @@ def w(*shape, scale=None):
     scale = scale or (1.0 / np.sqrt(shape[-1]))
     return (rng.standard_normal(shape) * scale).astype(np.float32)
 
-wr = gguf.GGUFWriter(a.out, "llama")
+wr = gguf.GGUFWriter(a.out, a.arch)
 wr.add_name("clamor-tiny-llama")
 wr.add_context_length(CTX)
 wr.add_embedding_length(E)
@@ -66,11 +69,17 @@ for i in range(a.layers):
     wr.add_tensor(f"blk.{i}.attn_q.weight", w(H * HD, E))
     wr.add_tensor(f"blk.{i}.attn_k.weight", w(HKV * HD, E))
     wr.add_tensor(f"blk.{i}.attn_v.weight", w(HKV * HD, E))
+    if a.arch == "qwen2":
+        for nm, rows in (("attn_q", H * HD), ("attn_k", HKV * HD), ("attn_v", HKV * HD)):
+            wr.add_tensor(f"blk.{i}.{nm}.bias", (0.5 * rng.standard_normal(rows)).astype(np.float32))
     wr.add_tensor(f"blk.{i}.attn_output.weight", w(E, H * HD))
     wr.add_tensor(f"blk.{i}.ffn_norm.weight", (1 + 0.1 * rng.standard_normal(E)).astype(np.float32))
     wr.add_tensor(f"blk.{i}.ffn_gate.weight", w(FF, E))
     wr.add_tensor(f"blk.{i}.ffn_up.weight", w(FF, E))
     wr.add_tensor(f"blk.{i}.ffn_down.weight", w(E, FF))
+if a.rope_freqs:
+    # Llama 3 style: low frequencies slowed down, high ones untouched.
+    wr.add_tensor("rope_freqs.weight", np.linspace(1.0, 8.0, HD // 2).astype(np.float32))
 wr.add_tensor("output_norm.weight", (1 + 0.1 * rng.standard_normal(E)).astype(np.float32))
 if not a.tied:
     wr.add_tensor("output.weight", w(V, E))

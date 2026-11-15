@@ -37,7 +37,8 @@ fn main() {
     let dev_name = list_devices()[device].name.clone();
 
     let t0 = std::time::Instant::now();
-    let mut s = LlamaStage::load(model, 0..u32::MAX.min(GgufFile::open(model).unwrap().get_u32("llama.block_count").unwrap()), StageOptions { device, n_ctx: 512, n_threads, ..Default::default() }).unwrap();
+    let n_layer = LlamaHparams::from_gguf(&GgufFile::open(model).unwrap()).unwrap().n_layer;
+    let mut s = LlamaStage::load(model, 0..n_layer, StageOptions { device, n_ctx: 512, n_threads, ..Default::default() }).unwrap();
     println!("{dev_name}: loaded {} layers in {:.2?}", s.hparams().n_layer, t0.elapsed());
     let (e, v, n) = (s.hparams().n_embd as usize, s.hparams().n_vocab as usize, toks.len());
 

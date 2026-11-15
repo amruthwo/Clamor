@@ -10,6 +10,10 @@
 //!
 //! Conventions are ggml's: weights are `[out, in]` row-major (ggml `ne = [in, out]`), and RoPE
 //! rotates adjacent pairs (`GGML_ROPE_TYPE_NORMAL`). `tools/ref_forward.py` is the reference.
+//!
+//! Architectures: `llama` (Llama 1-3, SmolLM, ...) and `qwen2` (Qwen2/2.5), which adds q/k/v
+//! biases and rotates the two halves of each head (NEOX RoPE). Llama 3's RoPE scaling comes as a
+//! `rope_freqs.weight` tensor of per-frequency divisors, which ggml's rope takes directly.
 use crate::{gguf::GgufFile, sys, Error, Result};
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -32,18 +36,26 @@ pub struct LlamaHparams {
     pub n_rot: u32,
     pub rms_eps: f32,
     pub rope_freq_base: f32,
+    /// `general.architecture`: "llama" or "qwen2".
+    pub arch: String,
+    /// Rotate the two halves of each head (NEOX) rather than adjacent pairs.
+    pub rope_neox: bool,
 }
 
 impl LlamaHparams {
     pub fn from_gguf(g: &GgufFile) -> Result<Self> {
         let arch = g.get_str("general.architecture").unwrap_or_default();
-        if arch != "llama" {
-            return Err(Error::Gguf(format!("unsupported architecture {arch:?} (want llama)")));
-        }
-        let req = |k: &str| g.get_u32(&format!("llama.{k}")).ok_or_else(|| Error::Gguf(format!("missing llama.{k}")));
+        // llama.cpp converts Llama's q/k weights to rotate adjacent pairs; Qwen2 keeps halves.
+        let rope_neox = match arch.as_str() {
+            "llama" => false,
+            "qwen2" => true,
+            _ => return Err(Error::Gguf(format!("unsupported architecture {arch:?} (supported: llama, qwen2)"))),
+        };
+        let key = |k: &str| format!("{arch}.{k}");
+        let req = |k: &str| g.get_u32(&key(k)).ok_or_else(|| Error::Gguf(format!("missing {}", key(k))));
         let n_embd = req("embedding_length")?;
         let n_head = req("attention.head_count")?;
-        let n_vocab = match g.get_u32("llama.vocab_size") {
+        let n_vocab = match g.get_u32(&key("vocab_size")) {
             Some(v) => v,
             None => g.tensor_ne("token_embd.weight").map(|ne| ne[1] as u32).ok_or_else(|| Error::Gguf("no vocab size".into()))?,
         };
@@ -51,13 +63,15 @@ impl LlamaHparams {
             n_layer: req("block_count")?,
             n_embd,
             n_head,
-            n_head_kv: g.get_u32("llama.attention.head_count_kv").unwrap_or(n_head),
+            n_head_kv: g.get_u32(&key("attention.head_count_kv")).unwrap_or(n_head),
             n_ff: req("feed_forward_length")?,
             n_vocab,
             n_ctx_train: req("context_length")?,
-            n_rot: g.get_u32("llama.rope.dimension_count").unwrap_or(n_embd / n_head),
-            rms_eps: g.get_f32("llama.attention.layer_norm_rms_epsilon").unwrap_or(1e-5),
-            rope_freq_base: g.get_f32("llama.rope.freq_base").unwrap_or(10000.0),
+            n_rot: g.get_u32(&key("rope.dimension_count")).unwrap_or(n_embd / n_head),
+            rms_eps: g.get_f32(&key("attention.layer_norm_rms_epsilon")).unwrap_or(1e-5),
+            rope_freq_base: g.get_f32(&key("rope.freq_base")).unwrap_or(10000.0),
+            rope_neox,
+            arch,
         })
     }
     pub fn head_dim(&self) -> u32 {
@@ -123,6 +137,10 @@ struct LayerW {
     w_gate: T,
     w_up: T,
     w_down: T,
+    /// q/k/v biases (Qwen2).
+    bq: Option<T>,
+    bk: Option<T>,
+    bv: Option<T>,
 }
 
 struct KvCache {
@@ -155,6 +173,8 @@ pub struct LlamaStage {
     blocks: Vec<LayerW>,
     out_norm: Option<T>,
     output: Option<T>,
+    /// Llama 3 RoPE frequency divisors, if the model has them.
+    rope_freqs: Option<T>,
     caches: HashMap<u64, KvCache>,
 }
 
@@ -206,6 +226,16 @@ impl LlamaStage {
             for s in ["attn_norm", "attn_q", "attn_k", "attn_v", "attn_output", "ffn_norm", "ffn_gate", "ffn_up", "ffn_down"] {
                 names.push(format!("blk.{l}.{s}.weight"));
             }
+            for s in ["attn_q", "attn_k", "attn_v"] {
+                let b = format!("blk.{l}.{s}.bias");
+                if g.tensor_ne(&b).is_some() {
+                    names.push(b);
+                }
+            }
+        }
+        // Every stage with layers applies RoPE, so each needs the (global) frequency divisors.
+        if !layers.is_empty() && g.tensor_ne("rope_freqs.weight").is_some() {
+            names.push("rope_freqs.weight".into());
         }
         if is_tail {
             names.push("output_norm.weight".into());
@@ -247,6 +277,7 @@ impl LlamaStage {
                 blocks: Vec::new(),
                 out_norm: None,
                 output: None,
+                rope_freqs: None,
                 caches: HashMap::new(),
             };
 
@@ -280,6 +311,7 @@ impl LlamaStage {
             }
             for l in layers.clone() {
                 let w = |s: &str| get(format!("blk.{l}.{s}.weight"));
+                let b = |s: &str| by_name.get(&format!("blk.{l}.{s}.bias")).copied();
                 stage.blocks.push(LayerW {
                     attn_norm: w("attn_norm"),
                     wq: w("attn_q"),
@@ -290,8 +322,12 @@ impl LlamaStage {
                     w_gate: w("ffn_gate"),
                     w_up: w("ffn_up"),
                     w_down: w("ffn_down"),
+                    bq: b("attn_q"),
+                    bk: b("attn_k"),
+                    bv: b("attn_v"),
                 });
             }
+            stage.rope_freqs = by_name.get("rope_freqs.weight").copied();
             if is_tail {
                 stage.out_norm = Some(get("output_norm.weight".into()));
                 // Lazily: a tail-only stage has output.weight and never loads token_embd.
@@ -453,17 +489,26 @@ impl LlamaStage {
             let in_rows = input_t(sys::ggml_type::GGML_TYPE_I64, n64, 1);
             let in_mask = input_t(sys::ggml_type::GGML_TYPE_F32, n_kv, n64);
             let kq_scale = 1.0 / (hd as f32).sqrt();
+            let rope_mode = if hp.rope_neox { sys::GGML_ROPE_TYPE_NEOX } else { sys::GGML_ROPE_TYPE_NORMAL } as i32;
+            let freqs = self.rope_freqs.unwrap_or(null_mut());
             let rope = |t: T| {
-                sys::ggml_rope_ext(ctx, t, in_pos, null_mut(), hp.n_rot as i32, sys::GGML_ROPE_TYPE_NORMAL as i32, hp.n_ctx_train as i32, hp.rope_freq_base, 1.0, 0.0, 1.0, 32.0, 1.0)
+                sys::ggml_rope_ext(ctx, t, in_pos, freqs, hp.n_rot as i32, rope_mode, hp.n_ctx_train as i32, hp.rope_freq_base, 1.0, 0.0, 1.0, 32.0, 1.0)
             };
 
             let mut traced = Vec::new();
             for (li, w) in self.blocks.iter().enumerate() {
                 // Attention.
                 let h = sys::ggml_mul(ctx, sys::ggml_rms_norm(ctx, x, hp.rms_eps), w.attn_norm);
-                let q = rope(sys::ggml_reshape_3d(ctx, sys::ggml_mul_mat(ctx, w.wq, h), hd, nh, n64));
-                let k = rope(sys::ggml_reshape_3d(ctx, sys::ggml_mul_mat(ctx, w.wk, h), hd, nkv, n64));
-                let v = sys::ggml_mul_mat(ctx, w.wv, h);
+                let proj = |wt: T, bias: Option<T>| {
+                    let y = sys::ggml_mul_mat(ctx, wt, h);
+                    match bias {
+                        Some(b) => sys::ggml_add(ctx, y, b),
+                        None => y,
+                    }
+                };
+                let q = rope(sys::ggml_reshape_3d(ctx, proj(w.wq, w.bq), hd, nh, n64));
+                let k = rope(sys::ggml_reshape_3d(ctx, proj(w.wk, w.bk), hd, nkv, n64));
+                let v = proj(w.wv, w.bv);
                 // Write this batch's K/V into rows [pos, pos+n) of the cache. set_rows returns a
                 // view of the whole cache that depends on the write, so reads are ordered after it.
                 let k_all = sys::ggml_set_rows(ctx, kc[li], sys::ggml_reshape_2d(ctx, k, hd * nkv, n64), in_rows);

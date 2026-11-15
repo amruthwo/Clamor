@@ -152,6 +152,7 @@ pub async fn spawn_mock_ring(bounds: &[u32], hidden: u32, per_layer: Duration, v
             downstream: if n == 1 { None } else { Some(addrs[(i + 1) % n]) },
             window,
             connect_timeout: Duration::from_secs(5),
+            stall_timeout: crate::stage::DEFAULT_STALL_TIMEOUT,
         };
         debug_assert_eq!(role_of(cfg.stage_index, cfg.stage_count) == crate::stage::Role::Solo, n == 1);
         stages.push(run_stage(cfg, listener, exec));
@@ -261,7 +262,7 @@ mod tests {
             if i + 1 == n {
                 exec.eos = Some(first);
             }
-            let cfg = StageConfig { stage_index: i as u32, stage_count: n as u32, epoch: 1, session: 7, downstream: Some(addrs[(i + 1) % n]), window: 4, connect_timeout: Duration::from_secs(5) };
+            let cfg = StageConfig { stage_index: i as u32, stage_count: n as u32, epoch: 1, session: 7, downstream: Some(addrs[(i + 1) % n]), window: 4, connect_timeout: Duration::from_secs(5), stall_timeout: crate::stage::DEFAULT_STALL_TIMEOUT };
             handles.push(run_stage(cfg, l, exec));
         }
         let (_, rx) = handles[0].head.as_ref().unwrap().submit(vec![9, 9], 50);
@@ -295,7 +296,7 @@ mod tests {
                     exec.fail_from_pos = Some(6);
                 }
                 released.push(exec.released.clone());
-                let cfg = StageConfig { stage_index: i as u32, stage_count: n as u32, epoch: 1, session: 7, downstream: Some(addrs[(i + 1) % n]), window: 4, connect_timeout: Duration::from_secs(5) };
+                let cfg = StageConfig { stage_index: i as u32, stage_count: n as u32, epoch: 1, session: 7, downstream: Some(addrs[(i + 1) % n]), window: 4, connect_timeout: Duration::from_secs(5), stall_timeout: crate::stage::DEFAULT_STALL_TIMEOUT };
                 handles.push(run_stage(cfg, l, exec));
             }
             let head = handles[0].head.as_ref().unwrap();
@@ -325,6 +326,41 @@ mod tests {
             for h in &handles {
                 h.stop();
             }
+        }
+    }
+
+    /// A stage that stops making progress (frozen, or a half-dead link) must not leave requests
+    /// hanging: the head fails them after `stall_timeout`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn a_stalled_stage_fails_requests_instead_of_hanging() {
+        let n = 3usize;
+        let bounds = [0u32, 10, 20, 30];
+        let mut listeners = Vec::new();
+        let mut addrs = Vec::new();
+        for _ in 0..n {
+            let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            addrs.push(l.local_addr().unwrap());
+            listeners.push(l);
+        }
+        let mut handles = Vec::new();
+        for (i, l) in listeners.into_iter().enumerate() {
+            // The middle stage takes 3 s per step, against a 0.5 s stall timeout: frozen.
+            let per_layer = if i == 1 { Duration::from_millis(300) } else { Duration::ZERO };
+            let exec = MockExecutor::new(bounds[i]..bounds[i + 1], i + 1 == n, 16, per_layer, VOCAB);
+            let cfg = StageConfig { stage_index: i as u32, stage_count: n as u32, epoch: 1, session: 7, downstream: Some(addrs[(i + 1) % n]), window: 4, connect_timeout: Duration::from_secs(5), stall_timeout: Duration::from_millis(500) };
+            handles.push(run_stage(cfg, l, exec));
+        }
+        let t0 = std::time::Instant::now();
+        let (_, rx) = handles[0].head.as_ref().unwrap().submit(vec![1, 2], 10);
+        let (toks, reason) = collect(rx).await;
+        assert!(toks.is_empty());
+        match reason {
+            DoneReason::Failed(m) => assert!(m.contains("no progress"), "{m}"),
+            r => panic!("expected a stall failure, got {r:?}"),
+        }
+        assert!(t0.elapsed() < Duration::from_secs(5), "failed after {:?}, not promptly", t0.elapsed());
+        for h in &handles {
+            h.stop();
         }
     }
 

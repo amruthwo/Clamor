@@ -99,10 +99,17 @@ pub struct StageOptions {
     /// Whether this stage owns the token embedding and takes token ids. `None`: it does if it
     /// holds layer 0. Set `Some(false)` for a stage holding `0..k` behind an embedding-only head.
     pub embed: Option<bool>,
+    /// Longest batch computed in one pass; longer prompts are fed in chunks of this size.
+    /// Attention's scratch buffer grows with batch x context x heads, so this bounds memory.
+    /// 0 means `DEFAULT_PREFILL_CHUNK`.
+    pub prefill_chunk: u32,
 }
+
+/// See `StageOptions::prefill_chunk`.
+pub const DEFAULT_PREFILL_CHUNK: u32 = 512;
 impl Default for StageOptions {
     fn default() -> Self {
-        Self { device: 0, n_ctx: 0, n_threads: 0, embed: None }
+        Self { device: 0, n_ctx: 0, n_threads: 0, embed: None, prefill_chunk: 0 }
     }
 }
 
@@ -169,6 +176,7 @@ pub struct LlamaStage {
     layers: Range<u32>,
     embed: bool,
     n_ctx: u32,
+    prefill_chunk: u32,
     backend: sys::ggml_backend_t,
     galloc: sys::ggml_gallocr_t,
     w_ctx: *mut sys::ggml_context,
@@ -216,6 +224,12 @@ pub fn plan_stage_slice(src: &GgufFile, layers: Range<u32>, embed: bool) -> Resu
 /// and lm_head if it holds the last layer, and RoPE frequency factors if it holds any layer.
 /// Shared by the loader and by slice building (`write_stage_slice`), so they always agree.
 pub fn stage_tensors(g: &GgufFile, hp: &LlamaHparams, layers: Range<u32>, embed: bool) -> Result<Vec<String>> {
+    stage_tensors_with(|n| g.tensor_ne(n).is_some(), hp, layers, embed)
+}
+
+/// `stage_tensors` against any tensor list (`has` says whether a tensor exists), e.g. a size
+/// table fetched from another node, so memory estimates use exactly the loader's selection.
+pub fn stage_tensors_with(has: impl Fn(&str) -> bool, hp: &LlamaHparams, layers: Range<u32>, embed: bool) -> Result<Vec<String>> {
     // An empty range is allowed only at the start: an embedding-only head (0..0), so the
     // coordinator can own the request table without holding any layers.
     let embed_only = layers == (0..0) && embed;
@@ -239,19 +253,19 @@ pub fn stage_tensors(g: &GgufFile, hp: &LlamaHparams, layers: Range<u32>, embed:
         }
         for s in ["attn_q", "attn_k", "attn_v"] {
             let b = format!("blk.{l}.{s}.bias");
-            if g.tensor_ne(&b).is_some() {
+            if has(&b) {
                 names.push(b);
             }
         }
     }
     // Every stage with layers applies RoPE, so each needs the (global) frequency divisors.
-    if !layers.is_empty() && g.tensor_ne("rope_freqs.weight").is_some() {
+    if !layers.is_empty() && has("rope_freqs.weight") {
         names.push("rope_freqs.weight".into());
     }
     if is_tail {
         names.push("output_norm.weight".into());
         // Some models tie lm_head to the embedding and omit output.weight.
-        let lm_head = if g.tensor_ne("output.weight").is_some() { "output.weight" } else { "token_embd.weight" };
+        let lm_head = if has("output.weight") { "output.weight" } else { "token_embd.weight" };
         if !names.iter().any(|n| n == lm_head) {
             names.push(lm_head.into());
         }
@@ -288,6 +302,7 @@ impl LlamaStage {
                 layers: layers.clone(),
                 embed: is_head,
                 n_ctx,
+                prefill_chunk: if opts.prefill_chunk == 0 { DEFAULT_PREFILL_CHUNK } else { opts.prefill_chunk },
                 backend,
                 galloc: sys::ggml_gallocr_new(sys::ggml_backend_get_default_buffer_type(backend)),
                 w_ctx: sys::ggml_init(sys::ggml_init_params {
@@ -436,7 +451,42 @@ impl LlamaStage {
         Ok(self.caches.get_mut(&request).unwrap())
     }
 
+    /// Split long batches into `prefill_chunk`-sized passes (each extends the KV cache), so the
+    /// working memory stays bounded however long the prompt is.
     fn run(&mut self, request: u64, pos: u32, input: LlamaInput<'_>, logits: Logits, trace: bool) -> Result<(LlamaOutput, Vec<Vec<f32>>)> {
+        let e = self.hp.n_embd as usize;
+        let n = match &input {
+            LlamaInput::Tokens(t) => t.len(),
+            LlamaInput::Hidden(h) => h.len() / e.max(1),
+        };
+        let chunk = self.prefill_chunk as usize;
+        if trace || n <= chunk {
+            return self.run_batch(request, pos, input, logits, trace);
+        }
+        let (mut hidden, mut all_logits, mut last) = (Vec::new(), Vec::new(), None);
+        for start in (0..n).step_by(chunk) {
+            let end = (start + chunk).min(n);
+            let part = match &input {
+                LlamaInput::Tokens(t) => LlamaInput::Tokens(&t[start..end]),
+                LlamaInput::Hidden(h) => LlamaInput::Hidden(&h[start * e..end * e]),
+            };
+            // Only the final chunk's last row matters for Logits::Last.
+            let want = if logits == Logits::Last && end < n { Logits::Last } else { logits };
+            match self.run_batch(request, pos + start as u32, part, want, false)?.0 {
+                LlamaOutput::Hidden(h) => hidden.extend_from_slice(&h),
+                LlamaOutput::Logits(l) if logits == Logits::All => all_logits.extend_from_slice(&l),
+                LlamaOutput::Logits(l) => last = Some(l),
+            }
+        }
+        let out = if self.is_tail() {
+            LlamaOutput::Logits(if logits == Logits::All { all_logits } else { last.unwrap_or_default() })
+        } else {
+            LlamaOutput::Hidden(hidden)
+        };
+        Ok((out, Vec::new()))
+    }
+
+    fn run_batch(&mut self, request: u64, pos: u32, input: LlamaInput<'_>, logits: Logits, trace: bool) -> Result<(LlamaOutput, Vec<Vec<f32>>)> {
         let hp = self.hp.clone();
         let (e, hd, nh, nkv) = (hp.n_embd as i64, hp.head_dim() as i64, hp.n_head as i64, hp.n_head_kv as i64);
         let n = match &input {

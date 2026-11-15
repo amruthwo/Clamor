@@ -7,6 +7,7 @@ use crate::stage::{self, Assignment};
 use anyhow::{anyhow, bail, Result};
 use anyhow::Context;
 use clamor_engine_ggml::{GgufFile, LlamaHparams, Tokenizer};
+use std::collections::HashMap;
 use std::sync::Arc;
 use clamor_muster::plan;
 use clamor_proto::*;
@@ -32,6 +33,8 @@ pub struct PipeStage {
     /// `host:port` other stages use to reach this one.
     pub addr: String,
     pub status: StageStatus,
+    /// Memory planned for this stage (0 when limits were ignored).
+    pub need_bytes: u64,
 }
 
 #[derive(Serialize)]
@@ -126,6 +129,63 @@ pub struct PipelineRequest {
     pub stages: Option<Vec<StageSpec>>,
     #[serde(default)]
     pub sampling: SamplingParams,
+    /// Skip the memory check (for experiments: the device may swap and become unresponsive).
+    #[serde(default)]
+    pub ignore_limits: bool,
+}
+
+/// Fixed working memory per stage, besides weights, KV caches and attention scratch.
+const STAGE_OVERHEAD: u64 = 256 << 20;
+
+/// Memory plan for one stage.
+#[derive(Clone, Copy, Debug)]
+pub struct StageMemory {
+    pub weights: u64,
+    /// KV cache for one request at full context.
+    pub kv_per_request: u64,
+    /// Scratch for one prefill chunk plus fixed overhead.
+    pub working: u64,
+}
+
+impl StageMemory {
+    pub fn need(&self, requests: u32) -> u64 {
+        self.weights + self.working + self.kv_per_request * requests as u64
+    }
+}
+
+/// What a stage holding `layers` needs. Uses the engine's own tensor selection, so the estimate
+/// covers exactly what the loader will load.
+pub fn stage_memory(sizes: &HashMap<String, u64>, hp: &LlamaHparams, layers: std::ops::Range<u32>, embed: bool, n_ctx: u32) -> Result<StageMemory> {
+    let names = clamor_engine_ggml::stage_tensors_with(|n| sizes.contains_key(n), hp, layers.clone(), embed).map_err(|e| anyhow!("{e}"))?;
+    let weights = names.iter().map(|n| sizes[n]).sum();
+    let n_layers = (layers.end - layers.start) as u64;
+    // f32 K and V per layer per position.
+    let kv_per_request = 2 * n_layers * hp.kv_dim() as u64 * n_ctx as u64 * 4;
+    // Attention scores and softmax for one prefill chunk against the full context.
+    let chunk = clamor_engine_ggml::DEFAULT_PREFILL_CHUNK.min(n_ctx) as u64;
+    let scratch = if n_layers > 0 { 2 * chunk * n_ctx as u64 * hp.n_head as u64 * 4 } else { 0 };
+    Ok(StageMemory { weights, kv_per_request, working: STAGE_OVERHEAD + scratch })
+}
+
+/// Most requests every stage can hold at once within its node's budget (capped at 8), or an
+/// explanation naming the stage that cannot fit even one.
+pub fn fit_requests(stages: &[(NodeId, StageMemory, u64)]) -> std::result::Result<u32, String> {
+    let mut best = 8u32;
+    for (i, (node, m, budget)) in stages.iter().enumerate() {
+        let fixed = m.weights + m.working;
+        let fits = if m.kv_per_request == 0 { u32::MAX as u64 } else { budget.saturating_sub(fixed) / m.kv_per_request };
+        if fixed > *budget || fits == 0 {
+            return Err(format!(
+                "stage {i} on {node} needs {:.1} GB ({:.1} GB of weights, {:.2} GB of context per request) but may use {:.1} GB: give it fewer layers, use a smaller context (ctx), or raise its RAM share",
+                m.need(1) as f64 / 1e9,
+                m.weights as f64 / 1e9,
+                m.kv_per_request as f64 / 1e9,
+                *budget as f64 / 1e9
+            ));
+        }
+        best = best.min(fits.min(8) as u32);
+    }
+    Ok(best)
 }
 
 /// Planner input for a real GGUF: size from the actual tensor bytes, KV width from the heads.
@@ -227,13 +287,16 @@ pub async fn start(shared: &Shared, req: PipelineRequest) -> Result<()> {
             .with_context(|| format!("fetching {}'s metadata from {}", req.model, holders[0]))?;
         dest
     };
-    let g = GgufFile::open(&meta_path.display().to_string()).map_err(|e| anyhow!("{e}"))?;
-    let hp = LlamaHparams::from_gguf(&g).map_err(|e| anyhow!("{e}"))?;
-    let n_ctx = req.ctx.unwrap_or(2048).clamp(16, hp.n_ctx_train.max(16));
-    let (tokenizer, tokenizer_note) = match Tokenizer::from_gguf(&g) {
-        Ok(t) => (Some(Arc::new(t)), None),
-        Err(e) => (None, Some(e.to_string())),
+    // The header is a C handle (not Send), so it lives only in this block, never across an await.
+    let (hp, tokenizer, tokenizer_note) = {
+        let g = GgufFile::open(&meta_path.display().to_string()).map_err(|e| anyhow!("{e}"))?;
+        let hp = LlamaHparams::from_gguf(&g).map_err(|e| anyhow!("{e}"))?;
+        match Tokenizer::from_gguf(&g) {
+            Ok(t) => (hp, Some(Arc::new(t)), None),
+            Err(e) => (hp, None, Some(e.to_string())),
+        }
     };
+    let n_ctx = req.ctx.unwrap_or(2048).clamp(16, hp.n_ctx_train.max(16));
 
     let layout: Vec<(NodeId, u32, u32)> = match &req.stages {
         Some(specs) => specs.iter().map(|s| (NodeId(s.node.clone()), s.layers[0], s.layers[1])).collect(),
@@ -243,7 +306,7 @@ pub async fn start(shared: &Shared, req: PipelineRequest) -> Result<()> {
                 let r: Vec<NodeReport> = sw
                     .nodes
                     .values()
-                    .filter(|e| matches!(e.state, NodeState::Ready | NodeState::Busy))
+                    .filter(|e| matches!(e.state, NodeState::Ready | NodeState::Busy) && e.paused.is_none())
                     .map(|e| e.report.clone())
                     .collect();
                 (r, sw.coordinator.clone())
@@ -258,6 +321,39 @@ pub async fn start(shared: &Shared, req: PipelineRequest) -> Result<()> {
     };
     let layout = normalize(layout, &coordinator, hp.n_layer)?;
     let n = layout.len() as u32;
+
+    // Memory: size every stage, then allow as many simultaneous requests as all of them fit.
+    let (max_requests, needs) = if req.ignore_limits {
+        (8, vec![None; layout.len()])
+    } else {
+        let table = if holders.contains(&coordinator) {
+            let p = meta_path.clone();
+            tokio::task::spawn_blocking(move || crate::share::tensor_table(&p)).await??
+        } else {
+            let src = {
+                let sw = shared.lock().unwrap();
+                share_url(&sw, &holders[0], &coordinator).ok_or_else(|| anyhow!("cannot reach {}", holders[0]))?
+            };
+            let (name, token) = (req.model.clone(), engine.share_token.clone());
+            tokio::task::spawn_blocking(move || crate::share::fetch_tensor_table(&src, &name, token.as_deref())).await??
+        };
+        let sizes: HashMap<String, u64> = table.into_iter().collect();
+        let plans: Vec<(NodeId, StageMemory, u64)> = {
+            let sw = shared.lock().unwrap();
+            let mut v = Vec::new();
+            for (i, (node, a, b)) in layout.iter().enumerate() {
+                let m = stage_memory(&sizes, &hp, *a..*b, i == 0, n_ctx)?;
+                let e = sw.nodes.get(node).ok_or_else(|| anyhow!("unknown node {node}"))?;
+                // Memory this node's stage in the pipeline being replaced will give back.
+                let freed: u64 = sw.pipeline.as_ref().map(|p| p.stages.iter().filter(|s| &s.node == node).map(|s| s.need_bytes).sum()).unwrap_or(0);
+                let budget = crate::neighbour::ram_budget(&e.report.policy, e.report.info.ram_available_bytes + freed, e.report.info.ram_total_bytes);
+                v.push((node.clone(), m, budget));
+            }
+            v
+        };
+        let r = fit_requests(&plans).map_err(|e| anyhow!(e))?;
+        (r, plans.iter().map(|(_, m, _)| Some(m.need(r))).collect())
+    };
 
     // Resolve how stages reach each other, and claim the epoch, under one lock.
     let (epoch, assigns, senders) = {
@@ -279,6 +375,9 @@ pub async fn start(shared: &Shared, req: PipelineRequest) -> Result<()> {
             let tx = e.tx.clone().ok_or_else(|| anyhow!("{node} is not connected"))?;
             if matches!(e.state, NodeState::Draining | NodeState::Away) || matches!(e.report.policy.participation, Participation::Paused | Participation::Draining) {
                 bail!("{node} is not available (state {:?}, policy {:?})", e.state, e.report.policy.participation);
+            }
+            if let Some(why) = &e.paused {
+                bail!("{node} is not taking work right now: {why}");
             }
             hosts.push(e.peer_ip.ok_or_else(|| anyhow!("{node} has no address"))?);
             senders.push(Some(tx));
@@ -313,6 +412,9 @@ pub async fn start(shared: &Shared, req: PipelineRequest) -> Result<()> {
                     share_url(&sw, from, node)
                 },
                 model_id: Some(info.id.clone()),
+                max_requests: Some(max_requests),
+                need_bytes: needs[i],
+                policy: sw.nodes.get(node).map(|e| e.report.policy).unwrap_or_else(|| Policy::default_for(DeviceClass::Desktop)),
             })
             .collect();
         if let Some((i, (node, _, _))) = layout.iter().enumerate().find(|(i, (node, _, _))| !holders.contains(node) && assigns[*i].source.is_none()) {
@@ -332,7 +434,7 @@ pub async fn start(shared: &Shared, req: PipelineRequest) -> Result<()> {
             failure_is_cause: false,
             tokenizer,
             tokenizer_note,
-            stages: layout.iter().enumerate().map(|(i, (node, a, b))| PipeStage { node: node.clone(), layer_start: *a, layer_end: *b, addr: addr(i), status: StageStatus::Loading }).collect(),
+            stages: layout.iter().enumerate().map(|(i, (node, a, b))| PipeStage { node: node.clone(), layer_start: *a, layer_end: *b, addr: addr(i), status: StageStatus::Loading, need_bytes: needs[i].unwrap_or(0) }).collect(),
             head: None,
             local: None,
         });
@@ -357,6 +459,8 @@ pub async fn start(shared: &Shared, req: PipelineRequest) -> Result<()> {
                 sampling: a.sampling,
                 source: a.source.clone(),
                 model_id: a.model_id.clone(),
+                max_requests: a.max_requests,
+                need_bytes: a.need_bytes,
             });
         }
     }
@@ -429,6 +533,48 @@ mod tests {
         NodeId(s.into())
     }
 
+    fn hp() -> LlamaHparams {
+        LlamaHparams { n_layer: 4, n_embd: 64, n_head: 4, n_head_kv: 2, n_ff: 128, n_vocab: 128, n_ctx_train: 64, n_rot: 16, rms_eps: 1e-5, rope_freq_base: 1e4, arch: "llama".into(), rope_neox: false }
+    }
+
+    fn sizes() -> HashMap<String, u64> {
+        let mut s = HashMap::new();
+        s.insert("token_embd.weight".into(), 1000);
+        s.insert("output_norm.weight".into(), 10);
+        s.insert("output.weight".into(), 900);
+        for l in 0..4 {
+            for t in ["attn_norm", "attn_q", "attn_k", "attn_v", "attn_output", "ffn_norm", "ffn_gate", "ffn_up", "ffn_down"] {
+                s.insert(format!("blk.{l}.{t}.weight"), 100);
+            }
+        }
+        s
+    }
+
+    #[test]
+    fn stage_memory_counts_exactly_the_stage_tensors() {
+        let h = hp();
+        let head = stage_memory(&sizes(), &h, 0..0, true, 64).unwrap();
+        assert_eq!((head.weights, head.kv_per_request), (1000, 0), "embedding only, no KV");
+        let mid = stage_memory(&sizes(), &h, 0..2, false, 64).unwrap();
+        assert_eq!(mid.weights, 2 * 9 * 100);
+        assert_eq!(mid.kv_per_request, 2 * 2 * 32 * 64 * 4, "K+V, 2 layers, kv_dim 32, 64 positions, f32");
+        let tail = stage_memory(&sizes(), &h, 2..4, false, 64).unwrap();
+        assert_eq!(tail.weights, 2 * 9 * 100 + 10 + 900, "plus output norm and lm_head");
+        assert!(mid.need(2) > mid.need(1));
+    }
+
+    #[test]
+    fn requests_are_capped_to_what_every_stage_fits() {
+        let m = StageMemory { weights: 1000, kv_per_request: 100, working: 0 };
+        let st = |b| (id("a"), m, b);
+        assert_eq!(fit_requests(&[st(1350)]), Ok(3), "room for 3 KV caches");
+        assert_eq!(fit_requests(&[st(1_000_000)]), Ok(8), "never more than 8");
+        assert_eq!(fit_requests(&[st(1_000_000), st(1250)]), Ok(2), "the tightest stage decides");
+        let e = fit_requests(&[st(1050)]).unwrap_err();
+        assert!(e.contains("stage 0 on a") && e.contains("may use"), "{e}");
+        assert!(fit_requests(&[st(900)]).is_err(), "weights alone do not fit");
+    }
+
     #[test]
     fn coordinator_becomes_an_embedding_only_head_when_left_out() {
         let l = normalize(vec![(id("a"), 0, 2), (id("b"), 2, 4)], &id("c"), 4).unwrap();
@@ -443,7 +589,7 @@ mod tests {
     /// could arrive before the coordinator saw b's control connection drop.
     #[test]
     fn failure_blames_the_cause_not_the_knock_on_effects() {
-        let st = |n: &str| PipeStage { node: id(n), layer_start: 0, layer_end: 0, addr: String::new(), status: StageStatus::Loading };
+        let st = |n: &str| PipeStage { node: id(n), layer_start: 0, layer_end: 0, addr: String::new(), status: StageStatus::Loading, need_bytes: 0 };
         let mut p = Pipeline { model: "m".into(), epoch: 2, n_ctx: 8, n_layer: 4, act_dtype: ActDType::F16, stages: vec![st("c"), st("a"), st("b")], first_failure: None, failure_is_cause: false, tokenizer: None, tokenizer_note: None, head: None, local: None };
         p.mark_failed(2, 0, None, "ring broken: tail link closed".into(), false);
         p.mark_failed(2, 1, Some(&id("a")), "upstream link closed".into(), false);
@@ -477,3 +623,5 @@ mod tests {
         }
     }
 }
+
+

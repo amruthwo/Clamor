@@ -58,7 +58,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install -y libvulkan-dev glslc spirv-headers
-      - run: cargo build -p clamor-engine-ggml --release --features vulkan
+      # -vv streams the build script output, so the log shows CMake progress ("[ 45%] Building ...")
+      # instead of sitting on the last "Compiling" line while ggml builds.
+      - run: cargo build -vv -p clamor-engine-ggml --release --features vulkan
 
   android:
     name: build (android arm64, build-only)
@@ -91,7 +93,7 @@ jobs:
         with: { key: cuda-build, max-size: 2G }
       - uses: Jimver/cuda-toolkit@v0.2.19
         with: { cuda: "12.6.2", method: network, sub-packages: '["nvcc","cudart"]', non-cuda-sub-packages: '["libcublas","libcublas-dev"]' }
-      - run: cargo build -p clamor-engine-ggml --release --features cuda
+      - run: cargo build -vv -p clamor-engine-ggml --release --features cuda  # -vv: live CMake progress
         # Build-only: one architecture proves it compiles (three took 50+ min on a hosted runner).
         env:
           CMAKE_CUDA_ARCHITECTURES: "86"

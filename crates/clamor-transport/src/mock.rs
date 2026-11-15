@@ -29,18 +29,25 @@ pub struct MockExecutor {
     pub per_layer: Duration,
     pub vocab: u32,
     pub eos: Option<u32>,
+    /// Fail any forward that starts at or past this position (simulates a full KV cache).
+    pub fail_from_pos: Option<u32>,
     hist: HashMap<u64, u64>,
     pub released: Arc<Mutex<Vec<u64>>>,
 }
 
 impl MockExecutor {
     pub fn new(layers: Range<u32>, is_tail: bool, hidden: u32, per_layer: Duration, vocab: u32) -> Self {
-        MockExecutor { layers, is_tail, hidden, per_layer, vocab, eos: None, hist: HashMap::new(), released: Arc::new(Mutex::new(Vec::new())) }
+        MockExecutor { layers, is_tail, hidden, per_layer, vocab, eos: None, fail_from_pos: None, hist: HashMap::new(), released: Arc::new(Mutex::new(Vec::new())) }
     }
 }
 
 impl StageExecutor for MockExecutor {
-    fn forward(&mut self, req: u64, _pos: u32, input: StageInput<'_>) -> Result<StageOutput> {
+    fn forward(&mut self, req: u64, pos: u32, input: StageInput<'_>) -> Result<StageOutput> {
+        if let Some(limit) = self.fail_from_pos {
+            if pos >= limit {
+                bail!("context full at position {pos}");
+            }
+        }
         let (mut h, hist, n_tokens) = match input {
             StageInput::Tokens(t) => {
                 let mut hist = *self.hist.get(&req).unwrap_or(&SEED);
@@ -263,6 +270,61 @@ mod tests {
         assert_eq!(toks, vec![first]);
         for h in &handles {
             h.stop();
+        }
+    }
+
+    /// Regression: an engine error used to end the stage loop, which broke the ring and failed
+    /// every request. Now it fails only that request, wherever in the ring it happens.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn engine_error_fails_one_request_not_the_ring() {
+        let bounds = [0u32, 10, 20, 30];
+        for failing in 0..3usize {
+            let n = 3usize;
+            let mut listeners = Vec::new();
+            let mut addrs = Vec::new();
+            for _ in 0..n {
+                let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                addrs.push(l.local_addr().unwrap());
+                listeners.push(l);
+            }
+            let mut handles = Vec::new();
+            let mut released = Vec::new();
+            for (i, l) in listeners.into_iter().enumerate() {
+                let mut exec = MockExecutor::new(bounds[i]..bounds[i + 1], i + 1 == n, 16, Duration::ZERO, VOCAB);
+                if i == failing {
+                    exec.fail_from_pos = Some(6);
+                }
+                released.push(exec.released.clone());
+                let cfg = StageConfig { stage_index: i as u32, stage_count: n as u32, epoch: 1, session: 7, downstream: Some(addrs[(i + 1) % n]), window: 4, connect_timeout: Duration::from_secs(5) };
+                handles.push(run_stage(cfg, l, exec));
+            }
+            let head = handles[0].head.as_ref().unwrap();
+
+            // Forwards start at 0 (the 2-token prompt), then 2, 3, 4, 5 (one token each): each yields
+            // a token, so 5 tokens come back before the forward starting at position 6 fails.
+            let (req, rx) = head.submit(vec![1, 2], 50);
+            let (toks, reason) = collect(rx).await;
+            match &reason {
+                DoneReason::Failed(msg) => assert!(msg.contains(&format!("stage {failing}")) && msg.contains("context full"), "{msg}"),
+                r => panic!("stage {failing}: expected Failed, got {r:?}"),
+            }
+            assert_eq!(toks, reference_tokens(&[1, 2], 5, 30, VOCAB), "stage {failing}: tokens before the failure");
+            for _ in 0..100 {
+                if released.iter().all(|r| r.lock().unwrap().contains(&req)) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            for (i, r) in released.iter().enumerate() {
+                assert!(r.lock().unwrap().contains(&req), "failing {failing}: stage {i} did not release {req}");
+            }
+
+            // The ring survived: short requests still complete correctly.
+            let (_, rx) = head.submit(vec![3], 4);
+            assert_eq!(collect(rx).await, (reference_tokens(&[3], 4, 30, VOCAB), DoneReason::MaxTokens), "stage {failing}: ring dead");
+            for h in &handles {
+                h.stop();
+            }
         }
     }
 

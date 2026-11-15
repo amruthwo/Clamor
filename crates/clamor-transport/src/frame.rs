@@ -17,6 +17,11 @@ pub const HEADER_LEN: usize = 40;
 pub const MAX_PAYLOAD: u32 = 128 << 20;
 /// Token frame flag: the tail sampled an end-of-sequence token.
 pub const FLAG_EOS: u32 = 1;
+/// Token frame flag: a stage's engine failed this request. The payload is a UTF-8 message.
+/// The frame travels on around the ring to the head, which fails just this request.
+pub const FLAG_FAILED: u32 = 2;
+/// Longest failure message carried on the wire.
+pub const MAX_FAIL_MSG: usize = 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -114,6 +119,27 @@ impl Frame {
             header: Header { epoch, request, pos, n_tokens: 1, aux: id, flags: if eos { FLAG_EOS } else { 0 }, ..Self::base(Kind::Token) },
             payload: Bytes::new(),
         }
+    }
+
+    /// A per-request failure, sent in place of the request's activations or token.
+    pub fn failed(epoch: u32, request: u64, pos: u32, msg: &str) -> Frame {
+        let mut end = msg.len().min(MAX_FAIL_MSG);
+        while !msg.is_char_boundary(end) {
+            end -= 1;
+        }
+        let payload = Bytes::copy_from_slice(&msg.as_bytes()[..end]);
+        Frame {
+            header: Header { epoch, request, pos, flags: FLAG_FAILED, payload_len: payload.len() as u32, ..Self::base(Kind::Token) },
+            payload,
+        }
+    }
+
+    pub fn is_failure(&self) -> bool {
+        self.header.kind == Kind::Token && self.header.flags & FLAG_FAILED != 0
+    }
+
+    pub fn failure_message(&self) -> String {
+        String::from_utf8_lossy(&self.payload).into_owned()
     }
 
     pub fn acts(epoch: u32, request: u64, pos: u32, a: &Acts) -> Frame {
@@ -214,6 +240,7 @@ mod tests {
             Frame::token(7, 5, 43, 1234, true),
             Frame::ctrl(Kind::Cancel, 7, 5, 0),
             Frame::ctrl(Kind::Credit, 0, 0, 4),
+            Frame::failed(7, 5, 44, "stage 1: context full"),
         ];
         let (mut w, mut r) = tokio::io::duplex(1024);
         for f in &frames {
@@ -226,6 +253,13 @@ mod tests {
             assert_eq!(got.header.aux, f.header.aux);
             assert_eq!(got.payload, f.payload);
         }
+        let f = Frame::failed(1, 1, 0, "boom");
+        assert!(f.is_failure() && f.failure_message() == "boom");
+        assert!(!Frame::token(1, 1, 0, 3, true).is_failure());
+        // Long messages are cut at a char boundary, never mid-codepoint.
+        let long = "é".repeat(MAX_FAIL_MSG);
+        let f = Frame::failed(1, 1, 0, &long);
+        assert!(f.payload.len() <= MAX_FAIL_MSG && f.failure_message().chars().all(|c| c == 'é'));
         let back = Frame::acts(1, 1, 0, &a);
         assert_eq!(back.into_acts(), a);
     }

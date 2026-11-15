@@ -16,6 +16,12 @@ opencl = []
 
 [dependencies]
 thiserror = "2"
+anyhow = "1.0.104"
+bytes = "1.12.1"
+clamor-transport = { path = "../clamor-transport" }
+
+[dev-dependencies]
+tokio = { version = "1.54.1", features = ["full"] }
 
 [build-dependencies]
 cmake = "0.1"

@@ -7,7 +7,8 @@ check (a) full-model equality and (b) that running layers [0,k) then [k,n) on tw
 
 Usage: ref_forward.py MODEL.gguf OUT.npz --tokens 1,5,9,23 [--raw DIR]
 
---raw also writes DIR/hidden.f32 ([layers, tokens, n_embd]) and DIR/logits.f32
+--generate N appends N greedy tokens (argmax, full recompute each step).
+--raw also writes DIR/generated.txt (comma-separated), DIR/hidden.f32 ([layers, tokens, n_embd]) and DIR/logits.f32
 ([tokens, n_vocab]) as little-endian f32, for tests that cannot read .npz.
 """
 import argparse
@@ -19,6 +20,7 @@ p.add_argument("model")
 p.add_argument("out")
 p.add_argument("--tokens", default="1,5,9,23,42,7")
 p.add_argument("--raw", help="also write raw little-endian f32 files to this directory")
+p.add_argument("--generate", type=int, default=0, help="also generate this many tokens greedily (written to generated.txt with --raw)")
 a = p.parse_args()
 toks = [int(t) for t in a.tokens.split(",")]
 
@@ -44,31 +46,48 @@ def rope(x, pos):  # x: [T, heads, HD], adjacent pairs (ggml NORM)
     return out
 def silu(x): return x / (1 + np.exp(-x))
 
-n = len(toks); pos = np.arange(n)
-x = T["token_embd.weight"][toks]
-hidden = []
-mask = np.triu(np.full((n, n), -np.inf, dtype=np.float32), 1)
-for l in range(n_layer):
-    g = lambda s: T[f"blk.{l}.{s}.weight"]
-    h = rms(x, g("attn_norm"))
-    q = rope((h @ g("attn_q").T).reshape(n, H, HD), pos)
-    k = rope((h @ g("attn_k").T).reshape(n, HKV, HD), pos)
-    v = (h @ g("attn_v").T).reshape(n, HKV, HD)
-    rep = H // HKV
-    k = np.repeat(k, rep, axis=1); v = np.repeat(v, rep, axis=1)
-    sc = np.einsum("qhd,khd->hqk", q, k) / np.sqrt(HD) + mask
-    sc = np.exp(sc - sc.max(-1, keepdims=True)); sc /= sc.sum(-1, keepdims=True)
-    att = np.einsum("hqk,khd->qhd", sc, v).reshape(n, H * HD)
-    x = x + att @ g("attn_output").T
-    h = rms(x, g("ffn_norm"))
-    x = x + (silu(h @ g("ffn_gate").T) * (h @ g("ffn_up").T)) @ g("ffn_down").T
-    hidden.append(x.copy())
-lm_head = T.get("output.weight", T["token_embd.weight"])  # tied when output.weight is absent
-logits = rms(x, T["output_norm.weight"]) @ lm_head.T
-np.savez(a.out, tokens=np.array(toks), hidden=np.stack(hidden), logits=logits)
+def forward(toks):
+    """Full forward pass (no cache). Returns per-layer hidden states and logits for every token."""
+    n = len(toks); pos = np.arange(n)
+    x = T["token_embd.weight"][toks]
+    hidden = []
+    mask = np.triu(np.full((n, n), -np.inf, dtype=np.float32), 1)
+    for l in range(n_layer):
+        g = lambda s: T[f"blk.{l}.{s}.weight"]
+        h = rms(x, g("attn_norm"))
+        q = rope((h @ g("attn_q").T).reshape(n, H, HD), pos)
+        k = rope((h @ g("attn_k").T).reshape(n, HKV, HD), pos)
+        v = (h @ g("attn_v").T).reshape(n, HKV, HD)
+        rep = H // HKV
+        k = np.repeat(k, rep, axis=1); v = np.repeat(v, rep, axis=1)
+        sc = np.einsum("qhd,khd->hqk", q, k) / np.sqrt(HD) + mask
+        sc = np.exp(sc - sc.max(-1, keepdims=True)); sc /= sc.sum(-1, keepdims=True)
+        att = np.einsum("hqk,khd->qhd", sc, v).reshape(n, H * HD)
+        x = x + att @ g("attn_output").T
+        h = rms(x, g("ffn_norm"))
+        x = x + (silu(h @ g("ffn_gate").T) * (h @ g("ffn_up").T)) @ g("ffn_down").T
+        hidden.append(x.copy())
+    lm_head = T.get("output.weight", T["token_embd.weight"])  # tied when output.weight is absent
+    return hidden, rms(x, T["output_norm.weight"]) @ lm_head.T
+
+hidden, logits = forward(toks)
+
+# Greedy generation: append the argmax and rerun, recomputing everything (no KV cache).
+generated, seq, margins = [], list(toks), []
+for _ in range(a.generate):
+    _, lg = forward(seq)
+    top2 = np.sort(lg[-1])[-2:]
+    margins.append(float(top2[1] - top2[0]))
+    nxt = int(lg[-1].argmax())
+    generated.append(nxt); seq.append(nxt)
+np.savez(a.out, tokens=np.array(toks), hidden=np.stack(hidden), logits=logits, generated=np.array(generated, dtype=np.int64))
 if a.raw:
     import os
     os.makedirs(a.raw, exist_ok=True)
     np.stack(hidden).astype("<f4").tofile(os.path.join(a.raw, "hidden.f32"))
     logits.astype("<f4").tofile(os.path.join(a.raw, "logits.f32"))
+    with open(os.path.join(a.raw, "generated.txt"), "w") as f:
+        f.write(",".join(map(str, generated)))
 print("next-token argmax:", int(logits[-1].argmax()), "saved", a.out)
+if generated:
+    print("greedy:", generated, "smallest top-1/top-2 logit gap: %.4f" % min(margins))

@@ -92,6 +92,16 @@ pub enum LlamaInput<'a> {
     Hidden(&'a [f32]),
 }
 
+/// Which tokens the tail computes logits for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Logits {
+    /// Every token in the batch: `n_tokens * n_vocab`.
+    All,
+    /// Only the batch's last token: `n_vocab`. All that sampling needs, and it skips the
+    /// lm_head matmul for the rest of a prompt.
+    Last,
+}
+
 #[derive(Debug, Clone)]
 pub enum LlamaOutput {
     /// Non-tail stages: `n_tokens * n_embd` f32, token-major.
@@ -295,6 +305,10 @@ impl LlamaStage {
     pub fn n_ctx(&self) -> u32 {
         self.n_ctx
     }
+    /// Requests that currently hold a KV cache.
+    pub fn live_requests(&self) -> usize {
+        self.caches.len()
+    }
     /// Tokens already in `request`'s KV cache (0 if unknown).
     pub fn n_past(&self, request: u64) -> u32 {
         self.caches.get(&request).map_or(0, |c| c.n_past)
@@ -308,13 +322,18 @@ impl LlamaStage {
     /// Run this stage's layers on a batch of tokens starting at position `pos`.
     /// `pos` must equal the number of tokens already processed for `request`.
     pub fn forward(&mut self, request: u64, pos: u32, input: LlamaInput<'_>) -> Result<LlamaOutput> {
-        self.run(request, pos, input, false).map(|(o, _)| o)
+        self.run(request, pos, input, Logits::All, false).map(|(o, _)| o)
+    }
+
+    /// `forward`, choosing which tokens get logits (only matters on the tail).
+    pub fn forward_logits(&mut self, request: u64, pos: u32, input: LlamaInput<'_>, logits: Logits) -> Result<LlamaOutput> {
+        self.run(request, pos, input, logits, false).map(|(o, _)| o)
     }
 
     /// Like `forward`, but also returns the hidden state after every local layer
     /// (each `n_tokens * n_embd`). For tests and debugging.
     pub fn forward_traced(&mut self, request: u64, pos: u32, input: LlamaInput<'_>) -> Result<(LlamaOutput, Vec<Vec<f32>>)> {
-        self.run(request, pos, input, true)
+        self.run(request, pos, input, Logits::All, true)
     }
 
     fn kv_for(&mut self, request: u64) -> Result<&mut KvCache> {
@@ -341,7 +360,7 @@ impl LlamaStage {
         Ok(self.caches.get_mut(&request).unwrap())
     }
 
-    fn run(&mut self, request: u64, pos: u32, input: LlamaInput<'_>, trace: bool) -> Result<(LlamaOutput, Vec<Vec<f32>>)> {
+    fn run(&mut self, request: u64, pos: u32, input: LlamaInput<'_>, logits: Logits, trace: bool) -> Result<(LlamaOutput, Vec<Vec<f32>>)> {
         let hp = self.hp.clone();
         let (e, hd, nh, nkv) = (hp.n_embd as i64, hp.head_dim() as i64, hp.n_head as i64, hp.n_head_kv as i64);
         let n = match &input {
@@ -457,6 +476,10 @@ impl LlamaStage {
                 }
             }
             let out = if self.is_tail() {
+                if logits == Logits::Last && n > 1 {
+                    // Just the last token's row (x is contiguous [e, n]).
+                    x = sys::ggml_view_2d(ctx, x, e, 1, (*x).nb[1], (n as usize - 1) * (*x).nb[1]);
+                }
                 let h = sys::ggml_mul(ctx, sys::ggml_rms_norm(ctx, x, hp.rms_eps), self.out_norm.unwrap());
                 sys::ggml_mul_mat(ctx, self.output.unwrap(), h)
             } else {

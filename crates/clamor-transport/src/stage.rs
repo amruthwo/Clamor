@@ -201,8 +201,16 @@ impl<E: StageExecutor> Head<E> {
         let mut next = Some((pos, tokens));
         while let Some((pos, toks)) = next.take() {
             let t0 = Instant::now();
-            let out = tokio::task::block_in_place(|| self.exec.forward(req, pos, StageInput::Tokens(&toks)))?;
+            let res = tokio::task::block_in_place(|| self.exec.forward(req, pos, StageInput::Tokens(&toks)));
             self.stats.compute_ns.fetch_add(t0.elapsed().as_nanos() as u64, Relaxed);
+            // An engine error fails this request only; the ring keeps serving the others.
+            let out = match res {
+                Ok(o) => o,
+                Err(e) => {
+                    self.fail(req, format!("stage {}: {e:#}", self.cfg.stage_index));
+                    return Ok(());
+                }
+            };
             match out {
                 StageOutput::Acts(a) => {
                     let f = Frame::acts(self.cfg.epoch, req, pos, &a);
@@ -239,6 +247,14 @@ impl<E: StageExecutor> Head<E> {
             }
             None => Some((pos, vec![id])),
         }
+    }
+
+    /// End a request with `Failed(why)` and free it on every stage.
+    fn fail(&mut self, req: u64, why: String) {
+        if let Some(st) = self.reqs.get(&req) {
+            let _ = st.out.send(Event::Done(DoneReason::Failed(why)));
+        }
+        self.finish(req);
     }
 
     /// Drop a request everywhere: local state, then a cancel that ripples down the ring.
@@ -314,7 +330,13 @@ async fn head_loop<E: StageExecutor>(cfg: StageConfig, exec: E, mut up: Option<L
                         head.stats.dropped_stale.fetch_add(1, Relaxed);
                         continue;
                     }
-                    if f.header.kind == Kind::Token {
+                    if f.is_failure() {
+                        // A downstream stage's engine failed this request.
+                        if head.reqs.contains_key(&f.header.request) {
+                            head.fail(f.header.request, f.failure_message());
+                        }
+                        head.drain_pending().await?;
+                    } else if f.header.kind == Kind::Token {
                         let eos = f.header.flags & FLAG_EOS != 0;
                         if let Some((pos, toks)) = head.on_token(f.header.request, f.header.pos, f.header.aux, eos) {
                             head.forward(f.header.request, pos, toks).await?;
@@ -333,8 +355,15 @@ async fn head_loop<E: StageExecutor>(cfg: StageConfig, exec: E, mut up: Option<L
 }
 
 async fn worker_loop<E: StageExecutor>(cfg: StageConfig, mut exec: E, role: Role, mut up: Link, down: Link, stats: Arc<StageStats>) -> Result<()> {
-    // Requests cancelled here; late activations for them must not resurrect their KV cache.
+    // Requests cancelled or failed here; late activations for them must not resurrect their KV cache.
     let mut released: HashSet<u64> = HashSet::new();
+    fn release<E: StageExecutor>(exec: &mut E, released: &mut HashSet<u64>, req: u64) {
+        exec.release(req);
+        if released.len() > 65_536 {
+            released.clear();
+        }
+        released.insert(req);
+    }
     while let Some(f) = up.recv().await {
         stats.frames_in.fetch_add(1, Relaxed);
         stats.bytes_in.fetch_add(f.payload.len() as u64, Relaxed);
@@ -351,22 +380,28 @@ async fn worker_loop<E: StageExecutor>(cfg: StageConfig, mut exec: E, role: Role
                 let (pos, n_tokens) = (f.header.pos, f.header.n_tokens);
                 let acts = f.into_acts();
                 let t0 = Instant::now();
-                let out = tokio::task::block_in_place(|| exec.forward(req, pos, StageInput::Acts(acts)))?;
+                let res = tokio::task::block_in_place(|| exec.forward(req, pos, StageInput::Acts(acts)));
                 stats.compute_ns.fetch_add(t0.elapsed().as_nanos() as u64, Relaxed);
-                let frame = match out {
-                    StageOutput::Acts(a) => Frame::acts(cfg.epoch, req, pos, &a),
-                    StageOutput::Token { id, eos } => Frame::token(cfg.epoch, req, pos + n_tokens, id, eos),
+                let frame = match res {
+                    Ok(StageOutput::Acts(a)) => Frame::acts(cfg.epoch, req, pos, &a),
+                    Ok(StageOutput::Token { id, eos }) => Frame::token(cfg.epoch, req, pos + n_tokens, id, eos),
+                    // Fail this request only: free it here and tell the head, via the rest of the ring.
+                    Err(e) => {
+                        release(&mut exec, &mut released, req);
+                        Frame::failed(cfg.epoch, req, pos, &format!("stage {}: {e:#}", cfg.stage_index))
+                    }
                 };
                 stats.frames_out.fetch_add(1, Relaxed);
                 stats.bytes_out.fetch_add(frame.payload.len() as u64, Relaxed);
                 down.send_data(frame).await?;
             }
+            // An upstream stage failed this request: free it and pass the news on toward the head.
+            Kind::Token if f.is_failure() => {
+                release(&mut exec, &mut released, req);
+                down.send_data(f).await?;
+            }
             Kind::Cancel => {
-                exec.release(req);
-                if released.len() > 65_536 {
-                    released.clear();
-                }
-                released.insert(req);
+                release(&mut exec, &mut released, req);
                 if role == Role::Mid {
                     down.send_ctrl(Frame::ctrl(Kind::Cancel, cfg.epoch, req, 0));
                 }

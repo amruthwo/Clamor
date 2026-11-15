@@ -4,6 +4,11 @@ on:
   pull_request:
   workflow_dispatch:
 
+# A new push to the same PR/branch cancels the run it supersedes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   # Fail (not skip) the engine reference tests if numpy/gguf are missing.
@@ -75,4 +80,5 @@ jobs:
       - uses: Jimver/cuda-toolkit@v0.2.19
         with: { cuda: "12.6.2", method: network, sub-packages: '["nvcc","cudart"]', non-cuda-sub-packages: '["libcublas","libcublas-dev"]' }
       - run: cargo build -p clamor-engine-ggml --release --features cuda
-        env: { CMAKE_CUDA_ARCHITECTURES: "75;86;89" }
+        # Build-only: one architecture proves it compiles (three took 50+ min on a hosted runner).
+        env: { CMAKE_CUDA_ARCHITECTURES: "86" }

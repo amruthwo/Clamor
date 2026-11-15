@@ -174,7 +174,7 @@ async fn session(addr: &str, token: &Option<String>, id: &NodeId, bench_port: u1
     let mut pause = crate::neighbour::PauseState::default();
     let mut paused_reason: Option<String> = None;
     // Something the owner should know about the last settings change (e.g. needs a restart).
-    let mut settings_note: Option<String> = crate::neighbour::set_priority(policy.low_priority).err();
+    let settings_note: Option<String> = None;
     let (stx, mut srx) = unbounded_channel::<StageEvent>();
     let mut slot = Slot::default();
 
@@ -253,10 +253,6 @@ async fn session(addr: &str, token: &Option<String>, id: &NodeId, bench_port: u1
                     Message::SetPolicy { policy: p } => {
                         println!("settings updated: {}", describe_policy(&p));
                         crate::neighbour::save_settings(&p);
-                        settings_note = crate::neighbour::set_priority(p.low_priority).err();
-                        if let Some(n) = &settings_note {
-                            println!("  note: {n}");
-                        }
                         policy = p;
                     }
                     Message::Ping { seq, sent_unix_ms } => {

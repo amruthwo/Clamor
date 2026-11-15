@@ -103,13 +103,16 @@ pub struct StageOptions {
     /// Attention's scratch buffer grows with batch x context x heads, so this bounds memory.
     /// 0 means `DEFAULT_PREFILL_CHUNK`.
     pub prefill_chunk: u32,
+    /// Run the CPU worker threads at low scheduling priority (Windows; on Linux and macOS the
+    /// caller lowers its own thread and the workers inherit it).
+    pub low_priority: bool,
 }
 
 /// See `StageOptions::prefill_chunk`.
 pub const DEFAULT_PREFILL_CHUNK: u32 = 512;
 impl Default for StageOptions {
     fn default() -> Self {
-        Self { device: 0, n_ctx: 0, n_threads: 0, embed: None, prefill_chunk: 0 }
+        Self { device: 0, n_ctx: 0, n_threads: 0, embed: None, prefill_chunk: 0, low_priority: false }
     }
 }
 
@@ -179,6 +182,8 @@ pub struct LlamaStage {
     prefill_chunk: u32,
     backend: sys::ggml_backend_t,
     galloc: sys::ggml_gallocr_t,
+    /// CPU worker threads, created once with the stage (null for GPU backends).
+    threadpool: *mut sys::ggml_threadpool,
     w_ctx: *mut sys::ggml_context,
     w_buf: sys::ggml_backend_buffer_t,
     tok_embd: Option<T>,
@@ -201,6 +206,9 @@ impl Drop for LlamaStage {
             sys::ggml_backend_buffer_free(self.w_buf);
             sys::ggml_free(self.w_ctx);
             sys::ggml_backend_free(self.backend);
+            if !self.threadpool.is_null() {
+                sys::ggml_threadpool_free(self.threadpool);
+            }
         }
     }
 }
@@ -292,9 +300,20 @@ impl LlamaStage {
             if backend.is_null() {
                 return Err(Error::Ggml("backend init failed".into()));
             }
+            let mut threadpool = null_mut();
             if sys::ggml_backend_is_cpu(backend) {
                 let n = if opts.n_threads == 0 { crate::cpu::default_threads() } else { opts.n_threads };
                 sys::ggml_backend_cpu_set_n_threads(backend, n as i32);
+                // A persistent pool: created here, by the loading thread, so on Linux and macOS
+                // the workers inherit its priority; `prio` covers Windows, where they do not.
+                let mut params = sys::ggml_threadpool_params_default(n as i32);
+                if opts.low_priority {
+                    params.prio = sys::ggml_sched_priority_GGML_SCHED_PRIO_LOW;
+                }
+                threadpool = sys::ggml_threadpool_new(&mut params);
+                if !threadpool.is_null() {
+                    sys::ggml_backend_cpu_set_threadpool(backend, threadpool);
+                }
             }
             // From here on, `stage` owns everything, so an early return frees it.
             let mut stage = LlamaStage {
@@ -305,6 +324,7 @@ impl LlamaStage {
                 prefill_chunk: if opts.prefill_chunk == 0 { DEFAULT_PREFILL_CHUNK } else { opts.prefill_chunk },
                 backend,
                 galloc: sys::ggml_gallocr_new(sys::ggml_backend_get_default_buffer_type(backend)),
+                threadpool,
                 w_ctx: sys::ggml_init(sys::ggml_init_params {
                     mem_size: sys::ggml_tensor_overhead() * (names.len() + 1),
                     mem_buffer: null_mut(),

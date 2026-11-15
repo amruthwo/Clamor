@@ -179,8 +179,8 @@ async fn set_policy(State(shared): State<Shared>, Path(id): Path<String>, Json(p
     let entry = sw.nodes.get_mut(&id).ok_or((StatusCode::NOT_FOUND, format!("unknown node {id}")))?;
     entry.report.policy = policy;
     if is_coordinator {
-        // This device: apply and remember here (pausing is picked up by monitor_self).
-        entry.settings_note = crate::neighbour::set_priority(policy.low_priority).err();
+        // This device: remember here (pausing is picked up by monitor_self; priority and shares
+        // apply to the next pipeline).
         crate::neighbour::save_settings(&policy);
         return Ok(Json(json!({ "ok": true, "note": entry.settings_note })));
     }

@@ -5,7 +5,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use clamor_engine_ggml::{list_devices, DeviceKind, ExecutorOptions, GgmlExecutor, Sampling, StageOptions};
 use clamor_proto::{ActDType, SamplingParams};
 use clamor_transport::frame::DType;
-use clamor_transport::stage::{run_stage, HeadHandle, StageConfig};
+use clamor_transport::frame::Acts;
+use clamor_transport::stage::{run_stage, HeadHandle, StageConfig, StageExecutor, StageInput, StageOutput};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::net::{lookup_host, TcpListener};
@@ -164,12 +165,14 @@ pub async fn start(cfg: &EngineConfig, a: &Assignment, progress: impl FnMut(u64,
     let cfg2 = cfg.clone();
     // Looking up the device starts every compiled-in GPU backend, which can be slow (Metal
     // compiles its shaders on first use). Keep it on the blocking pool, next to the load.
-    let exec = tokio::task::spawn_blocking(move || -> Result<GgmlExecutor> {
+    let low = a.policy.low_priority;
+    opts.stage.low_priority = low;
+    let exec = ComputeThread::spawn(low, move || -> Result<GgmlExecutor> {
         opts.stage.device = cfg2.device_index()?;
         Ok(GgmlExecutor::load(&p, layers, opts)?)
     })
-    .await?
-        .with_context(|| format!("loading layers {}..{} of {}", a.layer_start, a.layer_end, a.model))?;
+    .await
+    .with_context(|| format!("loading layers {}..{} of {}", a.layer_start, a.layer_end, a.model))?;
     let load_ms = t0.elapsed().as_millis() as u64;
 
     let listener = TcpListener::bind(("0.0.0.0", a.listen_port)).await.with_context(|| format!("binding data port {}", a.listen_port))?;
@@ -191,6 +194,81 @@ pub async fn start(cfg: &EngineConfig, a: &Assignment, progress: impl FnMut(u64,
     };
     let h = run_stage(stage_cfg, listener, exec);
     Ok(Started { head: h.head, abort: h.task.abort_handle(), task: h.task, load_ms })
+}
+
+/// A stage's engine on its own thread, named `clamor-compute`. Loading and every forward pass
+/// run there, so only this thread (and ggml's workers, which it creates) runs at low priority;
+/// the async runtime that sends heartbeats and serves the API stays at normal priority. A new
+/// thread per stage also means a priority change applies from the next pipeline, on every OS.
+/// Dropping it (the stage stopped) ends the thread, which frees the model.
+pub struct ComputeThread {
+    jobs: std::sync::mpsc::Sender<Job>,
+}
+
+enum Job {
+    Forward { request: u64, pos: u32, input: OwnedInput, reply: std::sync::mpsc::SyncSender<Result<StageOutput>> },
+    Release(u64),
+}
+
+enum OwnedInput {
+    Tokens(Vec<u32>),
+    Acts(Acts),
+}
+
+impl ComputeThread {
+    pub async fn spawn<E: StageExecutor>(low_priority: bool, load: impl FnOnce() -> Result<E> + Send + 'static) -> Result<Self> {
+        let (jobs, rx) = std::sync::mpsc::channel::<Job>();
+        let (loaded_tx, loaded_rx) = tokio::sync::oneshot::channel::<Result<()>>();
+        std::thread::Builder::new()
+            .name("clamor-compute".into())
+            .spawn(move || {
+                if low_priority {
+                    if let Err(e) = crate::neighbour::lower_this_thread() {
+                        eprintln!("{e} (computing at normal priority)");
+                    }
+                }
+                let mut exec = match load() {
+                    Ok(e) => {
+                        let _ = loaded_tx.send(Ok(()));
+                        e
+                    }
+                    Err(e) => {
+                        let _ = loaded_tx.send(Err(e));
+                        return;
+                    }
+                };
+                while let Ok(job) = rx.recv() {
+                    match job {
+                        Job::Forward { request, pos, input, reply } => {
+                            let input = match &input {
+                                OwnedInput::Tokens(t) => StageInput::Tokens(t),
+                                OwnedInput::Acts(a) => StageInput::Acts(a.clone()),
+                            };
+                            let _ = reply.send(exec.forward(request, pos, input));
+                        }
+                        Job::Release(r) => exec.release(r),
+                    }
+                }
+            })?;
+        loaded_rx.await.map_err(|_| anyhow!("the compute thread stopped while loading"))??;
+        Ok(Self { jobs })
+    }
+}
+
+impl StageExecutor for ComputeThread {
+    fn forward(&mut self, request: u64, pos: u32, input: StageInput<'_>) -> Result<StageOutput> {
+        let input = match input {
+            StageInput::Tokens(t) => OwnedInput::Tokens(t.to_vec()),
+            StageInput::Acts(a) => OwnedInput::Acts(a),
+        };
+        let (reply, answer) = std::sync::mpsc::sync_channel(1);
+        self.jobs.send(Job::Forward { request, pos, input, reply }).map_err(|_| anyhow!("the compute thread has stopped"))?;
+        answer.recv().map_err(|_| anyhow!("the compute thread has stopped"))?
+    }
+
+    fn release(&mut self, request: u64) {
+        let _ = self.jobs.send(Job::Release(request));
+    }
 }
 
 #[cfg(test)]

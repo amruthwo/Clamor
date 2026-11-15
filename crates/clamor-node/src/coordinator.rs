@@ -81,16 +81,19 @@ impl Swarm {
 pub type Shared = Arc<Mutex<Swarm>>;
 
 /// Add the coordinator's own hardware to the roster so it takes part in planning.
+/// Add the coordinator's own device to the roster before the portal opens (probe and model scan
+/// take well under a second), so a pipeline can use it at once; the benchmark follows in the
+/// background (`bench_self`). Registering only after the benchmark left a window in which the
+/// coordinator's own models were unknown.
 pub async fn register_self(shared: Shared, id: NodeId, owner_policy: Option<Policy>) {
     let models_dir = shared.lock().unwrap().engine.models_dir.clone();
     let result = tokio::task::spawn_blocking(move || {
         let mut info = probe::probe_node(id);
         info.perf_cores = Some(clamor_engine_ggml::default_threads() as u32);
-        let report = bench::run(&bench::BenchOptions::quick(), info.ram_available_bytes);
-        (info, report, crate::share::scan(&models_dir))
+        (info, crate::share::scan(&models_dir))
     })
     .await;
-    let Ok((info, bench_report, models)) = result else { return };
+    let Ok((info, models)) = result else { return };
     let mut sw = shared.lock().unwrap();
     let share_port = sw.share_port;
     let policy = owner_policy.unwrap_or_else(|| Policy::default_for(info.class));
@@ -100,8 +103,8 @@ pub async fn register_self(shared: Shared, id: NodeId, owner_policy: Option<Poli
     sw.nodes.insert(
         id,
         NodeEntry {
-            report: NodeReport { info, policy, bench: Some(bench_report), link: None },
-            state: NodeState::Ready,
+            report: NodeReport { info, policy, bench: None, link: None },
+            state: NodeState::Benchmarking,
             last_seen: unix_now(),
             tx: None,
             cpu_load: None,
@@ -115,9 +118,24 @@ pub async fn register_self(shared: Shared, id: NodeId, owner_policy: Option<Poli
             models,
             share_port,
             paused: None,
-            settings_note: crate::neighbour::set_priority(policy.low_priority).err(),
+            settings_note: None,
         },
     );
+}
+
+/// Benchmark the coordinator's own device, then mark it ready.
+pub async fn bench_self(shared: Shared) {
+    let (me, ram) = {
+        let sw = shared.lock().unwrap();
+        let me = sw.coordinator.clone();
+        let ram = sw.nodes.get(&me).map(|e| e.report.info.ram_available_bytes).unwrap_or(0);
+        (me, ram)
+    };
+    let Ok(report) = tokio::task::spawn_blocking(move || bench::run(&bench::BenchOptions::quick(), ram)).await else { return };
+    if let Some(e) = shared.lock().unwrap().nodes.get_mut(&me) {
+        e.report.bench = Some(report);
+        e.state = NodeState::Ready;
+    }
 }
 
 /// The coordinator's own device: keep its load, memory, power and pause state current, as a
@@ -404,7 +422,10 @@ pub async fn reaper(shared: Shared) {
         let mut sw = shared.lock().unwrap();
         let mut lost = Vec::new();
         for (id, e) in sw.nodes.iter_mut() {
-            if e.tx.is_some() && now.saturating_sub(e.last_seen) > 3 * HEARTBEAT_SECS as u64 {
+            // Six missed heartbeats (30 s). Tolerant on purpose: a device under heavy load can be
+            // slow to answer, and a truly vanished one is caught sooner by the data links'
+            // TCP keepalive.
+            if e.tx.is_some() && now.saturating_sub(e.last_seen) > 6 * HEARTBEAT_SECS as u64 {
                 e.tx = None;
                 e.state = NodeState::Away;
                 e.note = Some("heartbeat timeout".into());

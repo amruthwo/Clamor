@@ -216,15 +216,12 @@ fn coordinator_and_two_members_generate_through_the_api() {
     assert_eq!(st, 400, "{r}");
     let saved: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("member-a-config/device-settings.json")).expect("a saved its settings")).unwrap();
     assert_eq!(saved["participation"], "full", "{saved}");
-    // Normal priority cannot be applied while running on Linux/macOS: the device says so.
-    if cfg!(unix) {
-        policy("a", json!({ "participation": "full", "max_ram_fraction": 0.7, "max_cpu_fraction": 0.8, "require_plugged_in": false, "low_priority": false }));
-        wait_for("a's priority note", Duration::from_secs(20), &all, || {
-            let (_, r) = http(portal, "GET", "/api/roster", None);
-            r["nodes"].as_array().unwrap().iter().any(|n| n["id"] == "a" && n["settings_note"].as_str().is_some_and(|s| s.contains("restart")))
-        });
-        policy("a", full);
-    }
+    // Priority is just another setting now (it applies from the next pipeline, on every OS).
+    policy("a", json!({ "participation": "full", "max_ram_fraction": 0.7, "max_cpu_fraction": 0.8, "require_plugged_in": false, "low_priority": false }));
+    wait_for("a to save normal priority", Duration::from_secs(20), &all, || {
+        std::fs::read_to_string(dir.join("member-a-config/device-settings.json")).is_ok_and(|s| s.contains("\"low_priority\": false"))
+    });
+    policy("a", full);
 
     // 3. Requests that cannot work are refused up front.
     for (bad, why) in [
@@ -344,4 +341,47 @@ fn a_model_on_one_device_is_shared_with_the_others() {
     start();
     assert_eq!(std::fs::metadata(&a_slice).unwrap().modified().unwrap(), before, "cached slice reused");
     drop((a, b));
+}
+
+/// Regression: priority used to be lowered for the whole process, so on a loaded machine the
+/// threads sending heartbeats starved and the coordinator timed the device out (seen on CI).
+/// Now only the compute threads run at low priority.
+#[cfg(target_os = "linux")]
+#[test]
+fn only_compute_threads_run_at_low_priority() {
+    let dir = std::env::temp_dir().join(format!("clamor-node-prio-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    if python_fixture(&dir).is_none() {
+        return;
+    }
+    let models = dir.display().to_string();
+    let (ctrl, portal, data) = (free_port(), free_port(), free_port_run(1));
+    let (ctrl_s, portal_s, data_s) = (format!("127.0.0.1:{ctrl}"), format!("127.0.0.1:{portal}"), data.to_string());
+    // Default priority (low), unlike the other tests.
+    let coord = spawn(&dir, "coordinator", &["coordinator", "--id", "c", "--bind", &ctrl_s, "--portal", &portal_s, "--models", &models, "--data-port", &data_s, "--quick-bench", "--no-update-check", "--config-dir", &cfg_dir(&dir, "coordinator"), "--participation", "full", "--allow-battery"]);
+    wait_for("the portal", Duration::from_secs(30), &[&coord], || TcpStream::connect(("127.0.0.1", portal)).is_ok());
+    let (st, r) = http(portal, "POST", "/api/pipeline", Some(json!({ "model": "tiny.gguf", "ctx": 64, "stages": [{ "node": "c", "layers": [0, 4] }] })));
+    assert_eq!(st, 200, "{r}");
+    wait_for("the pipeline", Duration::from_secs(180), &[&coord], || http(portal, "GET", "/api/pipeline", None).1["ready"] == true);
+    let (st, r) = http(portal, "POST", "/api/generate", Some(json!({ "tokens": PROMPT, "max_new": 4 })));
+    assert_eq!(st, 200, "{r}");
+
+    // (thread name, nice) for every thread of the coordinator.
+    let threads: Vec<(String, i64)> = std::fs::read_dir(format!("/proc/{}/task", coord.0.id()))
+        .unwrap()
+        .flatten()
+        .map(|t| {
+            let name = std::fs::read_to_string(t.path().join("comm")).unwrap().trim().to_string();
+            let stat = std::fs::read_to_string(t.path().join("stat")).unwrap();
+            // Fields after the ")" that closes the name; nice is field 19 overall.
+            let after = &stat[stat.rfind(')').unwrap() + 2..];
+            let nice = after.split(' ').nth(16).unwrap().parse().unwrap();
+            (name, nice)
+        })
+        .collect();
+    let compute: Vec<i64> = threads.iter().filter(|(n, _)| n == "clamor-compute").map(|t| t.1).collect();
+    let runtime: Vec<i64> = threads.iter().filter(|(n, _)| n.starts_with("tokio")).map(|t| t.1).collect();
+    assert!(!compute.is_empty() && compute.iter().all(|&n| n == 10), "compute threads at low priority: {threads:?}");
+    assert!(!runtime.is_empty() && runtime.iter().all(|&n| n == 0), "heartbeats and networking at normal priority: {threads:?}");
 }

@@ -5,6 +5,7 @@ mod coordinator;
 mod member;
 mod pipeline;
 mod portal;
+mod share;
 mod stage;
 mod update;
 mod wire;
@@ -110,11 +111,17 @@ struct EngineArgs {
     /// hyperthreads slow inference down).
     #[arg(long, default_value_t = 0)]
     threads: usize,
+    /// Where layer slices fetched from other devices are kept (default: the system cache
+    /// folder, e.g. ~/.cache/clamor). Delete it any time to reclaim space.
+    #[arg(long)]
+    cache_dir: Option<std::path::PathBuf>,
 }
 
 impl EngineArgs {
-    fn config(self) -> stage::EngineConfig {
-        stage::EngineConfig { models_dir: self.models, device: self.device, threads: self.threads }
+    /// `token`: the swarm's join token, also required to fetch model slices.
+    fn config(self, token: Option<String>) -> stage::EngineConfig {
+        let cache_dir = self.cache_dir.unwrap_or_else(|| dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("clamor").join("slices"));
+        stage::EngineConfig { models_dir: self.models, device: self.device, threads: self.threads, cache_dir, share_token: token }
     }
 }
 
@@ -175,9 +182,11 @@ async fn main() -> Result<()> {
         }
         Cmd::Coordinator { swarm, bind, portal, token, id, engine, data_port, quick_bench, updates } => {
             let id = NodeId(id.unwrap_or_else(|| probe::default_node_id().0));
-            let engine = engine.config();
+            let engine = engine.config(token.clone());
             engine.validate()?; // fail fast on a bad --device
-            let shared = Arc::new(Mutex::new(coordinator::Swarm::new(swarm, token, id.clone(), engine, data_port, quick_bench)));
+            // Share our models with members that lack them (layer slices), behind the join token.
+            let share_port = share::serve(DEFAULT_SHARE_PORT, engine.models_dir.clone(), token.clone()).await?;
+            let shared = Arc::new(Mutex::new(coordinator::Swarm::new(swarm, token, id.clone(), engine, data_port, quick_bench, Some(share_port))));
             tokio::spawn(coordinator::register_self(shared.clone(), id));
             tokio::spawn(coordinator::reaper(shared.clone()));
             tokio::spawn(coordinator::updates(shared.clone(), updates.policy()));
@@ -191,7 +200,7 @@ async fn main() -> Result<()> {
         }
         Cmd::Join { addr, token, id, engine, updates } => {
             let addr = if addr.contains(':') { addr } else { format!("{addr}:{DEFAULT_PORT}") };
-            let engine = engine.config();
+            let engine = engine.config(token.clone());
             engine.validate()?;
             member::join(addr, token, id, engine, updates.policy()).await
         }

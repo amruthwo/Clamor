@@ -36,6 +36,9 @@ pub struct NodeEntry {
     pub build: Option<BuildInfo>,
     /// A newer release the node could update to.
     pub update_available: Option<String>,
+    /// Models the node holds, and the port it shares them on.
+    pub models: Vec<ModelInfo>,
+    pub share_port: Option<u16>,
 }
 
 pub struct Swarm {
@@ -51,11 +54,13 @@ pub struct Swarm {
     pub quick_bench: bool,
     pub pipeline: Option<Pipeline>,
     pub next_epoch: u32,
+    /// Port the coordinator shares its own models on.
+    pub share_port: Option<u16>,
 }
 
 impl Swarm {
-    pub fn new(name: String, token: Option<String>, coordinator: NodeId, engine: EngineConfig, data_port: u16, quick_bench: bool) -> Self {
-        Swarm { name, token, coordinator, nodes: BTreeMap::new(), next_generation: 1, engine, data_port, quick_bench, pipeline: None, next_epoch: 1 }
+    pub fn new(name: String, token: Option<String>, coordinator: NodeId, engine: EngineConfig, data_port: u16, quick_bench: bool, share_port: Option<u16>) -> Self {
+        Swarm { name, token, coordinator, nodes: BTreeMap::new(), next_generation: 1, engine, data_port, quick_bench, pipeline: None, next_epoch: 1, share_port }
     }
 
     /// A node that held a pipeline stage is gone: that pipeline cannot run any more.
@@ -73,14 +78,16 @@ pub type Shared = Arc<Mutex<Swarm>>;
 
 /// Add the coordinator's own hardware to the roster so it takes part in planning.
 pub async fn register_self(shared: Shared, id: NodeId) {
+    let models_dir = shared.lock().unwrap().engine.models_dir.clone();
     let result = tokio::task::spawn_blocking(move || {
         let info = probe::probe_node(id);
         let report = bench::run(&bench::BenchOptions::quick(), info.ram_available_bytes);
-        (info, report)
+        (info, report, crate::share::scan(&models_dir))
     })
     .await;
-    let Ok((info, bench_report)) = result else { return };
+    let Ok((info, bench_report, models)) = result else { return };
     let mut sw = shared.lock().unwrap();
+    let share_port = sw.share_port;
     let policy = Policy::default_for(info.class);
     let generation = sw.next_generation;
     sw.next_generation += 1;
@@ -100,6 +107,8 @@ pub async fn register_self(shared: Shared, id: NodeId) {
             coord_ip: None,
             build: Some(crate::build_info::current()),
             update_available: None,
+            models,
+            share_port,
         },
     );
 }
@@ -129,7 +138,7 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
     let (mut rd, mut wr) = stream.into_split();
 
     let hello = timeout(Duration::from_secs(10), read_msg(&mut rd)).await??;
-    let Message::Hello { proto, info, bench_port, join_token, build } = hello else {
+    let Message::Hello { proto, info, bench_port, join_token, build, models, share_port } = hello else {
         write_msg(&mut wr, &Message::Reject { reason: "expected hello".into() }).await?;
         return Ok(());
     };
@@ -173,6 +182,8 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
                     coord_ip,
                     build,
                     update_available: None,
+                    models,
+                    share_port,
                 },
             );
             Admission::Ok { generation, swarm, coordinator, cached_bench: cached, quick: sw.quick_bench }
@@ -251,6 +262,16 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
             Message::Leave => {
                 leave_note = "left at the owner's request".into();
                 break;
+            }
+            Message::Inventory { models } => {
+                if let Some(e) = shared.lock().unwrap().nodes.get_mut(&id) {
+                    e.models = models;
+                }
+            }
+            Message::ShardProgress { epoch, stage_index, done_bytes, total_bytes } => {
+                if let Some(p) = shared.lock().unwrap().pipeline.as_mut() {
+                    p.mark_progress(epoch, stage_index, Some(&id), done_bytes, total_bytes);
+                }
             }
             Message::ShardReady { epoch, stage_index, load_ms, .. } => {
                 println!("{id}: stage {stage_index} ready (epoch {epoch}, loaded in {load_ms} ms)");

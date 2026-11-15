@@ -93,6 +93,11 @@ impl GgufFile {
         self.meta_tensor(name).map(|t| unsafe { (*t).ne })
     }
 
+    /// Where tensor data starts: the header's size, including padding.
+    pub fn data_offset(&self) -> u64 {
+        unsafe { sys::gguf_get_data_offset(self.ctx) as u64 }
+    }
+
     /// Number of tensors described in the header.
     pub fn n_tensors(&self) -> usize {
         unsafe { sys::gguf_get_n_tensors(self.ctx) as usize }

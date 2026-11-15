@@ -11,6 +11,8 @@ use std::io::{self, Read, Write};
 
 /// v2: `ShardAssign` gained `n_ctx`, `embed` and `sampling`; added `ShardFailed`.
 pub const PROTOCOL_VERSION: u16 = 2;
+/// Model sharing: every node serves layer slices of the models it holds on this HTTP port.
+pub const DEFAULT_SHARE_PORT: u16 = 7423;
 /// First data-plane port: stage `i` listens on `DEFAULT_DATA_PORT + i`.
 pub const DEFAULT_DATA_PORT: u16 = 7430;
 /// Control plane (node <-> coordinator).
@@ -262,6 +264,18 @@ pub struct BuildInfo {
     pub commit: String,
 }
 
+/// A model file a node holds and can share.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelInfo {
+    /// File name in the node's models directory.
+    pub name: String,
+    /// File size in bytes.
+    pub size: u64,
+    /// SHA-256 of the GGUF header plus the file size: tells two copies of the same model apart
+    /// from two different files with the same name, without hashing gigabytes.
+    pub id: String,
+}
+
 /// How the tail stage picks tokens. `temperature == 0` is greedy.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SamplingParams {
@@ -284,6 +298,16 @@ pub enum Message {
         /// Optional so older nodes still parse.
         #[serde(default)]
         build: Option<BuildInfo>,
+        /// Models this node holds.
+        #[serde(default)]
+        models: Vec<ModelInfo>,
+        /// Port serving layer slices of those models (see `DEFAULT_SHARE_PORT`).
+        #[serde(default)]
+        share_port: Option<u16>,
+    },
+    /// The node's models changed (a file was added or removed).
+    Inventory {
+        models: Vec<ModelInfo>,
     },
     Welcome {
         swarm: String,
@@ -373,6 +397,20 @@ pub enum Message {
         embed: bool,
         /// Used by the last stage.
         sampling: SamplingParams,
+        /// Where to fetch this stage's slice when the node does not hold the model:
+        /// `http://host:port` of a node that does. `None`: load the local file.
+        #[serde(default)]
+        source: Option<String>,
+        /// The model's `ModelInfo::id`, so a node never mixes up two files with one name.
+        #[serde(default)]
+        model_id: Option<String>,
+    },
+    /// Download progress of a stage's slice.
+    ShardProgress {
+        epoch: u32,
+        stage_index: u32,
+        done_bytes: u64,
+        total_bytes: u64,
     },
     ShardReady {
         model: String,
@@ -468,7 +506,7 @@ mod tests {
 
     #[test]
     fn hello_roundtrip() {
-        let msg = Message::Hello { proto: PROTOCOL_VERSION, info: sample_info(), bench_port: 7422, join_token: None, build: None };
+        let msg = Message::Hello { proto: PROTOCOL_VERSION, info: sample_info(), bench_port: 7422, join_token: None, build: None, models: vec![ModelInfo { name: "m.gguf".into(), size: 9, id: "ab".into() }], share_port: Some(7423) };
         let mut buf = Vec::new();
         write_frame(&mut buf, &msg).unwrap();
         let back = read_frame(&mut buf.as_slice()).unwrap();
@@ -505,8 +543,10 @@ mod tests {
     fn older_hello_and_heartbeat_still_parse() {
         let hb = r#"{"type":"heartbeat","cpu_load":0.5,"ram_available_bytes":1,"power":null,"running_tasks":0}"#;
         assert!(matches!(decode(hb.as_bytes()).unwrap(), Message::Heartbeat { update_available: None, .. }));
-        let mut hello = serde_json::to_value(Message::Hello { proto: PROTOCOL_VERSION, info: sample_info(), bench_port: 1, join_token: None, build: None }).unwrap();
-        hello.as_object_mut().unwrap().remove("build");
+        let mut hello = serde_json::to_value(Message::Hello { proto: PROTOCOL_VERSION, info: sample_info(), bench_port: 1, join_token: None, build: None, models: vec![], share_port: None }).unwrap();
+        for k in ["build", "models", "share_port"] {
+            hello.as_object_mut().unwrap().remove(k);
+        }
         assert!(matches!(decode(hello.to_string().as_bytes()).unwrap(), Message::Hello { build: None, .. }));
     }
 
@@ -526,6 +566,8 @@ mod tests {
             n_ctx: 4096,
             embed: false,
             sampling: SamplingParams { temperature: 0.7, top_k: 40, seed: 5 },
+            source: Some("http://192.168.1.20:7423".into()),
+            model_id: Some("ab12".into()),
         };
         let mut buf = Vec::new();
         write_frame(&mut buf, &msg).unwrap();

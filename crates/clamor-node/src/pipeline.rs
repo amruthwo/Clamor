@@ -5,6 +5,7 @@
 use crate::coordinator::Shared;
 use crate::stage::{self, Assignment};
 use anyhow::{anyhow, bail, Result};
+use anyhow::Context;
 use clamor_engine_ggml::{GgufFile, LlamaHparams, Tokenizer};
 use std::sync::Arc;
 use clamor_muster::plan;
@@ -17,6 +18,8 @@ use tokio::task::AbortHandle;
 #[serde(rename_all = "snake_case", tag = "state", content = "detail")]
 pub enum StageStatus {
     Loading,
+    /// Downloading its layer slice from a node that has the model.
+    Fetching { done_bytes: u64, total_bytes: u64 },
     Ready { load_ms: u64 },
     Failed(String),
 }
@@ -65,6 +68,17 @@ impl Pipeline {
     pub fn failure(&self) -> Option<String> {
         self.first_failure.clone()
     }
+    pub fn mark_progress(&mut self, epoch: u32, stage_index: u32, node: Option<&NodeId>, done_bytes: u64, total_bytes: u64) {
+        if epoch != self.epoch {
+            return;
+        }
+        if let Some(s) = self.stages.get_mut(stage_index as usize) {
+            if node.is_none_or(|n| *n == s.node) && matches!(s.status, StageStatus::Loading | StageStatus::Fetching { .. }) {
+                s.status = StageStatus::Fetching { done_bytes, total_bytes };
+            }
+        }
+    }
+
     pub fn mark_ready(&mut self, epoch: u32, stage_index: u32, node: Option<&NodeId>, load_ms: u64) {
         self.set(epoch, stage_index, node, StageStatus::Ready { load_ms }, false);
     }
@@ -115,8 +129,10 @@ pub struct PipelineRequest {
 }
 
 /// Planner input for a real GGUF: size from the actual tensor bytes, KV width from the heads.
-fn model_spec(name: &str, g: &GgufFile, hp: &LlamaHparams) -> plan::ModelSpec {
-    let bytes: u64 = g.tensors().iter().map(|t| t.n_bytes).sum();
+fn model_spec(name: &str, file_size: u64, hp: &LlamaHparams) -> plan::ModelSpec {
+    // The file size (from the holder's inventory): the coordinator may only have a
+    // metadata-only slice, which has no tensors to add up.
+    let bytes = file_size;
     plan::ModelSpec {
         name: name.to_string(),
         params_b: bytes as f64 / 1e9,
@@ -126,6 +142,33 @@ fn model_spec(name: &str, g: &GgufFile, hp: &LlamaHparams) -> plan::ModelSpec {
         // The engine's KV cache is f32 (the planner assumes f16), hence the factor 2.
         kv_ratio: 2.0 * hp.n_head_kv as f64 / hp.n_head as f64,
     }
+}
+
+/// The nodes holding `name`. If the coordinator has it, its copy defines the model; otherwise the
+/// first holder's does. Nodes with a different file under the same name are not holders.
+fn holders(shared: &Shared, name: &str) -> Result<(ModelInfo, Vec<NodeId>)> {
+    let sw = shared.lock().unwrap();
+    let reachable = |id: &NodeId, e: &crate::coordinator::NodeEntry| *id == sw.coordinator || e.tx.is_some();
+    let has = |e: &crate::coordinator::NodeEntry| e.models.iter().find(|m| m.name == name).cloned();
+    let chosen = sw.nodes.get(&sw.coordinator).and_then(has).or_else(|| sw.nodes.iter().filter(|(id, e)| reachable(id, e)).find_map(|(_, e)| has(e)));
+    let Some(info) = chosen else {
+        bail!("no device in the swarm has {name}: put it in one device's --models folder");
+    };
+    let holders = sw.nodes.iter().filter(|(id, e)| reachable(id, e) && e.models.iter().any(|m| m.name == name && m.id == info.id)).map(|(id, _)| id.clone()).collect();
+    Ok((info, holders))
+}
+
+/// `http://host:port` at which `fetcher` can reach `holder`'s model sharing.
+fn share_url(sw: &crate::coordinator::Swarm, holder: &NodeId, fetcher: &NodeId) -> Option<String> {
+    let (ip, port) = if *holder == sw.coordinator {
+        // How the fetcher reaches the coordinator (it is on the fetcher's control connection).
+        let ip = if *fetcher == sw.coordinator { std::net::IpAddr::from([127, 0, 0, 1]) } else { sw.nodes.get(fetcher)?.coord_ip? };
+        (ip, sw.share_port?)
+    } else {
+        let e = sw.nodes.get(holder)?;
+        (e.peer_ip?, e.share_port?)
+    };
+    Some(format!("http://{ip}:{port}"))
 }
 
 /// Validate a layout and make the coordinator stage 0 (embedding-only if the layout leaves it out).
@@ -161,13 +204,30 @@ pub fn normalize(layout: Vec<(NodeId, u32, u32)>, coordinator: &NodeId, n_layer:
 
 /// Build and launch a pipeline. Replaces (and releases) any existing one.
 pub async fn start(shared: &Shared, req: PipelineRequest) -> Result<()> {
+    stage::validate_model_name(&req.model)?;
     let (engine, data_port, coordinator) = {
         let sw = shared.lock().unwrap();
         (sw.engine.clone(), sw.data_port, sw.coordinator.clone())
     };
-    // The coordinator embeds tokens, so it needs the model file too; it also tells us the shape.
-    let path = stage::resolve_model(&engine.models_dir, &req.model)?;
-    let g = GgufFile::open(&path.display().to_string()).map_err(|e| anyhow!("{e}"))?;
+    // Which file is "the model", and who has it.
+    let (info, holders) = holders(shared, &req.model)?;
+    // Shape, tokenizer and chat template: from the coordinator's own copy, or a metadata-only
+    // slice (a few MB) from a node that has the model.
+    let meta_path = if holders.contains(&coordinator) {
+        stage::resolve_model(&engine.models_dir, &req.model)?
+    } else {
+        let src = {
+            let sw = shared.lock().unwrap();
+            share_url(&sw, &holders[0], &coordinator).ok_or_else(|| anyhow!("cannot reach {} for {}", holders[0], req.model))?
+        };
+        let dest = crate::share::cached_slice_path(&engine.cache_dir, &info.id, &req.model, 0..0, false);
+        let (name, id, token, d) = (req.model.clone(), info.id.clone(), engine.share_token.clone(), dest.clone());
+        tokio::task::spawn_blocking(move || crate::share::fetch_slice(&src, &name, &id, 0..0, false, token.as_deref(), &d, |_, _| {}))
+            .await?
+            .with_context(|| format!("fetching {}'s metadata from {}", req.model, holders[0]))?;
+        dest
+    };
+    let g = GgufFile::open(&meta_path.display().to_string()).map_err(|e| anyhow!("{e}"))?;
     let hp = LlamaHparams::from_gguf(&g).map_err(|e| anyhow!("{e}"))?;
     let n_ctx = req.ctx.unwrap_or(2048).clamp(16, hp.n_ctx_train.max(16));
     let (tokenizer, tokenizer_note) = match Tokenizer::from_gguf(&g) {
@@ -189,7 +249,7 @@ pub async fn start(shared: &Shared, req: PipelineRequest) -> Result<()> {
                 (r, sw.coordinator.clone())
             };
             let nodes = plan::plan_nodes(&reports, Some(&coord));
-            let p = plan::plan_model_with(&model_spec(&req.model, &g, &hp), n_ctx, &nodes, plan::Topology::Ring);
+            let p = plan::plan_model_with(&model_spec(&req.model, info.size, &hp), n_ctx, &nodes, plan::Topology::Ring);
             if !p.feasible {
                 bail!("the planner found no layout that fits: {}", p.notes.join("; "));
             }
@@ -231,7 +291,7 @@ pub async fn start(shared: &Shared, req: PipelineRequest) -> Result<()> {
         let assigns: Vec<Assignment> = layout
             .iter()
             .enumerate()
-            .map(|(i, (_, a, b))| Assignment {
+            .map(|(i, (node, a, b))| Assignment {
                 model: req.model.clone(),
                 epoch,
                 session,
@@ -245,8 +305,19 @@ pub async fn start(shared: &Shared, req: PipelineRequest) -> Result<()> {
                 n_ctx,
                 embed: i == 0,
                 sampling: req.sampling,
+                // A node without the model fetches its slice, preferably from the coordinator.
+                source: if holders.contains(node) {
+                    None
+                } else {
+                    let from = if holders.contains(&coordinator) { &coordinator } else { &holders[0] };
+                    share_url(&sw, from, node)
+                },
+                model_id: Some(info.id.clone()),
             })
             .collect();
+        if let Some((i, (node, _, _))) = layout.iter().enumerate().find(|(i, (node, _, _))| !holders.contains(node) && assigns[*i].source.is_none()) {
+            bail!("stage {i} ({node}) has no copy of {} and no holder it can reach", req.model);
+        }
         let old = sw.pipeline.take();
         if let Some(old) = old {
             release(&mut sw, old);
@@ -284,6 +355,8 @@ pub async fn start(shared: &Shared, req: PipelineRequest) -> Result<()> {
                 n_ctx: a.n_ctx,
                 embed: a.embed,
                 sampling: a.sampling,
+                source: a.source.clone(),
+                model_id: a.model_id.clone(),
             });
         }
     }
@@ -292,7 +365,15 @@ pub async fn start(shared: &Shared, req: PipelineRequest) -> Result<()> {
     let local = assigns[0].clone();
     let shared2 = shared.clone();
     tokio::spawn(async move {
-        match stage::start(&engine, &local).await {
+        let progress = {
+            let shared = shared2.clone();
+            move |done, total| {
+                if let Some(p) = shared.lock().unwrap().pipeline.as_mut() {
+                    p.mark_progress(epoch, 0, None, done, total);
+                }
+            }
+        };
+        match stage::start(&engine, &local, progress).await {
             Ok(s) => {
                 {
                     let mut sw = shared2.lock().unwrap();

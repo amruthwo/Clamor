@@ -10,6 +10,7 @@
 
 <p align="center">
   <a href="https://github.com/amruthwo/Clamor/actions/workflows/ci.yml"><img src="https://github.com/amruthwo/Clamor/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0--or--later-fd5453" alt="License: GPL-3.0-or-later"></a>
 </p>
 
 > [!NOTE]
@@ -139,4 +140,8 @@ Always benchmark with `--release`: debug builds are far too slow to plan with.
 
 ## License
 
-Dual-licensed under MIT or Apache-2.0, at your option.
+Clamor is free software, licensed under the [GNU General Public License v3.0 or later](LICENSE). You can use, study,
+share and change it. If you distribute Clamor or a modified version, you must share its source under the same terms.
+
+Clamor includes [ggml](https://github.com/ggml-org/ggml) in `vendor/ggml`, which is MIT-licensed
+(see [`vendor/ggml/LICENSE`](vendor/ggml/LICENSE)).

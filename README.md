@@ -69,14 +69,14 @@ drops off can rejoin later without benchmarking again.
 
 | | |
 |---|---|
-| **Works** | Starting a swarm, joining with a generated passphrase (never sent over the network), remembered swarms, automatic benchmarks, a web dashboard showing devices and which models fit |
+| **Works** | Starting a swarm, joining with a generated passphrase (never sent over the network), finding the swarm on the local network, remembered swarms, automatic benchmarks, a web dashboard showing devices and which models fit |
 | **Works** | Splitting a real model across machines: the coordinator hands out layers, each machine loads its share, and they pass the work around the ring |
 | **Works** | Text chat through the API, using the model's own tokenizer and chat template (both checked against Hugging Face's) |
 | **Works** | Llama 3.x, Qwen 2.5 and SmolLM2 models, including compressed (quantized) files; checked against a reference implementation |
 | **Works** | One copy of a model is enough: other machines fetch only their share of the layers from the one that has it |
 | **Works** | Downloadable releases for Linux, macOS, Windows and Android (Termux), which can update themselves (signed) |
-| **In progress** | Easier joining: finding the swarm without an IP address, one-time codes and QR codes from the dashboard |
-| **Planned** | Chat in the dashboard, an OpenAI-compatible API for agent tools, installers and a desktop app, a phone app, automatic discovery and coordinator hand-over, encryption between devices |
+| **In progress** | Easier joining: one-time codes and QR codes from the dashboard |
+| **Planned** | Chat in the dashboard, an OpenAI-compatible API for agent tools, installers and a desktop app, a phone app, coordinator hand-over, encryption between devices |
 
 CI runs the tests on Linux (x86_64 and arm64), Windows and macOS. The Vulkan, CUDA and Android builds are
 compile-checked only. GPU inference has been tested by hand with Vulkan on an Apple M1 running Asahi Linux.
@@ -98,8 +98,9 @@ On the first computer, start a swarm. It makes up a passphrase of five words and
 #   add a device: clamor-node join 192.168.1.20 --passphrase harbor-velvet-crab-lantern-ninety
 ```
 
-On each other computer, run that command once. After that, `clamor-node join` on its own is enough: the
-device remembers the swarm and is recognised by its own key. See the [joining guide](docs/joining.md).
+On each other computer, run that command once (or just `clamor-node join --passphrase <words>`: it finds the
+swarm on the network). After that, `clamor-node join` on its own is enough: the device remembers the swarm and
+is recognised by its own key. See the [joining guide](docs/joining.md).
 
 Then open `http://<first-computer-ip>:7421/` in any browser on your network, phone included, to see the swarm
 measure itself and suggest models.

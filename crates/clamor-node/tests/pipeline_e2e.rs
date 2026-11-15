@@ -482,3 +482,49 @@ fn devices_join_by_passphrase_and_rejoin_by_key() {
     assert!(out.contains("joined 'home'") && out.contains(&ctrl_s), "{out}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `clamor-node join` without an address finds the coordinator on the local network (mDNS),
+/// for a first join (by `--swarm` name) and a rejoin (by the remembered swarm id). Required on
+/// Linux; elsewhere it is skipped if the test machine's network blocks multicast.
+#[test]
+fn devices_find_the_swarm_on_the_local_network() {
+    let dir = std::env::temp_dir().join(format!("clamor-node-mdns-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("models")).unwrap();
+    let models = dir.join("models").display().to_string();
+    let (ctrl, portal, data) = (free_port(), free_port(), free_port_run(1));
+    let (ctrl_s, portal_s, data_s) = (format!("0.0.0.0:{ctrl}"), format!("127.0.0.1:{portal}"), data.to_string());
+    let swarm = format!("e2e-{}", std::process::id());
+    let coord = spawn(&dir, "coordinator", &["coordinator", "--swarm", &swarm, "--passphrase", "find-me-on-the-lan", "--id", "coord", "--bind", &ctrl_s, "--portal", &portal_s, "--models", &models, "--data-port", &data_s, "--quick-bench", "--no-update-check", "--config-dir", &cfg_dir(&dir, "coordinator"), "--participation", "full", "--allow-battery"]);
+    wait_for("the portal", Duration::from_secs(30), &[&coord], || TcpStream::connect(("127.0.0.1", portal)).is_ok());
+    assert!(coord.log().contains("advertising"), "{}", coord.log());
+    let member_cfg = cfg_dir(&dir, "member");
+    let member = |name: &'static str, extra: &[&str]| {
+        let mut args = vec!["join"];
+        args.extend_from_slice(extra);
+        args.extend_from_slice(&["--id", "m", "--models", &models, "--no-update-check", "--config-dir", &member_cfg, "--participation", "full", "--allow-battery"]);
+        spawn(&dir, name, &args)
+    };
+    let joined = |procs: &[&Proc]| {
+        wait_for("the member to join", Duration::from_secs(60), procs, || {
+            let (_, r) = http(portal, "GET", "/api/roster", None);
+            r["nodes"].as_array().is_some_and(|ns| ns.iter().any(|n| n["id"] == "m" && n["state"] == "ready"))
+        })
+    };
+    let mut m = member("member-first", &["--swarm", &swarm, "--passphrase", "find-me-on-the-lan"]);
+    std::thread::sleep(Duration::from_secs(6));
+    if !m.log().contains("found swarm") {
+        if cfg!(target_os = "linux") {
+            panic!("discovery failed on Linux:\n{}", m.log());
+        }
+        eprintln!("skipping: multicast discovery does not work on this machine\n{}", m.log());
+        let _ = m.0.kill();
+        return;
+    }
+    joined(&[&coord, &m]);
+    drop(m);
+    let m = member("member-rejoin", &[]);
+    joined(&[&coord, &m]);
+    assert!(m.log().contains(&format!("found swarm '{swarm}'")), "{}", m.log());
+    let _ = std::fs::remove_dir_all(&dir);
+}

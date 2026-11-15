@@ -227,7 +227,12 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
     let coord_ip = stream.local_addr().ok().map(|a| a.ip());
     let (mut rd, mut wr) = stream.into_split();
 
-    let hello = timeout(Duration::from_secs(10), read_msg(&mut rd)).await??;
+    let hello = match timeout(Duration::from_secs(10), read_msg(&mut rd)).await? {
+        Ok(m) => m,
+        // Closed before saying anything: a device checking that we are reachable.
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
     let Message::Hello { proto, info, bench_port, build, models, share_port, policy: owner_policy, auth_nonce } = hello else {
         write_msg(&mut wr, &Message::Reject { reason: "expected hello".into() }).await?;
         return Ok(());

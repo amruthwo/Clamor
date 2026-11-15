@@ -3,6 +3,7 @@
 mod auth;
 mod build_info;
 mod coordinator;
+mod discovery;
 mod member;
 mod neighbour;
 mod pipeline;
@@ -86,11 +87,21 @@ enum Cmd {
         updates: UpdateArgs,
         #[command(flatten)]
         policy: PolicyArgs,
+        /// Do not advertise the swarm on the local network (devices then need its address).
+        #[arg(long)]
+        no_mdns: bool,
     },
-    /// Join a swarm. Without an address, rejoin the swarm joined most recently.
+    /// Join a swarm. Without an address, find it on the local network: a swarm this device
+    /// joined before, or else the only swarm there (or the one named with --swarm).
     Join {
         /// Coordinator address, host:port (default port 7420).
         addr: Option<String>,
+        /// Without an address: join the swarm with this name.
+        #[arg(long)]
+        swarm: Option<String>,
+        /// Never look for swarms on the network.
+        #[arg(long)]
+        no_mdns: bool,
         /// The swarm's passphrase: needed for the first join only (afterwards this device is
         /// recognised by its key).
         #[arg(long, alias = "token", env = "CLAMOR_PASSPHRASE", hide_env_values = true)]
@@ -105,7 +116,11 @@ enum Cmd {
         policy: PolicyArgs,
     },
     /// List the swarms this device coordinates or has joined.
-    Swarms,
+    Swarms {
+        /// Also list the swarms advertised on the local network now.
+        #[arg(long)]
+        scan: bool,
+    },
 }
 
 /// How much of this device Clamor may use. Unset options keep the defaults for the kind of
@@ -269,7 +284,7 @@ async fn run(cmd: Cmd, priority: Option<Priority>) -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Coordinator { swarm, bind, portal, passphrase, id, engine, data_port, quick_bench, updates, policy } => {
+        Cmd::Coordinator { swarm, bind, portal, passphrase, id, engine, data_port, quick_bench, updates, policy, no_mdns } => {
             let id = NodeId(id.unwrap_or_else(|| probe::default_node_id().0));
             let config_dir = neighbour::config_dir();
             let profile = auth::CoordinatorProfile::load_or_create(&config_dir, &swarm, passphrase.as_deref())?;
@@ -280,6 +295,15 @@ async fn run(cmd: Cmd, priority: Option<Priority>) -> Result<()> {
             println!("add a device: clamor-node join {} --passphrase {}", join_hint(&bind), profile.passphrase);
             if !profile.approved.is_empty() {
                 println!("{} device(s) approved; they rejoin without the passphrase", profile.approved.len());
+            }
+            // Advertise on the network, if listening on it.
+            if let Ok(sa) = bind.parse::<std::net::SocketAddr>() {
+                if sa.ip().is_unspecified() && !no_mdns {
+                    match discovery::advertise(&profile.swarm_id, &swarm, sa.port()) {
+                        Ok(()) => println!("advertising swarm '{swarm}' on the local network (devices can run `clamor-node join`)"),
+                        Err(e) => eprintln!("could not advertise on the local network: {e:#}"),
+                    }
+                }
             }
             let swarm_auth = coordinator::SwarmAuth::new(profile, key, config_dir);
             // Share our models with the swarm's devices (layer slices).
@@ -298,25 +322,19 @@ async fn run(cmd: Cmd, priority: Option<Priority>) -> Result<()> {
             });
             coordinator::run_listener(&bind, shared).await
         }
-        Cmd::Join { addr, passphrase, id, engine, updates, policy } => {
+        Cmd::Join { addr, swarm, no_mdns, passphrase, id, engine, updates, policy } => {
             let config_dir = neighbour::config_dir();
             let addr = match addr {
                 Some(a) if a.contains(':') => a,
                 Some(a) => format!("{a}:{DEFAULT_PORT}"),
-                None => {
-                    let Some(p) = auth::MemberProfile::all(&config_dir).into_iter().find(|p| !p.addresses.is_empty()) else {
-                        anyhow::bail!("this device has not joined a swarm yet: clamor-node join <coordinator> --passphrase <words>");
-                    };
-                    println!("rejoining swarm '{}' at {}", p.name, p.addresses[0]);
-                    p.addresses[0].clone()
-                }
+                None => find_swarm(&config_dir, swarm.as_deref(), no_mdns).await?,
             };
             let engine = engine.config(None); // the key is per swarm: set once joined
             engine.validate()?;
             let creds = member::Credentials { device: auth::Device::load_or_create(&config_dir)?, passphrase, config_dir };
-            member::join(addr, creds, id, engine, updates.policy(), policy.policy(priority)).await
+            member::join(addr, creds, id, engine, updates.policy(), policy.policy(priority), !no_mdns).await
         }
-        Cmd::Swarms => {
+        Cmd::Swarms { scan } => {
             let config_dir = neighbour::config_dir();
             let coordinated = auth::CoordinatorProfile::all(&config_dir);
             let joined = auth::MemberProfile::all(&config_dir);
@@ -331,6 +349,16 @@ async fn run(cmd: Cmd, priority: Option<Priority>) -> Result<()> {
             }
             for p in joined {
                 println!("joined '{}' at {} (last joined {})", p.name, p.addresses.first().map(String::as_str).unwrap_or("?"), ago(p.last_joined_unix));
+            }
+            if scan {
+                let found = tokio::task::spawn_blocking(|| discovery::browse(std::time::Duration::from_secs(3))).await??;
+                if found.is_empty() {
+                    println!("no swarms advertised on the local network");
+                }
+                for f in found {
+                    let at: Vec<String> = f.addrs.iter().map(|a| a.to_string()).collect();
+                    println!("on the network: '{}' at {}", f.name, at.join(", "));
+                }
             }
             Ok(())
         }
@@ -359,4 +387,43 @@ fn ago(unix: u64) -> String {
         7200..=172_799 => format!("{} hours ago", s / 3600),
         _ => format!("{} days ago", s / 86400),
     }
+}
+
+/// Where to join when no address was given: a remembered swarm found on the network (by id, so
+/// a changed IP address does not matter), the only swarm on the network for a first join, or
+/// else the address a remembered swarm was last reached at.
+async fn find_swarm(config_dir: &std::path::Path, want: Option<&str>, no_mdns: bool) -> Result<String> {
+    let profiles: Vec<auth::MemberProfile> = auth::MemberProfile::all(config_dir).into_iter().filter(|p| want.is_none_or(|w| p.name == w)).collect();
+    let mut why = String::new();
+    if !no_mdns {
+        println!("looking for swarms on the local network...");
+        let found = tokio::task::spawn_blocking(|| discovery::browse(std::time::Duration::from_secs(3))).await?.unwrap_or_else(|e| {
+            eprintln!("cannot search the local network: {e:#}");
+            Vec::new()
+        });
+        let ids: Vec<String> = profiles.iter().map(|p| p.swarm_id.clone()).collect();
+        match discovery::choose(&found, &ids, want) {
+            Ok(f) => {
+                let f = f.clone();
+                let name = f.name.clone();
+                if let Some(a) = tokio::task::spawn_blocking(move || f.reachable()).await? {
+                    println!("found swarm '{name}' at {a}");
+                    return Ok(a.to_string());
+                }
+                why = format!("swarm '{name}' is advertised but cannot be reached");
+            }
+            Err(e) => why = e.to_string(),
+        }
+    }
+    if let Some(p) = profiles.iter().find(|p| !p.addresses.is_empty()) {
+        if !why.is_empty() {
+            println!("{why}; trying where swarm '{}' was last", p.name);
+        }
+        println!("rejoining swarm '{}' at {}", p.name, p.addresses[0]);
+        return Ok(p.addresses[0].clone());
+    }
+    if why.is_empty() {
+        why = "this device has not joined a swarm yet".into();
+    }
+    anyhow::bail!("{why}. Give the coordinator's address: clamor-node join <coordinator> --passphrase <words>")
 }

@@ -85,7 +85,10 @@ pub struct Credentials {
     pub config_dir: std::path::PathBuf,
 }
 
-pub async fn join(addr: String, creds: Credentials, id: Option<String>, engine: EngineConfig, updates: update::Policy, owner_policy: Option<Policy>) -> Result<()> {
+/// `rediscover`: when the coordinator cannot be reached, look for the same swarm on the local
+/// network (it may have a new address).
+#[allow(clippy::too_many_arguments)]
+pub async fn join(mut addr: String, creds: Credentials, id: Option<String>, engine: EngineConfig, updates: update::Policy, owner_policy: Option<Policy>, rediscover: bool) -> Result<()> {
     let update_flag: update::UpdateFlag = Default::default();
     if updates.check || updates.auto {
         update::spawn_checker(update_flag.clone());
@@ -102,8 +105,9 @@ pub async fn join(addr: String, creds: Credentials, id: Option<String>, engine: 
 
     let id = NodeId(id.unwrap_or_else(|| probe::default_node_id().0));
     let mut backoff = 2u64;
+    let mut swarm_id: Option<String> = None;
     loop {
-        match session(&addr, &creds, &allowed, &id, bench_port, share_port, &mut backoff, &engine, &update_flag, updates.auto, owner_policy).await {
+        match session(&addr, &creds, &allowed, &mut swarm_id, &id, bench_port, share_port, &mut backoff, &engine, &update_flag, updates.auto, owner_policy).await {
             Ok(Exit::Update) => {
                 // Returns only if the update failed; then carry on with this version.
                 if let Err(e) = update::update_and_restart().await {
@@ -130,7 +134,22 @@ pub async fn join(addr: String, creds: Credentials, id: Option<String>, engine: 
                 }
                 std::process::exit(1);
             }
-            Err(e) => eprintln!("disconnected: {e}; retrying in {backoff}s"),
+            Err(e) => {
+                eprintln!("disconnected: {e}; retrying in {backoff}s");
+                if let (true, Some(sid)) = (rediscover, swarm_id.clone()) {
+                    let found = tokio::task::spawn_blocking(move || {
+                        let found = crate::discovery::browse(Duration::from_secs(2)).unwrap_or_default();
+                        found.into_iter().find(|f| f.swarm_id == sid).and_then(|f| f.reachable())
+                    })
+                    .await
+                    .ok()
+                    .flatten();
+                    if let Some(a) = found.map(|a| a.to_string()).filter(|a| *a != addr) {
+                        println!("the swarm is now at {a}");
+                        addr = a;
+                    }
+                }
+            }
         }
         sleep(Duration::from_secs(backoff)).await;
         backoff = (backoff * 2).min(30);
@@ -138,7 +157,7 @@ pub async fn join(addr: String, creds: Credentials, id: Option<String>, engine: 
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn session(addr: &str, creds: &Credentials, allowed: &share::AllowedKeys, id: &NodeId, bench_port: u16, share_port: u16, backoff: &mut u64, engine: &EngineConfig, update_flag: &update::UpdateFlag, auto_update: bool, owner_policy: Option<Policy>) -> Result<Exit> {
+async fn session(addr: &str, creds: &Credentials, allowed: &share::AllowedKeys, swarm_id: &mut Option<String>, id: &NodeId, bench_port: u16, share_port: u16, backoff: &mut u64, engine: &EngineConfig, update_flag: &update::UpdateFlag, auto_update: bool, owner_policy: Option<Policy>) -> Result<Exit> {
     let scan = |dir: std::path::PathBuf| async move { tokio::task::spawn_blocking(move || share::scan(&dir)).await.unwrap_or_default() };
     let mut models = scan(engine.models_dir.clone()).await;
     let id2 = id.clone();
@@ -177,6 +196,7 @@ async fn session(addr: &str, creds: &Credentials, allowed: &share::AllowedKeys, 
                 return Ok(Exit::Rejected(format!("{e:#}")));
             }
             set_allowed(allowed, &auth.approved_keys, &ch.coordinator_key);
+            *swarm_id = Some(ch.swarm_id.clone());
             // Remember the swarm: its coordinator's key, and where it was reached.
             let mut p = profile.unwrap_or_else(|| crate::auth::MemberProfile { swarm_id: ch.swarm_id.clone(), name: ch.swarm_name.clone(), coordinator_key: String::new(), addresses: Vec::new(), last_joined_unix: 0 });
             let first = p.coordinator_key.is_empty();

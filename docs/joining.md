@@ -21,6 +21,9 @@ The swarm keeps that passphrase from then on: restarting the coordinator does no
 To choose your own, start with `--passphrase "your own words"` (this also changes the passphrase
 of an existing swarm; devices that already joined are not affected).
 
+The coordinator also announces the swarm on your local network (mDNS, the way printers
+announce themselves), so devices can find it without its address. `--no-mdns` turns that off.
+
 ## Adding a device
 
 On the new device, run the printed command once:
@@ -28,6 +31,14 @@ On the new device, run the printed command once:
 ```bash
 clamor-node join 192.168.1.20 --passphrase harbor-velvet-crab-lantern-ninety
 ```
+
+Or leave out the address and let the device find the swarm:
+
+```bash
+clamor-node join --passphrase harbor-velvet-crab-lantern-ninety
+```
+
+If there is more than one swarm on the network, name the one you want with `--swarm home`.
 
 Capitals, spaces and dashes in the passphrase do not matter: `Harbor Velvet Crab Lantern Ninety`
 works too. If you would rather not type it on the command line (where other users of the same
@@ -41,8 +52,14 @@ Once a device has joined, it remembers the swarm. From then on:
 clamor-node join
 ```
 
-rejoins the swarm it joined last, without the passphrase. If the connection drops, the device
-reconnects by itself.
+looks on the network for a swarm it has joined before and rejoins it, without the passphrase.
+Because it recognises the swarm itself, not its address, it does not matter if the coordinator
+got a new address from your router. If the swarm cannot be found on the network, the device tries
+the address it last reached it at. A device that has joined swarms before never joins an unknown
+one by itself: for a new swarm, name it with `--swarm` or give its address.
+
+If the connection drops, the device reconnects by itself, and looks for the swarm on the network
+again if the coordinator has moved.
 
 To see what a device remembers:
 
@@ -50,7 +67,8 @@ To see what a device remembers:
 clamor-node swarms
 ```
 
-On the coordinator this also lists the passphrase and the devices it has approved.
+On the coordinator this also lists the passphrase and the devices it has approved. Add `--scan`
+to also list the swarms announced on the network right now.
 
 ## How it stays safe
 
@@ -76,8 +94,10 @@ you: `device.key` is the device's secret, and `swarms/` holds one file per swarm
 - The connections are not encrypted yet: someone on your network could read what devices send each
   other (prompts and replies included), although they cannot join or pretend to be a device.
 - The dashboard has no login: anyone on your network can open it.
-- Removing a single device's approval, finding the swarm without typing an address, and adding a
-  device with a one-time code or QR code from the dashboard are coming next.
+- Removing a single device's approval, and adding a device with a one-time code or QR code from
+  the dashboard, are coming next.
+- Finding the swarm on the network is tested on Linux. Some networks (guest Wi-Fi, some
+  corporate networks) block it; give the address instead.
 
 Only run Clamor on a network you trust until these are done.
 
@@ -88,4 +108,6 @@ Only run Clamor on a network you trust until these are done.
 | `first join: this needs the swarm's passphrase` | This device has not joined this swarm before. Add `--passphrase`. |
 | `wrong passphrase` | The words do not match the swarm's. `clamor-node swarms` on the coordinator shows them. |
 | `this swarm's coordinator key changed since you joined` | The coordinator was reinstalled, its config folder was deleted, or something else is answering at its address. If you expected this, join again with `--passphrase`. |
-| `this device has not joined a swarm yet` | `clamor-node join` without an address needs a swarm joined before. |
+| `several swarms on the network` | Name the one you want: `--swarm home`. |
+| `no swarm found on the network` | The coordinator is not running, is started with `--no-mdns` or listens on one address only (`--bind`), or your network blocks discovery. Give its address. |
+| `none of the swarms this device joined is on the network` | To join a new swarm, name it with `--swarm` or give its address. |

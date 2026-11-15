@@ -32,6 +32,37 @@
   .badge { background:var(--accent); color:#fff; border-radius:999px; padding:1px 9px; font-size:12px; margin-left:6px; }
   .mute { color:var(--mute); } small { color:var(--mute); }
   .chat { display:flex; gap:8px; } .chat input { flex:1; }
+  .paused-chip { color:var(--warn); }
+  /* Device settings dialog */
+  dialog { border:1px solid var(--line); border-radius:14px; padding:0; width:min(520px, calc(100vw - 24px)); background:var(--card); color:var(--ink); }
+  dialog::backdrop { background:rgba(0,0,0,.45); }
+  .dlg-head { padding:16px 18px 6px; } .dlg-head h3 { margin:0; font-size:18px; } .dlg-head .mute { font-size:13px; }
+  .dlg-body { padding:6px 18px 4px; display:grid; gap:16px; }
+  .field > label, .field > .label { display:block; font-weight:600; margin-bottom:6px; }
+  .field .help { color:var(--mute); font-size:13px; margin-top:5px; }
+  .seg { display:inline-flex; border:1px solid var(--line); border-radius:9px; overflow:hidden; }
+  .seg button { border:0; border-radius:0; padding:6px 14px; background:transparent; }
+  .seg button + button { border-left:1px solid var(--line); }
+  .seg button[aria-pressed=true] { background:var(--accent); color:#fff; }
+  .row { display:flex; align-items:center; gap:12px; }
+  .row input[type=range] { flex:1; accent-color:var(--accent); }
+  .readout { min-width:150px; text-align:right; font-variant-numeric:tabular-nums; font-size:14px; }
+  .switch { display:inline-flex; align-items:center; gap:10px; cursor:pointer; }
+  .switch input { width:18px; height:18px; accent-color:var(--accent); }
+  .status { display:grid; grid-template-columns:auto 1fr; gap:3px 12px; font-size:13px; color:var(--mute); background:var(--bg); border-radius:10px; padding:10px 12px; }
+  .status b { color:var(--ink); font-weight:500; }
+  .note { color:var(--warn); font-size:13px; }
+  .dlg-foot { display:flex; gap:8px; padding:14px 18px 16px; border-top:1px solid var(--line); margin-top:14px; }
+  .dlg-foot .spacer { flex:1; }
+  button.danger { color:var(--bad); border-color:var(--bad); }
+  dialog { max-height:calc(100dvh - 24px); }
+  dialog form { display:flex; flex-direction:column; max-height:calc(100dvh - 26px); }
+  .dlg-body { overflow-y:auto; }
+  @media (max-width: 520px) {
+    .row { flex-wrap:wrap; } .row input[type=range] { flex-basis:100%; } .readout { text-align:left; min-width:0; }
+    .dlg-foot { flex-wrap:wrap; } .dlg-foot .spacer { display:none; }
+    .dlg-foot button { flex:1; } .dlg-foot button.danger { order:3; flex-basis:100%; }
+  }
 </style>
 </head>
 <body>
@@ -68,6 +99,45 @@
     <div class="chat"><input disabled placeholder="Chat and task console arrive in v0.2"><button disabled>Send</button></div>
   </section>
 </main>
+<dialog id="settings" aria-labelledby="set-title">
+  <form method="dialog" id="set-form">
+    <div class="dlg-head"><h3 id="set-title">Device settings</h3><div class="mute" id="set-sub"></div></div>
+    <div class="dlg-body">
+      <div class="field"><div class="label" id="lbl-part">Take part</div>
+        <div class="seg" role="group" aria-labelledby="lbl-part" id="set-part">
+          <button type="button" data-v="full">Full</button><button type="button" data-v="idle_only">Idle only</button><button type="button" data-v="paused">Paused</button>
+        </div>
+        <div class="help" id="help-part"></div>
+      </div>
+      <div class="field"><label class="switch"><input type="checkbox" id="set-battery"> Work on battery</label>
+        <div class="help" id="help-battery"></div>
+      </div>
+      <div class="field"><label for="set-ram">Memory Clamor may use</label>
+        <div class="row"><input type="range" id="set-ram" min="5" max="95" step="5"><span class="readout" id="out-ram"></span></div>
+        <div class="help">It also always leaves 512 MB free. Applies from the next pipeline.</div>
+      </div>
+      <div class="field"><label for="set-cpu">CPU Clamor may use</label>
+        <div class="row"><input type="range" id="set-cpu" min="5" max="100" step="5"><span class="readout" id="out-cpu"></span></div>
+        <div class="help">One fast core always stays free for you. Applies from the next pipeline.</div>
+      </div>
+      <div class="field"><div class="label" id="lbl-prio">Priority</div>
+        <div class="seg" role="group" aria-labelledby="lbl-prio" id="set-prio">
+          <button type="button" data-v="low">Low</button><button type="button" data-v="normal">Normal</button>
+        </div>
+        <div class="help">Low: your own apps always go first, so this device never feels slow. Normal: Clamor competes with them equally.</div>
+      </div>
+      <div class="status" id="set-status"></div>
+      <div class="note" id="set-note" hidden></div>
+    </div>
+    <div class="dlg-foot">
+      <button type="button" class="danger" id="set-drain">Remove from swarm…</button>
+      <span class="spacer"></span>
+      <button value="cancel" formnovalidate autofocus>Cancel</button>
+      <button type="button" class="primary" id="set-save">Save</button>
+    </div>
+  </form>
+</dialog>
+
 <script>
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const gib = b => (b / 2**30).toFixed(1);
@@ -81,18 +151,86 @@ async function post(url, body) {
 }
 window.drain = id => confirm('Drain ' + id + '? It finishes current work and leaves the swarm.') && post('/api/nodes/' + encodeURIComponent(id) + '/drain');
 window.togglePause = (id, paused, policy) => post('/api/nodes/' + encodeURIComponent(id) + '/policy', { ...policy, participation: paused ? 'full' : 'paused' });
+
+// ---- device settings dialog
+let nodes = {}, editing = null;
+const PART_HELP = {
+  full: 'Always takes work when the swarm needs it.',
+  idle_only: 'Steps aside while you are using this device, and comes back when it is quiet.',
+  paused: 'Takes no new work. Anything already running finishes.',
+};
+function seg(id, value) {
+  for (const b of $(id).querySelectorAll('button')) b.setAttribute('aria-pressed', b.dataset.v === value);
+}
+function segValue(id) { return [...$(id).querySelectorAll('button')].find(b => b.getAttribute('aria-pressed') === 'true')?.dataset.v; }
+for (const g of ['set-part', 'set-prio']) $(g).onclick = e => { if (e.target.dataset.v) { seg(g, e.target.dataset.v); updateReadouts(); } };
+// Same rule as the node (neighbour::threads_for): a share of the fast cores, always leaving one.
+function threadsFor(share, cores) { const n = Math.max(1, cores); return Math.min(Math.max(1, Math.round(n * share)), n > 1 ? n - 1 : 1); }
+function updateReadouts() {
+  const n = nodes[editing]; if (!n) return;
+  const info = n.report.info, ram = $('set-ram').value / 100, cpu = $('set-cpu').value / 100;
+  $('out-ram').textContent = `${Math.round(ram * 100)}% · ${gib(info.ram_total_bytes * ram)} of ${gib(info.ram_total_bytes)} GiB`;
+  const cores = info.perf_cores || info.cpu_cores_physical || 1;
+  $('out-cpu').textContent = `${Math.round(cpu * 100)}% · ${threadsFor(cpu, cores)} of ${cores} fast cores`;
+  $('help-part').textContent = PART_HELP[segValue('set-part')] || '';
+}
+window.openSettings = id => {
+  const n = nodes[id]; if (!n) return;
+  editing = id;
+  const p = n.report.policy, info = n.report.info;
+  $('set-title').textContent = n.id;
+  $('set-sub').textContent = `${info.class} · ${info.os}/${info.arch}${n.is_coordinator ? ' · runs the swarm (coordinator)' : ''}`;
+  seg('set-part', p.participation === 'draining' ? 'full' : p.participation);
+  seg('set-prio', p.low_priority === false ? 'normal' : 'low');
+  const battery = info.power;
+  $('set-battery').checked = !p.require_plugged_in;
+  $('set-battery').disabled = !battery;
+  $('help-battery').textContent = battery ? 'Off: pauses whenever it is unplugged, and resumes when you plug it back in.' : 'This device has no battery.';
+  $('set-ram').value = Math.round(p.max_ram_fraction * 100);
+  $('set-cpu').value = Math.round(p.max_cpu_fraction * 100);
+  const rows = [
+    ['Status', n.paused ? `paused: ${n.paused}` : n.state],
+    ['Battery', battery ? `${battery.battery_pct ?? '?'}%, ${battery.on_battery ? 'on battery' : 'plugged in'}` : 'none'],
+    ['Free memory', `${gib(info.ram_available_bytes)} of ${gib(info.ram_total_bytes)} GiB`],
+    ['Clamor', n.build ? `${n.build.version} (${n.build.variant === 'cpu' ? 'CPU' : n.build.variant})` : 'older version'],
+  ];
+  if (n.state === 'away') rows.push(['Note', 'offline: changes apply when it reconnects']);
+  $('set-status').innerHTML = rows.map(([k, v]) => `<span>${esc(k)}</span><b>${esc(v)}</b>`).join('');
+  $('set-note').hidden = !n.settings_note; $('set-note').textContent = n.settings_note ? '⚠ ' + n.settings_note : '';
+  $('set-drain').hidden = n.is_coordinator || n.state === 'away';
+  updateReadouts();
+  $('settings').showModal();
+};
+$('set-ram').oninput = $('set-cpu').oninput = updateReadouts;
+$('set-save').onclick = async () => {
+  const policy = {
+    participation: segValue('set-part'),
+    require_plugged_in: !$('set-battery').checked,
+    max_ram_fraction: $('set-ram').value / 100,
+    max_cpu_fraction: $('set-cpu').value / 100,
+    low_priority: segValue('set-prio') === 'low',
+  };
+  const r = await fetch('/api/nodes/' + encodeURIComponent(editing) + '/policy', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(policy) });
+  if (!r.ok) { $('set-note').hidden = false; $('set-note').textContent = '⚠ ' + await r.text(); return; }
+  const res = await r.json();
+  if (res.note) { $('set-note').hidden = false; $('set-note').textContent = '⚠ ' + res.note; refresh(); return; }
+  $('settings').close(); refresh();
+};
+$('set-drain').onclick = () => { $('settings').close(); drain(editing); };
 $('muster').onclick = () => post('/api/muster');
 
 function renderRoster(data) {
   $('sub').textContent = `swarm “${data.swarm}” · coordinator ${data.coordinator}`;
+  nodes = Object.fromEntries(data.nodes.map(n => [n.id, n]));
   $('roster').innerHTML = data.nodes.map(n => {
     const r = n.report, b = r.bench, l = r.link, p = r.policy;
     const paused = p.participation === 'paused';
-    const actions = n.is_coordinator ? '<span class="mute">coordinator</span>'
-      : n.state === 'away' ? `<span class="mute">${esc(n.note || 'away')}</span>`
-      : `<button onclick='togglePause(${JSON.stringify(n.id)}, ${paused}, ${JSON.stringify(p)})'>${paused ? 'Resume' : 'Pause'}</button> <button onclick='drain(${JSON.stringify(n.id)})'>Drain</button>`;
+    const settings = `<button onclick='openSettings(${JSON.stringify(n.id)})'>Settings</button>`;
+    const actions = n.state === 'away' ? `<span class="mute">${esc(n.note || 'away')}</span> ${settings}`
+      : `${n.is_coordinator ? '' : `<button onclick='togglePause(${JSON.stringify(n.id)}, ${paused}, ${JSON.stringify(p)})'>${paused ? 'Resume' : 'Pause'}</button> `}${settings}`;
+    const state = n.paused ? `<span class="paused-chip" title="${esc(n.paused)}">paused · ${esc(n.paused)}</span>` : esc(n.state);
     return `<tr class="${esc(n.state)}">
-      <td><span class="dot"></span>${esc(n.id)}</td><td>${esc(n.state)}</td>
+      <td><span class="dot"></span>${esc(n.id)}${n.is_coordinator ? ' <small>(coordinator)</small>' : ''}</td><td>${state}</td>
       <td>${esc(r.info.class)} · ${esc(r.info.os)}/${esc(r.info.arch)}</td>
       <td>${n.build ? esc(n.build.version) + (n.build.variant !== 'cpu' ? ' · ' + esc(n.build.variant) : '') : '<span class="mute">older</span>'}${n.update_available ? ` <span class="mute" title="clamor-node update">→ ${esc(n.update_available)} available</span>` : ''}</td>
       <td class="num">${gib(r.info.ram_available_bytes)} / ${gib(r.info.ram_total_bytes)} GiB</td>
@@ -131,7 +269,12 @@ async function refresh() {
   busy = false;
 }
 ['quant','ctx','target','topology'].forEach(id => $(id).onchange = refresh);
-refresh(); setInterval(refresh, 3000);
+// Deep link: /#settings=<device id> opens that device's settings.
+refresh().then(() => {
+  const m = location.hash.match(/^#settings=(.+)$/);
+  if (m) openSettings(decodeURIComponent(m[1]));
+});
+setInterval(refresh, 3000);
 </script>
 </body>
 </html>

@@ -99,6 +99,9 @@ pub struct NodeInfo {
     pub disk_free_bytes: u64,
     pub power: Option<PowerState>,
     pub clamor_version: String,
+    /// Performance cores (what Clamor's thread count is based on). Older nodes do not say.
+    #[serde(default)]
+    pub perf_cores: Option<u32>,
 }
 
 // ---------------------------------------------------------------- policy
@@ -123,6 +126,13 @@ pub struct Policy {
     pub max_ram_fraction: f32,
     pub max_cpu_fraction: f32,
     pub require_plugged_in: bool,
+    /// Run Clamor's work at low CPU priority so the owner's apps always go first.
+    #[serde(default = "yes")]
+    pub low_priority: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl Policy {
@@ -134,6 +144,7 @@ impl Policy {
             max_ram_fraction: if portable { 0.5 } else { 0.7 },
             max_cpu_fraction: if portable { 0.5 } else { 0.8 },
             require_plugged_in: portable,
+            low_priority: true,
         }
     }
 }
@@ -335,6 +346,9 @@ pub enum Message {
         /// the owner), if it isn't. Work already running finishes.
         #[serde(default)]
         paused: Option<String>,
+        /// Something about a settings change the owner should know (e.g. it needs a restart).
+        #[serde(default)]
+        note: Option<String>,
     },
     Ping {
         seq: u64,
@@ -516,6 +530,7 @@ mod tests {
             disk_free_bytes: 500 << 30,
             power: None,
             clamor_version: "0.1.0".into(),
+            perf_cores: Some(4),
         }
     }
 
@@ -599,6 +614,13 @@ mod tests {
     fn oversized_header_rejected() {
         let header = (MAX_FRAME_BYTES + 1).to_be_bytes();
         assert!(frame_len(header).is_err());
+    }
+
+    /// Policies stored or sent by nodes from before the priority setting still parse, as low.
+    #[test]
+    fn policies_without_a_priority_default_to_low() {
+        let p: Policy = serde_json::from_str(r#"{"participation":"full","max_ram_fraction":0.5,"max_cpu_fraction":0.5,"require_plugged_in":false}"#).unwrap();
+        assert!(p.low_priority);
     }
 
     #[test]

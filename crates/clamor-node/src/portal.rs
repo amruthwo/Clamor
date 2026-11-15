@@ -55,6 +55,7 @@ struct RosterRow {
     models: Vec<ModelInfo>,
     share_port: Option<u16>,
     paused: Option<String>,
+    settings_note: Option<String>,
     report: NodeReport,
 }
 
@@ -72,6 +73,7 @@ fn row(entry: &NodeEntry, id: &NodeId, coordinator: &NodeId) -> RosterRow {
         models: entry.models.clone(),
         share_port: entry.share_port,
         paused: entry.paused.clone(),
+        settings_note: entry.settings_note.clone(),
         report: entry.report.clone(),
     }
 }
@@ -167,15 +169,26 @@ async fn drain(State(shared): State<Shared>, Path(id): Path<String>) -> ApiResul
     Ok(Json(json!({ "draining": id })))
 }
 
+/// Change a device's settings. Pausing, battery and priority take effect within a heartbeat;
+/// RAM and CPU shares apply from the next pipeline.
 async fn set_policy(State(shared): State<Shared>, Path(id): Path<String>, Json(policy): Json<Policy>) -> ApiResult {
+    crate::neighbour::validate(&policy).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let id = NodeId(id);
     let mut sw = shared.lock().unwrap();
+    let is_coordinator = id == sw.coordinator;
     let entry = sw.nodes.get_mut(&id).ok_or((StatusCode::NOT_FOUND, format!("unknown node {id}")))?;
     entry.report.policy = policy;
+    if is_coordinator {
+        // This device: apply and remember here (pausing is picked up by monitor_self).
+        entry.settings_note = crate::neighbour::set_priority(policy.low_priority).err();
+        crate::neighbour::save_settings(&policy);
+        return Ok(Json(json!({ "ok": true, "note": entry.settings_note })));
+    }
     if let Some(tx) = &entry.tx {
         let _ = tx.send(Message::SetPolicy { policy });
     }
-    Ok(Json(json!({ "ok": true })))
+    // A remote device reports any note with its next heartbeat; the stored one is stale.
+    Ok(Json(json!({ "ok": true, "note": null })))
 }
 
 fn pipeline_json(p: &pipeline::Pipeline) -> Value {

@@ -1,0 +1,80 @@
+# Device settings
+
+Every device in a swarm decides how much of itself Clamor may use. The defaults are chosen so
+that lending your computer to the swarm never gets in your way: Clamor uses a share of the
+machine, runs at low priority, and steps aside when you need the device.
+
+## The settings
+
+| Setting | What it does |
+|---|---|
+| **Take part** | **Full**: always takes work. **Idle only**: steps aside while you are using the device and comes back when it is quiet. **Paused**: takes no new work. |
+| **Work on battery** | Off: a laptop or phone pauses whenever it is unplugged, and resumes when you plug it back in. |
+| **Memory Clamor may use** | A share of the device's RAM. Clamor also always leaves 512 MB free, whatever the share. |
+| **CPU Clamor may use** | A share of the device's fast cores. One fast core always stays free for you. |
+| **Priority** | **Low**: your own apps always get the CPU first, so the device never feels slow. **Normal**: Clamor competes with them equally. |
+
+"Pausing" never interrupts a reply that is already being written: it finishes, and then the
+device takes no new requests until it is available again.
+
+## Defaults
+
+| | Desktops | Laptops, tablets and phones |
+|---|---|---|
+| Take part | Full | Idle only |
+| Work on battery | – | Off |
+| Memory | 70% | 50% |
+| CPU | 80% | 50% |
+| Priority | Low | Low |
+
+Clamor tells laptops from desktops by whether the device has a battery.
+
+## Changing them
+
+**In the dashboard** (any browser on your network, `http://<coordinator>:7421/`): press
+**Settings** next to a device. The panel shows what each setting means for that device, for
+example "60% · 9.4 of 15.6 GB" or "2 of 4 fast cores", along with its battery and free memory.
+
+**On the device itself**, when starting Clamor:
+
+```bash
+clamor-node join <coordinator> --participation full --allow-battery --ram-share 0.6 --cpu-share 0.8
+clamor-node join <coordinator> --priority normal
+```
+
+The same options work for `clamor-node coordinator`. Options given on the command line win;
+otherwise a device uses the settings it was last given from the dashboard; otherwise the defaults.
+
+## When changes take effect
+
+- **Take part, work on battery:** within a few seconds.
+- **Memory and CPU:** from the next pipeline (a model that is already loaded keeps its layout).
+- **Priority, Low:** immediately.
+- **Priority, Normal:** immediately on Windows. On Linux and macOS a program may lower its own
+  priority but not raise it again, so going back to Normal takes effect the next time Clamor
+  starts on that device. The dashboard says so.
+
+## Messages you may see
+
+- **"stage 0 on laptop needs 27.4 GB … but may use 8.2 GB"** when starting a model: that part of
+  the model does not fit in the memory this device may use. Give the device fewer layers, use a
+  smaller context (`ctx`), or raise its memory share. Clamor checks this *before* loading
+  anything, so a device is never pushed into swapping.
+- **"paused: laptop is not taking work right now (on battery …)"** when chatting: one of the
+  devices running the model is paused. Plug it in, change its settings, or wait until it is free.
+
+## Where settings are kept
+
+Each device remembers its settings in its own config folder, so they survive restarts even if
+the coordinator changes:
+
+- Linux: `~/.config/clamor/device-settings.json`
+- macOS: `~/Library/Application Support/clamor/device-settings.json`
+- Windows: `%APPDATA%\clamor\device-settings.json`
+
+Use `--config-dir` to keep them somewhere else.
+
+## Who can change them
+
+For now the dashboard has no login: anyone who can open it on your network can change any
+device's settings. Run Clamor only on a network you trust. Dashboard sign-in is planned.

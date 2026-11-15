@@ -142,3 +142,95 @@ mod tests {
         assert_eq!(s.update(&laptop, &load(0.1, 0.0), Some(&mains)), None);
     }
 }
+
+static LOW_PRIORITY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether Clamor currently runs at low priority.
+pub fn is_low_priority() -> bool {
+    LOW_PRIORITY.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Switch Clamor's CPU priority while it runs. Lowering always works. Raising it back needs
+/// administrator rights on Linux and macOS, so there it takes effect at the next start.
+pub fn set_priority(low: bool) -> Result<(), String> {
+    if low == is_low_priority() {
+        return Ok(());
+    }
+    let restart = "returning to normal priority takes effect when Clamor restarts (Linux and macOS only let a program lower its own priority)";
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        // Priority is per thread on Linux: change every existing thread. New ones inherit it.
+        let nice = if low { 10 } else { 0 };
+        let mut failed = false;
+        if let Ok(tasks) = std::fs::read_dir("/proc/self/task") {
+            for t in tasks.flatten() {
+                if let Some(tid) = t.file_name().to_str().and_then(|s| s.parse::<libc::id_t>().ok()) {
+                    if unsafe { libc::setpriority(libc::PRIO_PROCESS, tid, nice) } != 0 {
+                        failed = true;
+                    }
+                }
+            }
+        }
+        if failed {
+            return Err(if low { "could not lower Clamor's priority".into() } else { restart.into() });
+        }
+    }
+    #[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
+    {
+        if unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, if low { 10 } else { 0 }) } != 0 {
+            return Err(if low { "could not lower Clamor's priority".into() } else { restart.into() });
+        }
+    }
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, SetPriorityClass, BELOW_NORMAL_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS};
+        let class = if low { BELOW_NORMAL_PRIORITY_CLASS } else { NORMAL_PRIORITY_CLASS };
+        if SetPriorityClass(GetCurrentProcess(), class) == 0 {
+            return Err("could not change Clamor's priority".into());
+        }
+    }
+    let _ = restart;
+    LOW_PRIORITY.store(low, std::sync::atomic::Ordering::Relaxed);
+    Ok(())
+}
+
+/// Reject policies that make no sense instead of storing them.
+pub fn validate(p: &clamor_proto::Policy) -> Result<(), String> {
+    if !(0.05..=0.95).contains(&p.max_ram_fraction) {
+        return Err(format!("RAM share must be between 5% and 95%, not {:.0}%", p.max_ram_fraction * 100.0));
+    }
+    if !(0.05..=1.0).contains(&p.max_cpu_fraction) {
+        return Err(format!("CPU share must be between 5% and 100%, not {:.0}%", p.max_cpu_fraction * 100.0));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------- remembered settings
+
+static CONFIG_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// Where this device keeps its settings (`--config-dir`, default the OS config folder).
+pub fn set_config_dir(dir: Option<std::path::PathBuf>) {
+    let d = dir.unwrap_or_else(|| dirs::config_dir().unwrap_or_else(std::env::temp_dir).join("clamor"));
+    let _ = CONFIG_DIR.set(d);
+}
+
+fn settings_path() -> std::path::PathBuf {
+    CONFIG_DIR.get_or_init(|| dirs::config_dir().unwrap_or_else(std::env::temp_dir).join("clamor")).join("device-settings.json")
+}
+
+/// The settings this device last received (from the dashboard), if any. Read at startup, before
+/// the priority is set: once lowered, Linux and macOS will not let it be raised again.
+pub fn saved_settings() -> Option<clamor_proto::Policy> {
+    let p = std::fs::read(settings_path()).ok()?;
+    serde_json::from_slice(&p).ok().filter(|p| validate(p).is_ok())
+}
+
+/// Remember this device's settings for the next start.
+pub fn save_settings(p: &clamor_proto::Policy) {
+    let path = settings_path();
+    let r = std::fs::create_dir_all(path.parent().unwrap()).and_then(|_| std::fs::write(&path, serde_json::to_vec_pretty(p).unwrap()));
+    if let Err(e) = r {
+        eprintln!("could not save settings to {}: {e}", path.display());
+    }
+}

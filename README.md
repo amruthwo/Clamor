@@ -70,10 +70,11 @@ drops off can rejoin later without benchmarking again.
 | | |
 |---|---|
 | **Works** | Starting a swarm, joining with a token, automatic benchmarks, a web dashboard showing devices and which models fit |
-| **Works** | The ring connection that carries work between machines (tested with a stand-in engine) |
-| **Works** | Running a slice of a real Llama-style model's layers, checked against a reference implementation |
-| **In progress** | Connecting the model engine to the ring, a tokenizer, compressed (quantized) models, a real model on two machines |
-| **Planned** | Chat in the dashboard, an OpenAI-compatible API for agent tools, a phone app, automatic discovery, encryption between devices |
+| **Works** | Splitting a real model across machines: the coordinator hands out layers, each machine loads its share, and they pass the work around the ring |
+| **Works** | Text chat through the API, using the model's own tokenizer and chat template (both checked against Hugging Face's) |
+| **Works** | Compressed (quantized) models, tested with SmolLM2 360M in 8-bit |
+| **In progress** | Llama 3 and Qwen 2.5 support; sharing one copy of a model file between machines |
+| **Planned** | Chat in the dashboard, an OpenAI-compatible API for agent tools, installers and a desktop app, a phone app, automatic discovery and coordinator hand-over, encryption between devices |
 
 CI runs the tests on Linux (x86_64 and arm64), Windows and macOS. The Vulkan, CUDA and Android builds are
 compile-checked only. GPU inference has been tested by hand with Vulkan on an Apple M1 running Asahi Linux.
@@ -101,6 +102,31 @@ On each other computer, join it:
 
 Then open `http://<first-computer-ip>:7421/` in any browser on your network, phone included, to see the swarm
 measure itself and suggest models.
+
+### Chat with a model
+
+For now every machine needs its own copy of the model file in a `models` folder next to where you run
+`clamor-node` (sharing one copy is coming next). A small one to start with is
+[SmolLM2 360M Instruct](https://huggingface.co/HuggingFaceTB/SmolLM2-360M-Instruct-GGUF) (386 MB, Apache-2.0):
+
+```bash
+mkdir -p models && curl -L -o models/smollm2-360m-instruct-q8_0.gguf \
+  https://huggingface.co/HuggingFaceTB/SmolLM2-360M-Instruct-GGUF/resolve/main/smollm2-360m-instruct-q8_0.gguf
+```
+
+Split it across two machines (use the names shown in the dashboard; leave out `stages` to let the planner choose):
+
+```bash
+curl -X POST http://<first-computer-ip>:7421/api/pipeline -H 'content-type: application/json' \
+  -d '{"model": "smollm2-360m-instruct-q8_0.gguf", "stages": [{"node": "laptop", "layers": [0, 16]}, {"node": "desktop", "layers": [16, 32]}]}'
+```
+
+Once `GET /api/pipeline` says `"ready": true`, ask it something:
+
+```bash
+curl -X POST http://<first-computer-ip>:7421/api/chat -H 'content-type: application/json' \
+  -d '{"messages": [{"role": "user", "content": "What is the capital of France?"}]}'
+```
 
 > [!WARNING]
 > For now, devices join with a shared token over unencrypted connections. Only run Clamor on a network you trust.

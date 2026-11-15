@@ -2,3 +2,6 @@
 *.gguf
 *.npz
 __pycache__/
+
+# Local machine setup notes (not published)
+ASAHI_SETUP.md

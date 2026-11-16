@@ -255,12 +255,15 @@ impl MemberProfile {
 
 /// Everything both sides sign or MAC, so no part of the exchange can be swapped.
 #[allow(clippy::too_many_arguments)]
-fn transcript(role: &str, swarm_id: &str, coordinator_key: &str, nonce_c: &str, nonce_m: &str, device_key: &str, spake_b: &str, spake_a: &str) -> Vec<u8> {
-    format!("clamor-auth-v1|{role}|{swarm_id}|{coordinator_key}|{nonce_c}|{nonce_m}|{device_key}|{spake_b}|{spake_a}").into_bytes()
+/// `binding` is the TLS session's exporter value: signing it ties the handshake to this one
+/// encrypted connection, so a machine in the middle (two TLS sessions) cannot relay it.
+fn transcript(role: &str, binding: &str, swarm_id: &str, coordinator_key: &str, nonce_c: &str, nonce_m: &str, device_key: &str, spake_b: &str, spake_a: &str) -> Vec<u8> {
+    format!("clamor-auth-v2|{role}|{binding}|{swarm_id}|{coordinator_key}|{nonce_c}|{nonce_m}|{device_key}|{spake_b}|{spake_a}").into_bytes()
 }
 
 /// Coordinator side of one connection's authentication.
 pub struct CoordinatorHandshake {
+    binding: String,
     pub swarm_id: String,
     pub coordinator_key: String,
     pub nonce_c: String,
@@ -304,11 +307,11 @@ pub enum Verdict {
 }
 
 impl CoordinatorHandshake {
-    pub fn start(swarm_id: &str, swarm_name: &str, key: &SigningKey, passphrase: &str) -> (Self, Challenge) {
+    pub fn start(binding: &[u8; 32], swarm_id: &str, swarm_name: &str, key: &SigningKey, passphrase: &str) -> (Self, Challenge) {
         let (spake, msg) = Spake2::<Ed25519Group>::start_b(&Password::new(passphrase.as_bytes()), &Identity::new(SPAKE_ID_MEMBER), &Identity::new(SPAKE_ID_COORDINATOR));
         let (coordinator_key, nonce_c, spake_b) = (key_hex(&key.verifying_key()), hex::encode(random_bytes::<16>()), hex::encode(msg));
         let ch = Challenge { swarm_id: swarm_id.into(), swarm_name: swarm_name.into(), coordinator_key: coordinator_key.clone(), nonce: nonce_c.clone(), spake: spake_b.clone() };
-        (Self { swarm_id: swarm_id.into(), coordinator_key, nonce_c, spake_b, spake }, ch)
+        (Self { binding: hex::encode(binding), swarm_id: swarm_id.into(), coordinator_key, nonce_c, spake_b, spake }, ch)
     }
 
     /// Check the device's proof. `approved` says whether a key is already approved. Returns the
@@ -316,7 +319,7 @@ impl CoordinatorHandshake {
     pub fn verify(self, key: &SigningKey, nonce_m: &str, proof: &Proof, approved: impl Fn(&str) -> bool) -> Result<(Verdict, CoordinatorProof)> {
         let device = parse_key(&proof.device_key)?;
         let spake_a = proof.spake.clone().unwrap_or_default();
-        let t = |role| transcript(role, &self.swarm_id, &self.coordinator_key, &self.nonce_c, nonce_m, &proof.device_key, &self.spake_b, &spake_a);
+        let t = |role| transcript(role, &self.binding, &self.swarm_id, &self.coordinator_key, &self.nonce_c, nonce_m, &proof.device_key, &self.spake_b, &spake_a);
         device.verify(&t("member"), &parse_sig(&proof.signature)?).map_err(|_| anyhow!("the device's signature does not verify"))?;
         let mine = hex::encode(key.sign(&t("coordinator")).to_bytes());
         let known = approved(&proof.device_key);
@@ -339,6 +342,7 @@ impl CoordinatorHandshake {
 
 /// Device side. `pinned`: the coordinator key remembered for this swarm, if any.
 pub struct MemberHandshake {
+    binding: String,
     ch: Challenge,
     nonce_m: String,
     device_key: String,
@@ -349,7 +353,8 @@ pub struct MemberHandshake {
 impl MemberHandshake {
     /// Answer a challenge. With a pinned key that matches and no passphrase, sign only;
     /// otherwise the passphrase is required and SPAKE2 runs.
-    pub fn answer(ch: &Challenge, nonce_m: &str, key: &SigningKey, pinned: Option<&str>, passphrase: Option<&str>) -> Result<(Self, Proof)> {
+    pub fn answer(binding: &[u8; 32], ch: &Challenge, nonce_m: &str, key: &SigningKey, pinned: Option<&str>, passphrase: Option<&str>) -> Result<(Self, Proof)> {
+        let binding = hex::encode(binding);
         let device_key = key_hex(&key.verifying_key());
         let known = pinned == Some(ch.coordinator_key.as_str());
         if pinned.is_some() && !known && passphrase.is_none() {
@@ -363,17 +368,17 @@ impl MemberHandshake {
             let shared = st.finish(&hex::decode(&ch.spake)?).map_err(|_| anyhow!("bad SPAKE2 message from the coordinator"))?;
             (hex::encode(msg), Some(shared))
         };
-        let t = |role| transcript(role, &ch.swarm_id, &ch.coordinator_key, &ch.nonce, nonce_m, &device_key, &ch.spake, &spake_a);
+        let t = |role| transcript(role, &binding, &ch.swarm_id, &ch.coordinator_key, &ch.nonce, nonce_m, &device_key, &ch.spake, &spake_a);
         let signature = hex::encode(key.sign(&t("member")).to_bytes());
         let confirm = shared.as_ref().map(|k| hex::encode(hmac(k, &t("member-confirm"))));
         let proof = Proof { device_key: device_key.clone(), signature, spake: (!spake_a.is_empty()).then(|| spake_a.clone()), confirm };
-        Ok((Self { ch: ch.clone(), nonce_m: nonce_m.into(), device_key, spake_a, shared }, proof))
+        Ok((Self { binding, ch: ch.clone(), nonce_m: nonce_m.into(), device_key, spake_a, shared }, proof))
     }
 
     /// Check the coordinator's closing proof. On a first join this is what proves the
     /// coordinator knew the passphrase too, so its key can be pinned.
     pub fn finish(self, p: &CoordinatorProof) -> Result<()> {
-        let t = |role| transcript(role, &self.ch.swarm_id, &self.ch.coordinator_key, &self.ch.nonce, &self.nonce_m, &self.device_key, &self.ch.spake, &self.spake_a);
+        let t = |role| transcript(role, &self.binding, &self.ch.swarm_id, &self.ch.coordinator_key, &self.ch.nonce, &self.nonce_m, &self.device_key, &self.ch.spake, &self.spake_a);
         parse_key(&self.ch.coordinator_key)?.verify(&t("coordinator"), &parse_sig(&p.signature)?).map_err(|_| anyhow!("the coordinator's signature does not verify"))?;
         if let Some(k) = &self.shared {
             let c = p.confirm.as_ref().ok_or_else(|| anyhow!("the coordinator did not confirm the passphrase"))?;
@@ -448,6 +453,25 @@ mod tests {
         assert_ne!(Device { master: [8; 32] }.swarm_key("home").verifying_key(), d.swarm_key("home").verifying_key());
     }
 
+    /// A TLS exporter value (the same on both ends of one session).
+    const B: [u8; 32] = [5; 32];
+
+    /// A machine in the middle holds two TLS sessions (one to each side), so the two ends see
+    /// different exporter values, and the signatures do not carry over.
+    #[test]
+    fn a_relay_between_two_tls_sessions_is_detected() {
+        let (ck, dk) = keys();
+        let dkey = key_hex(&dk.verifying_key());
+        let (hs, ch) = CoordinatorHandshake::start(&[1; 32], "s", "home", &ck, "pass-phrase");
+        let (m, proof) = MemberHandshake::answer(&[2; 32], &ch, "n", &dk, Some(&ch.coordinator_key), None).unwrap();
+        assert!(hs.verify(&ck, "n", &proof, |k| k == dkey).is_err(), "the coordinator sees the relay");
+        // And the other way: a proof made in one session does not convince the device in another.
+        let (hs, ch) = CoordinatorHandshake::start(&[1; 32], "s", "home", &ck, "pass-phrase");
+        let (_, proof) = MemberHandshake::answer(&[1; 32], &ch, "n", &dk, Some(&ch.coordinator_key), None).unwrap();
+        let (_, cp) = hs.verify(&ck, "n", &proof, |k| k == dkey).unwrap();
+        assert!(m.finish(&cp).is_err(), "the device sees the relay");
+    }
+
     fn keys() -> (SigningKey, SigningKey) {
         (Device { master: [1; 32] }.swarm_key("s"), Device { master: [2; 32] }.swarm_key("s"))
     }
@@ -456,15 +480,15 @@ mod tests {
     fn first_join_with_the_right_passphrase_then_reconnect_without_it() {
         let (ck, dk) = keys();
         // First join.
-        let (hs, ch) = CoordinatorHandshake::start("s", "home", &ck, "harbor-velvet-crab");
-        let (m, proof) = MemberHandshake::answer(&ch, "n1", &dk, None, Some("Harbor Velvet Crab")).unwrap();
+        let (hs, ch) = CoordinatorHandshake::start(&B, "s", "home", &ck, "harbor-velvet-crab");
+        let (m, proof) = MemberHandshake::answer(&B, &ch, "n1", &dk, None, Some("Harbor Velvet Crab")).unwrap();
         let (v, cp) = hs.verify(&ck, "n1", &proof, |_| false).unwrap();
         assert!(matches!(v, Verdict::Approve));
         m.finish(&cp).unwrap();
         // Reconnect: pinned key, no passphrase, key already approved.
         let dkey = key_hex(&dk.verifying_key());
-        let (hs, ch) = CoordinatorHandshake::start("s", "home", &ck, "harbor-velvet-crab");
-        let (m, proof) = MemberHandshake::answer(&ch, "n2", &dk, Some(&ch.coordinator_key), None).unwrap();
+        let (hs, ch) = CoordinatorHandshake::start(&B, "s", "home", &ck, "harbor-velvet-crab");
+        let (m, proof) = MemberHandshake::answer(&B, &ch, "n2", &dk, Some(&ch.coordinator_key), None).unwrap();
         assert!(proof.spake.is_none(), "the passphrase is not used on reconnect");
         let (v, cp) = hs.verify(&ck, "n2", &proof, |k| k == dkey).unwrap();
         assert!(matches!(v, Verdict::Known));
@@ -477,25 +501,25 @@ mod tests {
     fn known_devices_can_reprove_the_passphrase() {
         let (ck, dk) = keys();
         let dkey = key_hex(&dk.verifying_key());
-        let (hs, ch) = CoordinatorHandshake::start("s", "home", &ck, "pass-phrase");
-        let (m, proof) = MemberHandshake::answer(&ch, "n", &dk, Some("0".repeat(64).as_str()), Some("pass-phrase")).unwrap();
+        let (hs, ch) = CoordinatorHandshake::start(&B, "s", "home", &ck, "pass-phrase");
+        let (m, proof) = MemberHandshake::answer(&B, &ch, "n", &dk, Some("0".repeat(64).as_str()), Some("pass-phrase")).unwrap();
         let (v, cp) = hs.verify(&ck, "n", &proof, |k| k == dkey).unwrap();
         assert!(matches!(v, Verdict::Known) && cp.confirm.is_some());
         m.finish(&cp).unwrap();
-        let (hs, ch) = CoordinatorHandshake::start("s", "home", &ck, "pass-phrase");
-        let (_, proof) = MemberHandshake::answer(&ch, "n", &dk, Some(&ch.coordinator_key), Some("wrong")).unwrap();
+        let (hs, ch) = CoordinatorHandshake::start(&B, "s", "home", &ck, "pass-phrase");
+        let (_, proof) = MemberHandshake::answer(&B, &ch, "n", &dk, Some(&ch.coordinator_key), Some("wrong")).unwrap();
         assert!(hs.verify(&ck, "n", &proof, |k| k == dkey).is_err());
     }
 
     #[test]
     fn wrong_passphrase_and_unapproved_devices_are_refused() {
         let (ck, dk) = keys();
-        let (hs, ch) = CoordinatorHandshake::start("s", "home", &ck, "right-words-here");
-        let (_, proof) = MemberHandshake::answer(&ch, "n", &dk, None, Some("wrong-words-here")).unwrap();
+        let (hs, ch) = CoordinatorHandshake::start(&B, "s", "home", &ck, "right-words-here");
+        let (_, proof) = MemberHandshake::answer(&B, &ch, "n", &dk, None, Some("wrong-words-here")).unwrap();
         assert!(hs.verify(&ck, "n", &proof, |_| false).unwrap_err().to_string().contains("wrong passphrase"));
         // A device that skips the passphrase is not let in.
-        let (hs, ch) = CoordinatorHandshake::start("s", "home", &ck, "right-words-here");
-        let (_, proof) = MemberHandshake::answer(&ch, "n", &dk, Some(&ch.coordinator_key), None).unwrap();
+        let (hs, ch) = CoordinatorHandshake::start(&B, "s", "home", &ck, "right-words-here");
+        let (_, proof) = MemberHandshake::answer(&B, &ch, "n", &dk, Some(&ch.coordinator_key), None).unwrap();
         assert!(hs.verify(&ck, "n", &proof, |_| false).unwrap_err().to_string().contains("not approved"));
     }
 
@@ -504,12 +528,12 @@ mod tests {
         let (ck, dk) = keys();
         let impostor = Device { master: [9; 32] }.swarm_key("s");
         // The device pinned the real coordinator; an impostor's challenge is refused outright.
-        let (_, ch) = CoordinatorHandshake::start("s", "home", &impostor, "x");
+        let (_, ch) = CoordinatorHandshake::start(&B, "s", "home", &impostor, "x");
         let real = key_hex(&ck.verifying_key());
-        assert!(MemberHandshake::answer(&ch, "n", &dk, Some(&real), None).is_err());
+        assert!(MemberHandshake::answer(&B, &ch, "n", &dk, Some(&real), None).is_err());
         // On a first join, an impostor that does not know the passphrase cannot confirm it.
-        let (hs, ch) = CoordinatorHandshake::start("s", "home", &impostor, "guessed-wrong");
-        let (m, proof) = MemberHandshake::answer(&ch, "n", &dk, None, Some("right-words")).unwrap();
+        let (hs, ch) = CoordinatorHandshake::start(&B, "s", "home", &impostor, "guessed-wrong");
+        let (m, proof) = MemberHandshake::answer(&B, &ch, "n", &dk, None, Some("right-words")).unwrap();
         assert!(hs.verify(&impostor, "n", &proof, |_| false).is_err());
         let forged = CoordinatorProof { signature: hex::encode(impostor.sign(b"whatever").to_bytes()), confirm: Some("00".repeat(32)) };
         assert!(m.finish(&forged).is_err());
@@ -518,8 +542,8 @@ mod tests {
     #[test]
     fn tampering_with_the_exchange_breaks_it() {
         let (ck, dk) = keys();
-        let (hs, ch) = CoordinatorHandshake::start("s", "home", &ck, "pass-phrase");
-        let (_, mut proof) = MemberHandshake::answer(&ch, "n", &dk, None, Some("pass-phrase")).unwrap();
+        let (hs, ch) = CoordinatorHandshake::start(&B, "s", "home", &ck, "pass-phrase");
+        let (_, mut proof) = MemberHandshake::answer(&B, &ch, "n", &dk, None, Some("pass-phrase")).unwrap();
         // Swap in another device's key: the signature no longer matches.
         proof.device_key = key_hex(&Device { master: [3; 32] }.swarm_key("s").verifying_key());
         assert!(hs.verify(&ck, "n", &proof, |_| false).is_err());

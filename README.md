@@ -76,7 +76,7 @@ drops off can rejoin later without benchmarking again.
 | **Works** | One copy of a model is enough: other machines fetch only their share of the layers from the one that has it |
 | **Works** | Downloadable releases for Linux, macOS, Windows and Android (Termux), which can update themselves (signed) |
 | **In progress** | A desktop app with installers (Flatpak, .deb, .rpm, AppImage, .dmg, .exe) |
-| **Planned** | Chat in the dashboard, an OpenAI-compatible API for agent tools, a phone app, coordinator hand-over, encryption between devices |
+| **Planned** | Chat in the dashboard, an OpenAI-compatible API for agent tools, a phone app, coordinator hand-over |
 
 CI runs the tests on Linux (x86_64 and arm64), Windows and macOS. The Vulkan, CUDA and Android builds are
 compile-checked only. GPU inference has been tested by hand with Vulkan on an Apple M1 running Asahi Linux.
@@ -140,8 +140,9 @@ whether it steps aside while you use it. Change these from the **Settings** butt
 in the dashboard; see the [device settings guide](docs/device-settings.md).
 
 > [!WARNING]
-> The passphrase is never sent over the network, and only approved devices can join or download models. But the
-> connections themselves are not encrypted yet, and the dashboard has no login: only run Clamor on a network you trust.
+> The passphrase is never sent over the network, only approved devices can join or download models, and the
+> connections between devices are encrypted. But the dashboard has no login and is not encrypted yet: only run
+> Clamor on a network you trust.
 
 ## For developers
 

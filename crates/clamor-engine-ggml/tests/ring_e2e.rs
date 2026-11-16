@@ -122,6 +122,7 @@ async fn spawn_ring(execs: Vec<GgmlExecutor>, window: u32) -> Ring {
                 window,
                 connect_timeout: Duration::from_secs(5),
                 stall_timeout: clamor_transport::stage::DEFAULT_STALL_TIMEOUT,
+                tls: None,
             };
             run_stage(cfg, l, exec)
         })

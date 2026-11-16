@@ -130,16 +130,22 @@ Keys are kept in Clamor's config folder (`~/.config/clamor` on Linux,
 `~/Library/Application Support/clamor` on macOS, `%APPDATA%\clamor` on Windows), readable only by
 you: `device.key` is the device's secret, and `swarms/` holds one file per swarm.
 
+- **Connections are encrypted.** Each device's connection to the coordinator is TLS, and the
+  join handshake signs that very TLS session, so nothing can sit in the middle and relay it.
+  The links that carry a model's work between devices are TLS too, and each end accepts only
+  the certificate the coordinator told it to expect.
+
 ### Not yet
 
-- The connections are not encrypted yet: someone on your network could read what devices send each
-  other (prompts and replies included), although they cannot join or pretend to be a device.
+- The dashboard (port 7421) and model downloads between devices are not encrypted yet. Model
+  downloads only go to approved devices (signed requests), but someone on your network could
+  see the dashboard, and chat text sent through it.
 - The dashboard has no login: anyone on your network can open it.
 - A QR code for adding phones comes with the phone app.
 - Finding the swarm on the network is tested on Linux. Some networks (guest Wi-Fi, some
   corporate networks) block it; give the address instead.
 
-Only run Clamor on a network you trust until these are done.
+Only run Clamor on a network you trust until the dashboard is protected too.
 
 ## If something goes wrong
 

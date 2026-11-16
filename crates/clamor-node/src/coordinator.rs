@@ -28,6 +28,8 @@ pub struct NodeEntry {
     pub note: Option<String>,
     /// Bumped on every (re)join so a stale connection cannot overwrite a newer one.
     pub generation: u64,
+    /// The node's TLS certificate fingerprint (hex): its neighbours pin it on data links.
+    pub tls_fp: Option<String>,
     /// The node's address, as seen on its control connection.
     pub peer_ip: Option<IpAddr>,
     /// The coordinator's own address on that connection: how this node reaches us.
@@ -119,6 +121,9 @@ impl Invite {
 }
 
 pub struct Swarm {
+    /// This process's TLS certificate (control connections, and stage 0's data links).
+    pub tls: Arc<clamor_transport::tls::Identity>,
+    tls_server: Arc<tokio_rustls::rustls::ServerConfig>,
     pub name: String,
     pub auth: SwarmAuth,
     /// The one-time code in force, if any.
@@ -140,8 +145,13 @@ pub struct Swarm {
 }
 
 impl Swarm {
-    pub fn new(name: String, auth: SwarmAuth, coordinator: NodeId, engine: EngineConfig, data_port: u16, quick_bench: bool, share_port: Option<u16>) -> Self {
-        Swarm { name, auth, invite: None, join_hint: String::new(), coordinator, nodes: BTreeMap::new(), next_generation: 1, engine, data_port, quick_bench, pipeline: None, next_epoch: 1, share_port }
+    pub fn new(name: String, auth: SwarmAuth, coordinator: NodeId, mut engine: EngineConfig, data_port: u16, quick_bench: bool, share_port: Option<u16>) -> Self {
+        let tls = clamor_transport::tls::Identity::generate().expect("TLS certificate");
+        let tls_server = clamor_transport::tls::server_config(&tls, None).expect("TLS config");
+        engine.tls = Some(tls.clone());
+        Swarm {
+            tls,
+            tls_server, name, auth, invite: None, join_hint: String::new(), coordinator, nodes: BTreeMap::new(), next_generation: 1, engine, data_port, quick_bench, pipeline: None, next_epoch: 1, share_port }
     }
 
     /// A node that held a pipeline stage is gone: that pipeline cannot run any more.
@@ -188,6 +198,7 @@ pub async fn register_self(shared: Shared, id: NodeId, overrides: crate::neighbo
     let policy = overrides.for_swarm(&sw.auth.profile.swarm_id, info.class).unwrap_or_else(|| Policy::default_for(info.class));
     let generation = sw.next_generation;
     sw.next_generation += 1;
+    let my_fp = sw.tls.fingerprint_hex();
     let id = info.id.clone();
     sw.nodes.insert(
         id,
@@ -200,6 +211,7 @@ pub async fn register_self(shared: Shared, id: NodeId, overrides: crate::neighbo
             running_tasks: 0,
             note: Some("coordinator".into()),
             generation,
+            tls_fp: Some(my_fp),
             peer_ip: None,
             coord_ip: None,
             build: Some(crate::build_info::current()),
@@ -277,7 +289,14 @@ enum Admission {
 async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Result<()> {
     stream.set_nodelay(true)?;
     let coord_ip = stream.local_addr().ok().map(|a| a.ip());
-    let (mut rd, mut wr) = stream.into_split();
+    // Everything on the control connection is encrypted. A connection that does not complete
+    // TLS is a reachability check (or something that is not Clamor 0.5+): drop it quietly.
+    let acceptor = tokio_rustls::TlsAcceptor::from(shared.lock().unwrap().tls_server.clone());
+    let Ok(Ok(tls)) = timeout(Duration::from_secs(10), acceptor.accept(stream)).await else {
+        return Ok(());
+    };
+    let binding = clamor_transport::tls::exporter_server(tls.get_ref().1)?;
+    let (mut rd, mut wr) = tokio::io::split(tls);
 
     let hello = match timeout(Duration::from_secs(10), read_msg(&mut rd)).await? {
         Ok(m) => m,
@@ -285,7 +304,7 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
         Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
         Err(e) => return Err(e.into()),
     };
-    let Message::Hello { proto, info, bench_port, build, models, share_port, auth_nonce, invite } = hello else {
+    let Message::Hello { proto, info, bench_port, build, models, share_port, auth_nonce, invite, tls_fp } = hello else {
         write_msg(&mut wr, &Message::Reject { reason: "expected hello".into() }).await?;
         return Ok(());
     };
@@ -318,7 +337,7 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
     };
     let (hs, ch) = {
         let sw = shared.lock().unwrap();
-        crate::auth::CoordinatorHandshake::start(&sw.auth.profile.swarm_id, &sw.name, &sw.auth.key, &secret)
+        crate::auth::CoordinatorHandshake::start(&binding, &sw.auth.profile.swarm_id, &sw.name, &sw.auth.key, &secret)
     };
     write_msg(&mut wr, &Message::AuthChallenge { swarm_id: ch.swarm_id, swarm_name: ch.swarm_name, coordinator_key: ch.coordinator_key, nonce: ch.nonce, spake: ch.spake }).await?;
     let proof = match timeout(Duration::from_secs(30), read_msg(&mut rd)).await?? {
@@ -399,6 +418,7 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
                     running_tasks: 0,
                     note: if cached { Some("rejoined with cached benchmark".into()) } else { None },
                     generation,
+                    tls_fp: tls_fp.clone(),
                     peer_ip: Some(addr.ip()),
                     coord_ip,
                     build,

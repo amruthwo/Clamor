@@ -90,7 +90,9 @@ pub struct Credentials {
 /// `rediscover`: when the coordinator cannot be reached, look for the same swarm on the local
 /// network (it may have a new address).
 #[allow(clippy::too_many_arguments)]
-pub async fn join(mut addr: String, creds: Credentials, id: Option<String>, engine: EngineConfig, updates: update::Policy, overrides: crate::neighbour::Overrides, rediscover: bool) -> Result<()> {
+pub async fn join(mut addr: String, creds: Credentials, id: Option<String>, mut engine: EngineConfig, updates: update::Policy, overrides: crate::neighbour::Overrides, rediscover: bool) -> Result<()> {
+    // This process's TLS certificate: neighbours pin it on data links.
+    engine.tls = Some(clamor_transport::tls::Identity::generate()?);
     let update_flag: update::UpdateFlag = Default::default();
     if updates.check || updates.auto {
         update::spawn_checker(update_flag.clone());
@@ -169,11 +171,16 @@ async fn session(addr: &str, creds: &Credentials, allowed: &share::AllowedKeys, 
 
     let stream = TcpStream::connect(addr).await?;
     stream.set_nodelay(true)?;
-    let (mut rd, mut wr) = stream.into_split();
+    // Encrypted. Any certificate is accepted here: the join handshake below signs this TLS
+    // session's exporter, which is what proves who is on the other end.
+    let connector = tokio_rustls::TlsConnector::from(clamor_transport::tls::client_config(None, None)?);
+    let tls = timeout(Duration::from_secs(10), connector.connect(clamor_transport::tls::server_name(), stream)).await??;
+    let binding = clamor_transport::tls::exporter_client(tls.get_ref().1)?;
+    let (mut rd, mut wr) = tokio::io::split(tls);
     let nonce_m = hex::encode(crate::auth::random_bytes::<16>());
     // A one-time code is good for the first join only; reconnects use this device's key.
     let code = creds.code.as_deref().filter(|_| swarm_id.is_none());
-    write_msg(&mut wr, &Message::Hello { proto: PROTOCOL_VERSION, info, bench_port, build: Some(crate::build_info::current()), auth_nonce: Some(nonce_m.clone()), invite: code.is_some(), models: models.clone(), share_port: Some(share_port) }).await?;
+    write_msg(&mut wr, &Message::Hello { proto: PROTOCOL_VERSION, info, bench_port, build: Some(crate::build_info::current()), auth_nonce: Some(nonce_m.clone()), invite: code.is_some(), tls_fp: engine.tls.as_ref().map(|t| t.fingerprint_hex()), models: models.clone(), share_port: Some(share_port) }).await?;
 
     // The coordinator's challenge: prove we are approved (or know the passphrase), and check
     // that it is the coordinator we joined before (or knows the passphrase).
@@ -184,7 +191,7 @@ async fn session(addr: &str, creds: &Credentials, allowed: &share::AllowedKeys, 
     };
     let profile = crate::auth::MemberProfile::load(&creds.config_dir, &ch.swarm_id);
     let key = creds.device.swarm_key(&ch.swarm_id);
-    let (hs, proof) = match crate::auth::MemberHandshake::answer(&ch, &nonce_m, &key, profile.as_ref().map(|p| p.coordinator_key.as_str()), code.or(creds.passphrase.as_deref())) {
+    let (hs, proof) = match crate::auth::MemberHandshake::answer(&binding, &ch, &nonce_m, &key, profile.as_ref().map(|p| p.coordinator_key.as_str()), code.or(creds.passphrase.as_deref())) {
         Ok(v) => v,
         Err(e) => {
             let _ = write_msg(&mut wr, &Message::Leave).await;
@@ -350,13 +357,13 @@ async fn session(addr: &str, creds: &Credentials, allowed: &share::AllowedKeys, 
                     Message::Ping { seq, sent_unix_ms } => {
                         write_msg(&mut wr, &Message::Pong { seq, sent_unix_ms }).await?;
                     }
-                    Message::ShardAssign { model, epoch, session, stage_index, stage_count, layer_start, layer_end, listen_port, downstream, act_dtype, n_ctx, embed, sampling, source, model_id, max_requests, need_bytes } => {
+                    Message::ShardAssign { model, epoch, session, stage_index, stage_count, layer_start, layer_end, listen_port, downstream, act_dtype, n_ctx, embed, sampling, source, model_id, max_requests, need_bytes, upstream_tls, downstream_tls } => {
                         println!("assigned stage {stage_index}/{stage_count}: layers {layer_start}..{layer_end} of {model} (epoch {epoch})");
                         slot.stop(); // a new epoch supersedes whatever ran before
                         if let Some(src) = &source {
                             println!("  fetching the slice from {src}");
                         }
-                        let a = Assignment { model, epoch, session, stage_index, stage_count, layer_start, layer_end, listen_port, downstream, act_dtype, n_ctx, embed, sampling, source, model_id, max_requests, need_bytes, policy };
+                        let a = Assignment { model, epoch, session, stage_index, stage_count, layer_start, layer_end, listen_port, downstream, act_dtype, n_ctx, embed, sampling, source, model_id, max_requests, need_bytes, upstream_tls, downstream_tls, policy };
                         slot.epoch = Some(epoch);
                         slot.loading = Some(spawn_stage(engine.clone(), a, stx.clone()));
                     }

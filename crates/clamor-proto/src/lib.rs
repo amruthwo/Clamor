@@ -14,7 +14,10 @@ use std::io::{self, Read, Write};
 /// `Welcome.auth`, `Approved`; the plain join token is gone.
 /// v4: settings per swarm: the device sends its owner's settings for this swarm after Welcome
 /// (`OwnerPolicy`), no longer in `Hello`.
-pub const PROTOCOL_VERSION: u16 = 4;
+/// v5: encrypted connections: the control connection is TLS (the join handshake signs the TLS
+/// exporter), and data links are TLS with certificates pinned by fingerprint (`Hello.tls_fp`,
+/// `ShardAssign.upstream_tls/downstream_tls`).
+pub const PROTOCOL_VERSION: u16 = 5;
 /// Model sharing: every node serves layer slices of the models it holds on this HTTP port.
 pub const DEFAULT_SHARE_PORT: u16 = 7423;
 /// First data-plane port: stage `i` listens on `DEFAULT_DATA_PORT + i`.
@@ -328,6 +331,9 @@ pub enum Message {
         /// The device joins with a one-time code from "Add device", not the passphrase.
         #[serde(default)]
         invite: bool,
+        /// SHA-256 of this node's TLS certificate (hex): its neighbours pin it on data links.
+        #[serde(default)]
+        tls_fp: Option<String>,
         /// Models this node holds.
         #[serde(default)]
         models: Vec<ModelInfo>,
@@ -474,6 +480,12 @@ pub enum Message {
         /// The model's `ModelInfo::id`, so a node never mixes up two files with one name.
         #[serde(default)]
         model_id: Option<String>,
+        /// TLS certificate fingerprints (hex) of the upstream and downstream neighbours: the
+        /// data links accept only them.
+        #[serde(default)]
+        upstream_tls: Option<String>,
+        #[serde(default)]
+        downstream_tls: Option<String>,
         /// Most requests in flight at once, sized so every stage's KV caches fit in memory.
         #[serde(default)]
         max_requests: Option<u32>,
@@ -584,7 +596,7 @@ mod tests {
 
     #[test]
     fn hello_roundtrip() {
-        let msg = Message::Hello { proto: PROTOCOL_VERSION, info: sample_info(), bench_port: 7422, build: None, auth_nonce: None, invite: false, models: vec![ModelInfo { name: "m.gguf".into(), size: 9, id: "ab".into() }], share_port: Some(7423) };
+        let msg = Message::Hello { proto: PROTOCOL_VERSION, info: sample_info(), bench_port: 7422, build: None, auth_nonce: None, invite: false, tls_fp: None, models: vec![ModelInfo { name: "m.gguf".into(), size: 9, id: "ab".into() }], share_port: Some(7423) };
         let mut buf = Vec::new();
         write_frame(&mut buf, &msg).unwrap();
         let back = read_frame(&mut buf.as_slice()).unwrap();
@@ -621,7 +633,7 @@ mod tests {
     fn older_hello_and_heartbeat_still_parse() {
         let hb = r#"{"type":"heartbeat","cpu_load":0.5,"ram_available_bytes":1,"power":null,"running_tasks":0}"#;
         assert!(matches!(decode(hb.as_bytes()).unwrap(), Message::Heartbeat { update_available: None, .. }));
-        let mut hello = serde_json::to_value(Message::Hello { proto: PROTOCOL_VERSION, info: sample_info(), bench_port: 1, build: None, auth_nonce: None, invite: false, models: vec![], share_port: None }).unwrap();
+        let mut hello = serde_json::to_value(Message::Hello { proto: PROTOCOL_VERSION, info: sample_info(), bench_port: 1, build: None, auth_nonce: None, invite: false, tls_fp: None, models: vec![], share_port: None }).unwrap();
         for k in ["build", "models", "share_port", "auth_nonce"] {
             hello.as_object_mut().unwrap().remove(k);
         }
@@ -646,6 +658,8 @@ mod tests {
             sampling: SamplingParams { temperature: 0.7, top_k: 40, seed: 5 },
             source: Some("http://192.168.1.20:7423".into()),
             model_id: Some("ab12".into()),
+            upstream_tls: None,
+            downstream_tls: Some("ff".repeat(32)),
             max_requests: Some(4),
             need_bytes: Some(1 << 30),
         };

@@ -130,7 +130,14 @@ impl MockRing {
 /// Build a loopback ring. `bounds` are the layer boundaries, e.g. `[0, 10, 25, 32]` makes
 /// three stages holding layers 0..10, 10..25 and 25..32.
 pub async fn spawn_mock_ring(bounds: &[u32], hidden: u32, per_layer: Duration, vocab: u32, window: u32, epoch: u32) -> MockRing {
+    spawn_mock_ring_with(bounds, hidden, per_layer, vocab, window, epoch, false).await
+}
+
+/// `spawn_mock_ring`, optionally with every link on TLS (each stage its own certificate,
+/// pinned by its neighbours).
+pub async fn spawn_mock_ring_with(bounds: &[u32], hidden: u32, per_layer: Duration, vocab: u32, window: u32, epoch: u32, tls: bool) -> MockRing {
     let n = bounds.len() - 1;
+    let ids: Vec<_> = (0..n).map(|_| crate::tls::Identity::generate().unwrap()).collect();
     let mut listeners = Vec::new();
     let mut addrs: Vec<SocketAddr> = Vec::new();
     for _ in 0..n {
@@ -153,6 +160,7 @@ pub async fn spawn_mock_ring(bounds: &[u32], hidden: u32, per_layer: Duration, v
             window,
             connect_timeout: Duration::from_secs(5),
             stall_timeout: crate::stage::DEFAULT_STALL_TIMEOUT,
+            tls: tls.then(|| Arc::new(crate::link::LinkTls { identity: ids[i].clone(), upstream: ids[(i + n - 1) % n].fingerprint, downstream: ids[(i + 1) % n].fingerprint })),
         };
         debug_assert_eq!(role_of(cfg.stage_index, cfg.stage_count) == crate::stage::Role::Solo, n == 1);
         stages.push(run_stage(cfg, listener, exec));
@@ -189,6 +197,17 @@ mod tests {
             assert_eq!(reason, DoneReason::MaxTokens);
             assert_eq!(toks, reference_tokens(p, 20, 32, VOCAB), "prompt {p:?}");
         }
+        ring.stop();
+    }
+
+    /// The same ring with every link encrypted (pinned certificates) computes the same tokens.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn an_encrypted_ring_matches_the_reference() {
+        let ring = spawn_mock_ring_with(&[0, 10, 25, 32], 64, Duration::ZERO, VOCAB, 8, 1, true).await;
+        let (_, rx) = ring.head().submit(vec![1, 2, 3], 20);
+        let (toks, reason) = collect(rx).await;
+        assert_eq!(reason, DoneReason::MaxTokens);
+        assert_eq!(toks, reference_tokens(&[1, 2, 3], 20, 32, VOCAB));
         ring.stop();
     }
 
@@ -262,7 +281,7 @@ mod tests {
             if i + 1 == n {
                 exec.eos = Some(first);
             }
-            let cfg = StageConfig { stage_index: i as u32, stage_count: n as u32, epoch: 1, session: 7, downstream: Some(addrs[(i + 1) % n]), window: 4, connect_timeout: Duration::from_secs(5), stall_timeout: crate::stage::DEFAULT_STALL_TIMEOUT };
+            let cfg = StageConfig { stage_index: i as u32, stage_count: n as u32, epoch: 1, session: 7, downstream: Some(addrs[(i + 1) % n]), window: 4, connect_timeout: Duration::from_secs(5), stall_timeout: crate::stage::DEFAULT_STALL_TIMEOUT, tls: None };
             handles.push(run_stage(cfg, l, exec));
         }
         let (_, rx) = handles[0].head.as_ref().unwrap().submit(vec![9, 9], 50);
@@ -296,7 +315,7 @@ mod tests {
                     exec.fail_from_pos = Some(6);
                 }
                 released.push(exec.released.clone());
-                let cfg = StageConfig { stage_index: i as u32, stage_count: n as u32, epoch: 1, session: 7, downstream: Some(addrs[(i + 1) % n]), window: 4, connect_timeout: Duration::from_secs(5), stall_timeout: crate::stage::DEFAULT_STALL_TIMEOUT };
+                let cfg = StageConfig { stage_index: i as u32, stage_count: n as u32, epoch: 1, session: 7, downstream: Some(addrs[(i + 1) % n]), window: 4, connect_timeout: Duration::from_secs(5), stall_timeout: crate::stage::DEFAULT_STALL_TIMEOUT, tls: None };
                 handles.push(run_stage(cfg, l, exec));
             }
             let head = handles[0].head.as_ref().unwrap();
@@ -347,7 +366,7 @@ mod tests {
             // The middle stage takes 3 s per step, against a 0.5 s stall timeout: frozen.
             let per_layer = if i == 1 { Duration::from_millis(300) } else { Duration::ZERO };
             let exec = MockExecutor::new(bounds[i]..bounds[i + 1], i + 1 == n, 16, per_layer, VOCAB);
-            let cfg = StageConfig { stage_index: i as u32, stage_count: n as u32, epoch: 1, session: 7, downstream: Some(addrs[(i + 1) % n]), window: 4, connect_timeout: Duration::from_secs(5), stall_timeout: Duration::from_millis(500) };
+            let cfg = StageConfig { stage_index: i as u32, stage_count: n as u32, epoch: 1, session: 7, downstream: Some(addrs[(i + 1) % n]), window: 4, connect_timeout: Duration::from_secs(5), stall_timeout: Duration::from_millis(500), tls: None };
             handles.push(run_stage(cfg, l, exec));
         }
         let t0 = std::time::Instant::now();

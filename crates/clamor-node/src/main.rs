@@ -244,7 +244,7 @@ impl EngineArgs {
     fn config(self, share_key: Option<ed25519_dalek::SigningKey>, swarm_id: Option<String>) -> stage::EngineConfig {
         let cache_dir = self.cache_dir.unwrap_or_else(default_cache_dir);
         let cache_max = (self.cache_max_gb.max(0.0) * 1e9) as u64;
-        stage::EngineConfig { models_dir: self.models, device: self.device, threads: self.threads, cache_dir, share_key, swarm_id, cache_max }
+        stage::EngineConfig { models_dir: self.models, device: self.device, threads: self.threads, cache_dir, share_key, swarm_id, cache_max, tls: None }
     }
 }
 

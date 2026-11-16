@@ -451,6 +451,18 @@ fn devices_join_by_passphrase_and_rejoin_by_key() {
     assert_eq!(pass.split('-').count(), 5, "{pass}");
     assert!(!std::fs::read_dir(format!("{coord_cfg}/swarms")).unwrap().next().is_none());
 
+    // The control connection is TLS only: a plaintext hello gets no plaintext answer.
+    {
+        let mut raw = TcpStream::connect(("127.0.0.1", ctrl)).unwrap();
+        raw.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let hello = br#"{"type":"hello","proto":5}"#;
+        raw.write_all(&(hello.len() as u32).to_be_bytes()).unwrap();
+        raw.write_all(hello).unwrap();
+        let mut got = Vec::new();
+        let _ = raw.read_to_end(&mut got);
+        assert!(!String::from_utf8_lossy(&got).contains("reject"), "plaintext answer: {got:?}");
+    }
+
     // First join: no passphrase, or a wrong one, is refused.
     let mut m = member("member-nopass", &[&ctrl_s]);
     assert!(!exits(&mut m, Duration::from_secs(30)));

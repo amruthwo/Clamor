@@ -789,3 +789,60 @@ fn people_roles_and_signing_in() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Asking to join: no code or passphrase. The device shows a check code; an admin sees the same
+/// code in the dashboard and approves (or declines). Approved, it is a member like any other.
+#[test]
+fn asking_to_join_waits_for_an_admin() {
+    let dir = std::env::temp_dir().join(format!("clamor-node-ask-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("models")).unwrap();
+    let models = dir.join("models").display().to_string();
+    let (ctrl, portal, tls_port, data) = (free_port(), free_port(), free_port(), free_port_run(1));
+    let (ctrl_s, portal_s, tls_s, data_s) = (format!("127.0.0.1:{ctrl}"), format!("127.0.0.1:{portal}"), format!("127.0.0.1:{tls_port}"), data.to_string());
+    let coord = spawn(&dir, "coordinator", &["coordinator", "--swarm", "home", "--passphrase", "ask-test", "--id", "coord", "--bind", &ctrl_s, "--portal", &portal_s, "--portal-tls", &tls_s, "--models", &models, "--data-port", &data_s, "--quick-bench", "--no-update-check", "--config-dir", &cfg_dir(&dir, "coordinator"), "--participation", "full", "--allow-battery"]);
+    wait_for("the portal", Duration::from_secs(120), &[&coord], || TcpStream::connect(("127.0.0.1", portal)).is_ok());
+    let cfg = cfg_dir(&dir, "member");
+    let ask = |name: &'static str| spawn(&dir, name, &["join", &ctrl_s, "--ask", "--name", "Cal", "--dashboard", "off", "--id", "cal", "--models", &models, "--no-update-check", "--config-dir", &cfg, "--participation", "full", "--allow-battery"]);
+    let pending = |m: &Proc| -> (String, String) {
+        let mut found = (String::new(), String::new());
+        wait_for("the request to join", Duration::from_secs(30), &[&coord, m], || {
+            let (_, r) = http(portal, "GET", "/api/joins", None);
+            match r["joins"].as_array().and_then(|j| j.first()) {
+                Some(j) => {
+                    found = (j["id"].as_str().unwrap().to_string(), j["code"].as_str().unwrap().to_string());
+                    true
+                }
+                None => false,
+            }
+        });
+        found
+    };
+    let shown = |m: &Proc| m.log().split("Check code: ").nth(1).map(|s| s.lines().next().unwrap().trim().to_string());
+
+    // Declined: the device is told, and leaves.
+    let mut m = ask("ask-declined");
+    let (id, code) = pending(&m);
+    assert_eq!(shown(&m).as_deref(), Some(code.as_str()), "both screens show the same check code\n{}", m.log());
+    assert_eq!(http(portal, "POST", &format!("/api/joins/{id}/decline"), None).0, 200);
+    assert!(!exits(&mut m, Duration::from_secs(30)));
+    assert!(m.log().contains("declined"), "{}", m.log());
+
+    // Approved: it joins as Cal, a member.
+    let m = ask("ask-approved");
+    let (id, code) = pending(&m);
+    assert_eq!(shown(&m).as_deref(), Some(code.as_str()));
+    assert_eq!(http(portal, "POST", &format!("/api/joins/{id}/approve"), None).0, 200);
+    wait_for("Cal to join", Duration::from_secs(60), &[&coord, &m], || {
+        let (_, r) = http(portal, "GET", "/api/roster", None);
+        m.log().contains("joined swarm") && r["nodes"].as_array().is_some_and(|ns| ns.iter().any(|n| n["id"] == "cal" && n["state"] == "ready"))
+    });
+    let (_, ppl) = http(portal, "GET", "/api/people", None);
+    assert!(ppl["people"].as_array().unwrap().iter().any(|p| p["name"] == "Cal" && p["role"] == "member"), "{ppl}");
+    drop(m);
+    // And rejoins by its key, without asking again.
+    let m = spawn(&dir, "rejoin", &["join", &ctrl_s, "--dashboard", "off", "--id", "cal", "--models", &models, "--no-update-check", "--config-dir", &cfg, "--participation", "full", "--allow-battery"]);
+    wait_for("Cal to rejoin", Duration::from_secs(60), &[&coord, &m], || m.log().contains("joined swarm"));
+    assert!(!m.log().contains("Check code"), "{}", m.log());
+    let _ = std::fs::remove_dir_all(&dir);
+}

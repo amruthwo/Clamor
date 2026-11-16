@@ -29,9 +29,10 @@ The app asks what this computer should do:
 - **Start a swarm.** This computer becomes the coordinator. Give the swarm a name; Clamor makes up
   a passphrase, shown at the top of the window. Add other devices with **Add device** in the
   dashboard (a one-time code), or give them the passphrase.
-- **Join a swarm.** The app lists the swarms it finds on your network. Pick one, type the code
-  from **Add device** (or the passphrase), and press **Join**. If nothing is found, type the
-  coordinator's address.
+- **Join a swarm.** The app lists the swarms it finds on your network. Pick one, give your name,
+  type the code from **Add device** (or the passphrase), and press **Join**. Or leave the code
+  empty to **ask**: the app shows a check code, and someone who runs the swarm approves your
+  device in the dashboard. If nothing is found, type the coordinator's address.
 
 Tick **Start Clamor when I log in** to have it start with your computer, in the tray.
 

@@ -144,6 +144,23 @@ pub struct Invite {
     pub person: Option<String>,
 }
 
+/// A device asking to join, waiting for an admin.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct PendingJoin {
+    pub id: String,
+    pub device: String,
+    pub person_name: String,
+    pub from: String,
+    /// The check code both screens show.
+    pub code: String,
+    pub created_unix: u64,
+    /// None: waiting; Some(true): approved; Some(false): declined.
+    pub decision: Option<bool>,
+}
+
+/// How long a device asking to join waits for approval.
+pub const ASK_SECS: u64 = 600;
+
 /// How long a one-time code works, and how many wrong tries it survives.
 pub const INVITE_SECS: u64 = 600;
 pub const INVITE_TRIES: u32 = 3;
@@ -167,6 +184,8 @@ pub struct Swarm {
     pub join_hint: String,
     /// Port of the encrypted (HTTPS) dashboard, once listening.
     pub portal_tls_port: Option<u16>,
+    /// Devices asking to join.
+    pub joins: Vec<PendingJoin>,
     pub coordinator: NodeId,
     pub nodes: BTreeMap<NodeId, NodeEntry>,
     next_generation: u64,
@@ -188,7 +207,7 @@ impl Swarm {
         engine.tls = Some(tls.clone());
         Swarm {
             tls,
-            tls_server, name, auth, invite: None, join_hint: String::new(), portal_tls_port: None, coordinator, nodes: BTreeMap::new(), next_generation: 1, engine, data_port, quick_bench, pipeline: None, next_epoch: 1, share_port }
+            tls_server, name, auth, invite: None, join_hint: String::new(), portal_tls_port: None, joins: Vec::new(), coordinator, nodes: BTreeMap::new(), next_generation: 1, engine, data_port, quick_bench, pipeline: None, next_epoch: 1, share_port }
     }
 
     /// A node that held a pipeline stage is gone: that pipeline cannot run any more.
@@ -341,7 +360,7 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
         Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
         Err(e) => return Err(e.into()),
     };
-    let Message::Hello { proto, info, bench_port, build, models, share_port, auth_nonce, invite, tls_fp, person_name } = hello else {
+    let Message::Hello { proto, info, bench_port, build, models, share_port, auth_nonce, invite, tls_fp, person_name, ask } = hello else {
         write_msg(&mut wr, &Message::Reject { reason: "expected hello".into() }).await?;
         return Ok(());
     };
@@ -388,7 +407,7 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
     let verified = {
         let mut sw = shared.lock().unwrap();
         let key = sw.auth.key.clone();
-        let r = hs.verify(&key, &nonce_m, &proof, |k| sw.auth.profile.approved.iter().any(|d| d.key == k));
+        let r = hs.verify(&key, &nonce_m, &proof, |k| sw.auth.profile.approved.iter().any(|d| d.key == k), ask && !invite);
         if invite && proof.spake.is_some() {
             // One-time: used up by a success; a few wrong tries cancel it.
             match &r {
@@ -410,7 +429,43 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
             // Everyone's share servers must now accept the new device.
             sw.broadcast_approved();
         }
-        r.map(|(_, cp)| cp)
+        r
+    };
+    // Asking to join: wait for an admin to approve it in the dashboard.
+    let verified = match verified {
+        Ok((crate::auth::Verdict::Ask, cp)) => {
+            let code = crate::auth::check_code(&binding, &crate::auth::key_hex(&shared.lock().unwrap().auth.key.verifying_key()), &proof.device_key);
+            let id = hex::encode(crate::auth::random_bytes::<8>());
+            {
+                let mut sw = shared.lock().unwrap();
+                sw.joins.retain(|j| j.created_unix + ASK_SECS > unix_now());
+                sw.joins.push(PendingJoin { id: id.clone(), device: info.id.0.clone(), person_name: person_name.clone().unwrap_or_else(|| info.id.0.clone()), from: addr.ip().to_string(), code: code.clone(), created_unix: unix_now(), decision: None });
+            }
+            println!("{} ({}) asks to join; check code {code}: approve it in the dashboard", info.id, addr.ip());
+            let t0 = std::time::Instant::now();
+            let decision = loop {
+                let d = shared.lock().unwrap().joins.iter().find(|j| j.id == id).map(|j| j.decision);
+                match d {
+                    Some(Some(d)) => break Some(d),
+                    None => break None, // dropped
+                    Some(None) if t0.elapsed() > Duration::from_secs(ASK_SECS) => break None,
+                    Some(None) => sleep(Duration::from_millis(300)).await,
+                }
+            };
+            shared.lock().unwrap().joins.retain(|j| j.id != id);
+            match decision {
+                Some(true) => {
+                    let mut sw = shared.lock().unwrap();
+                    sw.auth.approve(&proof.device_key, &info.id.0, None, person_name.as_deref());
+                    sw.broadcast_approved();
+                    println!("{} approved in the dashboard", info.id);
+                    Ok(cp)
+                }
+                Some(false) => Err(anyhow::anyhow!("your request to join was declined")),
+                None => Err(anyhow::anyhow!("nobody approved the request to join in time: ask again")),
+            }
+        }
+        other => other.map(|(_, cp)| cp),
     };
     let cproof = match verified {
         Ok(v) => v,

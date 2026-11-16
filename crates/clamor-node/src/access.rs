@@ -82,6 +82,8 @@ pub fn required(method: &Method, path: &str) -> Option<Role> {
         | ("POST", ["api", "nodes", _, "remove"])
         | ("POST", ["api", "nodes", _, "person"])
         | ("POST", ["api", "people", _, "remove"])
+        | ("GET", ["api", "joins"])
+        | ("POST", ["api", "joins", _, _])
         | ("POST", ["api", "pipeline"])
         | ("DELETE", ["api", "pipeline"]) => Some(Role::Admin),
         _ => Some(Role::Member),
@@ -133,6 +135,8 @@ mod tests {
         assert_eq!(required(&post, "/api/pipeline"), Some(Role::Admin));
         assert_eq!(required(&get, "/api/pipeline"), Some(Role::Member));
         assert_eq!(required(&post, "/api/people/p/role"), Some(Role::Owner));
+        assert_eq!(required(&get, "/api/joins"), Some(Role::Admin));
+        assert_eq!(required(&post, "/api/joins/j/approve"), Some(Role::Admin));
         assert_eq!(required(&get, "/api/anything-new"), Some(Role::Member), "unknown routes are not open");
         assert!(Role::Owner > Role::Admin && Role::Admin > Role::Member);
     }

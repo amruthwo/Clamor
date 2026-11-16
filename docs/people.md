@@ -19,6 +19,9 @@ Every device in the device list shows whose it is. You can change the settings o
 devices (how much memory and CPU Clamor may use, when it pauses); only admins can change other
 people's.
 
+Admins also see devices **asking to join** (see [joining](joining.md)): approve one only if it
+shows the same check code as the dashboard.
+
 ## Signing in
 
 You rarely need to:

@@ -64,6 +64,21 @@ Capitals, spaces and dashes in the passphrase do not matter: `Harbor Velvet Crab
 works too. If you would rather not type it on the command line (where other users of the same
 computer could see it), put it in the `CLAMOR_PASSPHRASE` environment variable instead.
 
+### By asking, with no code at all
+
+If someone who can add people (an admin, or the owner) is at hand, the new device can simply
+ask:
+
+```bash
+clamor-node join --ask --name "Cal"
+```
+
+(or, in the app, press **Join** with the code left empty). The device shows a **check code**,
+and the dashboard shows "*cal-thinkpad* wants to join as Cal" with a check code too. If the two
+codes match, press **Approve**; otherwise **Decline**. Matching codes prove the dashboard is
+approving *that* device, not something else on the network asking at the same moment. The
+request waits up to ten minutes.
+
 ## Coming back
 
 Once a device has joined, it remembers the swarm. From then on:
@@ -153,6 +168,7 @@ you: `device.key` is the device's secret, and `swarms/` holds one file per swarm
 |---|---|
 | `first join: this needs the swarm's passphrase` | This device has not joined this swarm before. Add `--passphrase`. |
 | `wrong passphrase` | The words do not match the swarm's. `clamor-node swarms` on the coordinator shows them. |
+| `your request to join was declined` / `nobody approved the request to join in time` | Ask again while someone is at the dashboard, or use a code or the passphrase. |
 | `wrong code` / `that code has expired or was already used` | Make a new one: **Add device** in the dashboard. |
 | `this swarm's coordinator key changed since you joined` | The coordinator was reinstalled, its config folder was deleted, or something else is answering at its address. If you expected this, join again with `--passphrase`. |
 | `several swarms on the network` | Name the one you want: `--swarm home`. |

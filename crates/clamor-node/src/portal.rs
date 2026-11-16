@@ -48,6 +48,8 @@ pub async fn serve(bind: String, tls_bind: String, shared: Shared) -> anyhow::Re
         .route("/api/people/{id}/role", post(person_role))
         .route("/api/people/{id}/remove", post(person_remove))
         .route("/api/nodes/{id}/person", post(node_person))
+        .route("/api/joins", get(joins))
+        .route("/api/joins/{id}/{decision}", post(decide_join))
         .layer(axum::middleware::from_fn_with_state(shared.clone(), crate::access::layer))
         .with_state(shared.clone());
 
@@ -696,5 +698,26 @@ async fn node_person(State(shared): State<Shared>, Path(id): Path<String>, Json(
         auth.profile.people.retain(|p| p.id != old);
     }
     auth.save();
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// Devices asking to join (admins approve them after comparing the check code).
+async fn joins(State(shared): State<Shared>) -> Json<Value> {
+    let sw = shared.lock().unwrap();
+    let now = unix_now();
+    let list: Vec<&crate::coordinator::PendingJoin> = sw.joins.iter().filter(|j| j.decision.is_none() && j.created_unix + crate::coordinator::ASK_SECS > now).collect();
+    Json(json!({ "joins": list }))
+}
+
+async fn decide_join(State(shared): State<Shared>, Extension(caller): Extension<Caller>, Path((id, decision)): Path<(String, String)>) -> ApiResult {
+    let yes = match decision.as_str() {
+        "approve" => true,
+        "decline" => false,
+        _ => return Err((StatusCode::NOT_FOUND, "approve or decline".into())),
+    };
+    let mut sw = shared.lock().unwrap();
+    let j = sw.joins.iter_mut().find(|j| j.id == id && j.decision.is_none()).ok_or((StatusCode::NOT_FOUND, "no such request (it may have timed out)".to_string()))?;
+    j.decision = Some(yes);
+    println!("{} {} {}'s request to join", caller.name, if yes { "approved" } else { "declined" }, j.device);
     Ok(Json(json!({ "ok": true })))
 }

@@ -60,7 +60,8 @@
       <div class="found" id="found"><span class="mute">Looking on your network…</span></div>
       <label>Or its address <input id="join-addr" placeholder="e.g. 192.168.1.20" autocomplete="off"></label>
       <label>Your name <input id="join-name" placeholder="shown to the others in the swarm" autocomplete="name"></label>
-      <label>Code or passphrase <input id="join-secret" placeholder="six-digit code from “Add device”, or the five words" autocomplete="off"></label>
+      <label>Code or passphrase <input id="join-secret" placeholder="code from “Add device”, the five words, or nothing to ask" autocomplete="off"></label>
+      <div class="mute" id="ask-status"></div>
       <button class="primary" id="join-go">Join</button>
     </form>
   </div>
@@ -94,6 +95,7 @@ async function refresh() {
   $('setup').hidden = set;
   $('running').hidden = !set;
   $('no-node').hidden = st.node_found;
+  $('ask-status').textContent = !set && st.running && !st.joined && st.check_code ? `Asking to join. Check code ${st.check_code}: an admin approves this device in the swarm's dashboard when it shows the same code.` : '';
   if (!set) return;
   $('swarm-name').textContent = st.setup.swarm || 'swarm';
   $('role').textContent = st.setup.mode === 'coordinator' ? 'coordinator (this computer)' : 'member';

@@ -88,6 +88,8 @@ pub struct Credentials {
     pub person_name: Option<String>,
     /// Where to serve the swarm's dashboard on this device (normally 127.0.0.1:7421).
     pub dashboard: Option<String>,
+    /// Ask to join without a secret: an admin approves it (`--ask`).
+    pub ask: bool,
     pub config_dir: std::path::PathBuf,
 }
 
@@ -193,7 +195,8 @@ async fn session(addr: &str, creds: &Credentials, allowed: &share::AllowedKeys, 
     let nonce_m = hex::encode(crate::auth::random_bytes::<16>());
     // A one-time code is good for the first join only; reconnects use this device's key.
     let code = creds.code.as_deref().filter(|_| swarm_id.is_none());
-    write_msg(&mut wr, &Message::Hello { proto: PROTOCOL_VERSION, info, bench_port, build: Some(crate::build_info::current()), auth_nonce: Some(nonce_m.clone()), invite: code.is_some(), person_name: creds.person_name.clone(), tls_fp: engine.tls.as_ref().map(|t| t.fingerprint_hex()), models: models.clone(), share_port: Some(share_port) }).await?;
+    let asking = creds.ask && swarm_id.is_none() && code.is_none() && creds.passphrase.is_none();
+    write_msg(&mut wr, &Message::Hello { proto: PROTOCOL_VERSION, info, bench_port, build: Some(crate::build_info::current()), auth_nonce: Some(nonce_m.clone()), invite: code.is_some(), person_name: creds.person_name.clone(), ask: asking, tls_fp: engine.tls.as_ref().map(|t| t.fingerprint_hex()), models: models.clone(), share_port: Some(share_port) }).await?;
 
     // The coordinator's challenge: prove we are approved (or know the passphrase), and check
     // that it is the coordinator we joined before (or knows the passphrase).
@@ -204,16 +207,23 @@ async fn session(addr: &str, creds: &Credentials, allowed: &share::AllowedKeys, 
     };
     let profile = crate::auth::MemberProfile::load(&creds.config_dir, &ch.swarm_id);
     let key = creds.device.swarm_key(&ch.swarm_id);
-    let (hs, proof) = match crate::auth::MemberHandshake::answer(&binding, &ch, &nonce_m, &key, profile.as_ref().map(|p| p.coordinator_key.as_str()), code.or(creds.passphrase.as_deref())) {
+    let (hs, proof) = match crate::auth::MemberHandshake::answer(&binding, &ch, &nonce_m, &key, profile.as_ref().map(|p| p.coordinator_key.as_str()), code.or(creds.passphrase.as_deref()), asking) {
         Ok(v) => v,
         Err(e) => {
             let _ = write_msg(&mut wr, &Message::Leave).await;
             return Ok(Exit::Rejected(format!("{e:#}")));
         }
     };
+    if asking && profile.is_none() {
+        let code = crate::auth::check_code(&binding, &ch.coordinator_key, &proof.device_key);
+        println!("asking to join swarm '{}'. Check code: {code}", ch.swarm_name);
+        println!("an admin approves this in the swarm's dashboard; make sure it shows the same code.");
+    }
     write_msg(&mut wr, &Message::AuthProve { device_key: proof.device_key, signature: proof.signature, spake: proof.spake, confirm: proof.confirm }).await?;
 
-    let heartbeat_secs = match timeout(Duration::from_secs(30), read_msg(&mut rd)).await?? {
+    // Asking to join can take a while: someone has to approve it.
+    let wait = if asking { crate::coordinator::ASK_SECS + 30 } else { 30 };
+    let heartbeat_secs = match timeout(Duration::from_secs(wait), read_msg(&mut rd)).await?? {
         Message::Welcome { swarm, coordinator, heartbeat_secs, auth } => {
             let Some(auth) = auth else { bail!("the coordinator did not prove who it is") };
             if let Err(e) = hs.finish(&crate::auth::CoordinatorProof { signature: auth.signature, confirm: auth.confirm }) {

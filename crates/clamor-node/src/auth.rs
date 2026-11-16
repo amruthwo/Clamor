@@ -334,6 +334,9 @@ pub struct CoordinatorProof {
 
 #[derive(Debug)]
 pub enum Verdict {
+    /// A new device asking to join without a secret: an admin must approve it, after checking
+    /// that both screens show the same `check_code`.
+    Ask,
     /// A device the swarm already approved.
     Known,
     /// A new device that proved it knows the passphrase: approve its key.
@@ -350,7 +353,8 @@ impl CoordinatorHandshake {
 
     /// Check the device's proof. `approved` says whether a key is already approved. Returns the
     /// verdict and the coordinator's closing proof.
-    pub fn verify(self, key: &SigningKey, nonce_m: &str, proof: &Proof, approved: impl Fn(&str) -> bool) -> Result<(Verdict, CoordinatorProof)> {
+    /// `ask`: the device asked to join without a secret (see `Verdict::Ask`).
+    pub fn verify(self, key: &SigningKey, nonce_m: &str, proof: &Proof, approved: impl Fn(&str) -> bool, ask: bool) -> Result<(Verdict, CoordinatorProof)> {
         let device = parse_key(&proof.device_key)?;
         let spake_a = proof.spake.clone().unwrap_or_default();
         let t = |role| transcript(role, &self.binding, &self.swarm_id, &self.coordinator_key, &self.nonce_c, nonce_m, &proof.device_key, &self.spake_b, &spake_a);
@@ -363,6 +367,9 @@ impl CoordinatorHandshake {
         let (Some(a), Some(confirm)) = (&proof.spake, &proof.confirm) else {
             if known {
                 return Ok((verdict, CoordinatorProof { signature: mine, confirm: None }));
+            }
+            if ask {
+                return Ok((Verdict::Ask, CoordinatorProof { signature: mine, confirm: None }));
             }
             bail!("this device is not approved in this swarm: join with the swarm's passphrase");
         };
@@ -387,10 +394,11 @@ pub struct MemberHandshake {
 impl MemberHandshake {
     /// Answer a challenge. With a pinned key that matches and no passphrase, sign only;
     /// otherwise the passphrase is required and SPAKE2 runs.
-    pub fn answer(binding: &[u8; 32], ch: &Challenge, nonce_m: &str, key: &SigningKey, pinned: Option<&str>, passphrase: Option<&str>) -> Result<(Self, Proof)> {
+    /// `ask`: no secret; an admin approves the device after comparing `check_code`s.
+    pub fn answer(binding: &[u8; 32], ch: &Challenge, nonce_m: &str, key: &SigningKey, pinned: Option<&str>, passphrase: Option<&str>, ask: bool) -> Result<(Self, Proof)> {
         let binding = hex::encode(binding);
         let device_key = key_hex(&key.verifying_key());
-        let known = pinned == Some(ch.coordinator_key.as_str());
+        let known = pinned == Some(ch.coordinator_key.as_str()) || (ask && passphrase.is_none());
         if pinned.is_some() && !known && passphrase.is_none() {
             bail!("this swarm's coordinator key changed since you joined (a different coordinator, or someone impersonating it); rejoin with the passphrase if you expected this");
         }
@@ -422,6 +430,15 @@ impl MemberHandshake {
         }
         Ok(())
     }
+}
+
+/// The code both screens show when a device asks to join: from this TLS session and both keys,
+/// so it matches only if the device and the coordinator really talk to each other (a machine
+/// in the middle holds two TLS sessions, and its codes differ).
+pub fn check_code(binding: &[u8; 32], coordinator_key: &str, device_key: &str) -> String {
+    let h = Sha256::digest(format!("clamor-ask-v1|{}|{coordinator_key}|{device_key}", hex::encode(binding)).as_bytes());
+    let n = u32::from_le_bytes([h[0], h[1], h[2], h[3]]) % 1_000_000;
+    format!("{:03}-{:03}", n / 1000, n % 1000)
 }
 
 // ---------------------------------------------------------------- signed sharing requests
@@ -497,13 +514,33 @@ mod tests {
         let (ck, dk) = keys();
         let dkey = key_hex(&dk.verifying_key());
         let (hs, ch) = CoordinatorHandshake::start(&[1; 32], "s", "home", &ck, "pass-phrase");
-        let (m, proof) = MemberHandshake::answer(&[2; 32], &ch, "n", &dk, Some(&ch.coordinator_key), None).unwrap();
-        assert!(hs.verify(&ck, "n", &proof, |k| k == dkey).is_err(), "the coordinator sees the relay");
+        let (m, proof) = MemberHandshake::answer(&[2; 32], &ch, "n", &dk, Some(&ch.coordinator_key), None, false).unwrap();
+        assert!(hs.verify(&ck, "n", &proof, |k| k == dkey, false).is_err(), "the coordinator sees the relay");
         // And the other way: a proof made in one session does not convince the device in another.
         let (hs, ch) = CoordinatorHandshake::start(&[1; 32], "s", "home", &ck, "pass-phrase");
-        let (_, proof) = MemberHandshake::answer(&[1; 32], &ch, "n", &dk, Some(&ch.coordinator_key), None).unwrap();
-        let (_, cp) = hs.verify(&ck, "n", &proof, |k| k == dkey).unwrap();
+        let (_, proof) = MemberHandshake::answer(&[1; 32], &ch, "n", &dk, Some(&ch.coordinator_key), None, false).unwrap();
+        let (_, cp) = hs.verify(&ck, "n", &proof, |k| k == dkey, false).unwrap();
         assert!(m.finish(&cp).is_err(), "the device sees the relay");
+    }
+
+    /// Asking to join: no secret, the coordinator learns the device wants in (Verdict::Ask), and
+    /// both sides compute the same check code; a relay between two TLS sessions sees others.
+    #[test]
+    fn asking_to_join_gives_matching_check_codes() {
+        let (ck, dk) = keys();
+        let (hs, ch) = CoordinatorHandshake::start(&B, "s", "home", &ck, "pass-phrase");
+        let (m, proof) = MemberHandshake::answer(&B, &ch, "n", &dk, None, None, true).unwrap();
+        assert!(proof.spake.is_none());
+        let (v, cp) = hs.verify(&ck, "n", &proof, |_| false, true).unwrap();
+        assert!(matches!(v, Verdict::Ask));
+        m.finish(&cp).unwrap();
+        let dkey = key_hex(&dk.verifying_key());
+        assert_eq!(check_code(&B, &ch.coordinator_key, &dkey), check_code(&B, &ch.coordinator_key, &dkey));
+        assert_ne!(check_code(&B, &ch.coordinator_key, &dkey), check_code(&[6; 32], &ch.coordinator_key, &dkey), "another session, another code");
+        // Without asking, a device with no secret is still refused.
+        let (hs, ch) = CoordinatorHandshake::start(&B, "s", "home", &ck, "pass-phrase");
+        let (_, proof) = MemberHandshake::answer(&B, &ch, "n", &dk, None, None, true).unwrap();
+        assert!(hs.verify(&ck, "n", &proof, |_| false, false).is_err());
     }
 
     fn keys() -> (SigningKey, SigningKey) {
@@ -515,16 +552,16 @@ mod tests {
         let (ck, dk) = keys();
         // First join.
         let (hs, ch) = CoordinatorHandshake::start(&B, "s", "home", &ck, "harbor-velvet-crab");
-        let (m, proof) = MemberHandshake::answer(&B, &ch, "n1", &dk, None, Some("Harbor Velvet Crab")).unwrap();
-        let (v, cp) = hs.verify(&ck, "n1", &proof, |_| false).unwrap();
+        let (m, proof) = MemberHandshake::answer(&B, &ch, "n1", &dk, None, Some("Harbor Velvet Crab"), false).unwrap();
+        let (v, cp) = hs.verify(&ck, "n1", &proof, |_| false, false).unwrap();
         assert!(matches!(v, Verdict::Approve));
         m.finish(&cp).unwrap();
         // Reconnect: pinned key, no passphrase, key already approved.
         let dkey = key_hex(&dk.verifying_key());
         let (hs, ch) = CoordinatorHandshake::start(&B, "s", "home", &ck, "harbor-velvet-crab");
-        let (m, proof) = MemberHandshake::answer(&B, &ch, "n2", &dk, Some(&ch.coordinator_key), None).unwrap();
+        let (m, proof) = MemberHandshake::answer(&B, &ch, "n2", &dk, Some(&ch.coordinator_key), None, false).unwrap();
         assert!(proof.spake.is_none(), "the passphrase is not used on reconnect");
-        let (v, cp) = hs.verify(&ck, "n2", &proof, |k| k == dkey).unwrap();
+        let (v, cp) = hs.verify(&ck, "n2", &proof, |k| k == dkey, false).unwrap();
         assert!(matches!(v, Verdict::Known));
         m.finish(&cp).unwrap();
     }
@@ -536,25 +573,25 @@ mod tests {
         let (ck, dk) = keys();
         let dkey = key_hex(&dk.verifying_key());
         let (hs, ch) = CoordinatorHandshake::start(&B, "s", "home", &ck, "pass-phrase");
-        let (m, proof) = MemberHandshake::answer(&B, &ch, "n", &dk, Some("0".repeat(64).as_str()), Some("pass-phrase")).unwrap();
-        let (v, cp) = hs.verify(&ck, "n", &proof, |k| k == dkey).unwrap();
+        let (m, proof) = MemberHandshake::answer(&B, &ch, "n", &dk, Some("0".repeat(64).as_str()), Some("pass-phrase"), false).unwrap();
+        let (v, cp) = hs.verify(&ck, "n", &proof, |k| k == dkey, false).unwrap();
         assert!(matches!(v, Verdict::Known) && cp.confirm.is_some());
         m.finish(&cp).unwrap();
         let (hs, ch) = CoordinatorHandshake::start(&B, "s", "home", &ck, "pass-phrase");
-        let (_, proof) = MemberHandshake::answer(&B, &ch, "n", &dk, Some(&ch.coordinator_key), Some("wrong")).unwrap();
-        assert!(hs.verify(&ck, "n", &proof, |k| k == dkey).is_err());
+        let (_, proof) = MemberHandshake::answer(&B, &ch, "n", &dk, Some(&ch.coordinator_key), Some("wrong"), false).unwrap();
+        assert!(hs.verify(&ck, "n", &proof, |k| k == dkey, false).is_err());
     }
 
     #[test]
     fn wrong_passphrase_and_unapproved_devices_are_refused() {
         let (ck, dk) = keys();
         let (hs, ch) = CoordinatorHandshake::start(&B, "s", "home", &ck, "right-words-here");
-        let (_, proof) = MemberHandshake::answer(&B, &ch, "n", &dk, None, Some("wrong-words-here")).unwrap();
-        assert!(hs.verify(&ck, "n", &proof, |_| false).unwrap_err().to_string().contains("wrong passphrase"));
+        let (_, proof) = MemberHandshake::answer(&B, &ch, "n", &dk, None, Some("wrong-words-here"), false).unwrap();
+        assert!(hs.verify(&ck, "n", &proof, |_| false, false).unwrap_err().to_string().contains("wrong passphrase"));
         // A device that skips the passphrase is not let in.
         let (hs, ch) = CoordinatorHandshake::start(&B, "s", "home", &ck, "right-words-here");
-        let (_, proof) = MemberHandshake::answer(&B, &ch, "n", &dk, Some(&ch.coordinator_key), None).unwrap();
-        assert!(hs.verify(&ck, "n", &proof, |_| false).unwrap_err().to_string().contains("not approved"));
+        let (_, proof) = MemberHandshake::answer(&B, &ch, "n", &dk, Some(&ch.coordinator_key), None, false).unwrap();
+        assert!(hs.verify(&ck, "n", &proof, |_| false, false).unwrap_err().to_string().contains("not approved"));
     }
 
     #[test]
@@ -564,11 +601,11 @@ mod tests {
         // The device pinned the real coordinator; an impostor's challenge is refused outright.
         let (_, ch) = CoordinatorHandshake::start(&B, "s", "home", &impostor, "x");
         let real = key_hex(&ck.verifying_key());
-        assert!(MemberHandshake::answer(&B, &ch, "n", &dk, Some(&real), None).is_err());
+        assert!(MemberHandshake::answer(&B, &ch, "n", &dk, Some(&real), None, false).is_err());
         // On a first join, an impostor that does not know the passphrase cannot confirm it.
         let (hs, ch) = CoordinatorHandshake::start(&B, "s", "home", &impostor, "guessed-wrong");
-        let (m, proof) = MemberHandshake::answer(&B, &ch, "n", &dk, None, Some("right-words")).unwrap();
-        assert!(hs.verify(&impostor, "n", &proof, |_| false).is_err());
+        let (m, proof) = MemberHandshake::answer(&B, &ch, "n", &dk, None, Some("right-words"), false).unwrap();
+        assert!(hs.verify(&impostor, "n", &proof, |_| false, false).is_err());
         let forged = CoordinatorProof { signature: hex::encode(impostor.sign(b"whatever").to_bytes()), confirm: Some("00".repeat(32)) };
         assert!(m.finish(&forged).is_err());
     }
@@ -577,10 +614,10 @@ mod tests {
     fn tampering_with_the_exchange_breaks_it() {
         let (ck, dk) = keys();
         let (hs, ch) = CoordinatorHandshake::start(&B, "s", "home", &ck, "pass-phrase");
-        let (_, mut proof) = MemberHandshake::answer(&B, &ch, "n", &dk, None, Some("pass-phrase")).unwrap();
+        let (_, mut proof) = MemberHandshake::answer(&B, &ch, "n", &dk, None, Some("pass-phrase"), false).unwrap();
         // Swap in another device's key: the signature no longer matches.
         proof.device_key = key_hex(&Device { master: [3; 32] }.swarm_key("s").verifying_key());
-        assert!(hs.verify(&ck, "n", &proof, |_| false).is_err());
+        assert!(hs.verify(&ck, "n", &proof, |_| false, false).is_err());
     }
 
     #[test]

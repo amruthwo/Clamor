@@ -107,6 +107,10 @@ enum Cmd {
         /// of the passphrase.
         #[arg(long, conflicts_with = "passphrase")]
         code: Option<String>,
+        /// Ask to join without a code or passphrase: an admin approves this device in the
+        /// dashboard, after checking that both screens show the same check code.
+        #[arg(long, conflicts_with_all = ["passphrase", "code"])]
+        ask: bool,
         /// Your name, shown to the others in the swarm (first join; default: this device's name).
         #[arg(long)]
         name: Option<String>,
@@ -359,7 +363,7 @@ async fn run(cmd: Cmd, priority: Option<Priority>) -> Result<()> {
             });
             coordinator::run_listener(&bind, shared).await
         }
-        Cmd::Join { addr, swarm, no_mdns, passphrase, code, name, dashboard, id, engine, updates, policy } => {
+        Cmd::Join { addr, swarm, no_mdns, passphrase, code, ask, name, dashboard, id, engine, updates, policy } => {
             let config_dir = neighbour::config_dir();
             let addr = match addr {
                 Some(a) if a.contains(':') => a,
@@ -368,7 +372,7 @@ async fn run(cmd: Cmd, priority: Option<Priority>) -> Result<()> {
             };
             let engine = engine.config(None, None); // the key is per swarm: set once joined
             engine.validate()?;
-            let creds = member::Credentials { device: auth::Device::load_or_create(&config_dir)?, passphrase, code, person_name: name, dashboard: (dashboard != "off").then_some(dashboard), config_dir };
+            let creds = member::Credentials { device: auth::Device::load_or_create(&config_dir)?, passphrase, code, person_name: name, ask, dashboard: (dashboard != "off").then_some(dashboard), config_dir };
             member::join(addr, creds, id, engine, updates.policy(), policy.overrides(priority), !no_mdns).await
         }
         Cmd::Leave { swarm, purge, delete_swarm, cache_dir } => {

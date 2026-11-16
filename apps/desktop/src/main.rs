@@ -38,6 +38,8 @@ struct Node {
     passphrase: Option<String>,
     joined: bool,
     exited: Option<String>,
+    /// While asking to join: the code an admin compares.
+    check_code: Option<String>,
 }
 
 type Shared = Arc<Mutex<Node>>;
@@ -144,6 +146,9 @@ fn spawn_node(shared: &Shared, args: &[String]) -> Result<(), String> {
                 if let Some(p) = line.split("passphrase: ").nth(1).filter(|_| line.starts_with("swarm '")) {
                     n.passphrase = Some(p.trim().to_string());
                 }
+                if let Some(c) = line.split("Check code: ").nth(1) {
+                    n.check_code = Some(c.trim().to_string());
+                }
                 if line.starts_with("joined swarm") || line.starts_with("web portal on") {
                     n.joined = true;
                 }
@@ -249,6 +254,7 @@ fn status(shared: State<Shared>) -> Value {
         "joined": n.joined,
         "exited": n.exited,
         "passphrase": n.passphrase,
+        "check_code": n.check_code,
         "log": n.log.iter().rev().take(60).rev().collect::<Vec<_>>(),
         "models_dir": models_dir(),
     })
@@ -316,7 +322,11 @@ async fn join_swarm(shared: State<'_, Shared>, swarm: Option<String>, address: O
     } else if let Some(s) = &swarm {
         args.extend(["--swarm".into(), s.clone()]);
     }
-    // Six digits are a one-time code; anything else is the passphrase.
+    // Nothing: ask to join (an admin approves it). Six digits: a one-time code. Else the passphrase.
+    let asking = secret.is_empty();
+    if asking {
+        args.push("--ask".into());
+    }
     let digits: String = secret.chars().filter(|c| c.is_ascii_digit()).collect();
     if digits.len() == 6 && secret.chars().all(|c| c.is_ascii_digit() || c == '-' || c == ' ') {
         args.extend(["--code".into(), format!("{}-{}", &digits[..3], &digits[3..])]);
@@ -327,7 +337,7 @@ async fn join_swarm(shared: State<'_, Shared>, swarm: Option<String>, address: O
     let shared = shared.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         spawn_node(&shared, &args)?;
-        wait_joined(&shared, 45)?;
+        wait_joined(&shared, if asking { 640 } else { 45 })?;
         // The swarm's name, from what the node now remembers.
         let name = swarms_json(false).ok().and_then(|v| v["joined"][0]["name"].as_str().map(str::to_string)).or(swarm);
         save_setup(&Setup { mode: Some("member".into()), swarm: name })

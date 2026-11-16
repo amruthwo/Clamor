@@ -365,7 +365,7 @@ async function checkMe() {
   return true;
 }
 async function refreshPeople() {
-  const [ppl, pend] = await Promise.all([fetch('/api/people').then(r => r.json()), fetch('/api/login/pending').then(r => r.json())]);
+  const [ppl, pend, joins] = await Promise.all([fetch('/api/people').then(r => r.json()), fetch('/api/login/pending').then(r => r.json()), me.role === 'member' ? { joins: [] } : fetch('/api/joins').then(r => r.json())]);
   $('people').innerHTML = ppl.people.map(p => {
     let actions = '';
     if (me.role === 'owner' && p.role !== 'owner') actions += `<button onclick='setRole(${JSON.stringify(p.id)}, ${JSON.stringify(p.role === 'admin' ? 'member' : 'admin')})'>${p.role === 'admin' ? 'Make member' : 'Make admin'}</button> `;
@@ -373,11 +373,12 @@ async function refreshPeople() {
     return `<tr><td>${esc(p.name)}${p.id === me.id ? ' <small>(you)</small>' : ''}</td><td>${esc(p.role)}</td><td>${p.devices.map(esc).join(', ') || '<span class="mute">none</span>'}</td><td>${actions}</td></tr>`;
   }).join('');
   $('pin-row').innerHTML = `To sign in from a browser without approving a code, set a PIN: <button onclick='setPin()'>${me.has_pin ? 'Change my PIN' : 'Set my PIN'}</button>`;
-  $('approvals').innerHTML = pend.pending.map(s => `<div class="approve"><b>A browser (${esc(s.from)}) wants to sign in.</b> <span>If it shows <b>${esc(s.code)}</b> and it is you, approve it: it signs in as you.</span> <button class="primary" onclick='approveSignin(${JSON.stringify(s.code)})'>Approve as me</button></div>`).join('');
+  $('approvals').innerHTML = joins.joins.map(j => `<div class="approve"><b>${esc(j.device)} wants to join${j.person_name !== j.device ? ' as ' + esc(j.person_name) : ''}</b> <span class="mute">(from ${esc(j.from)})</span> <span>Approve only if the device shows the check code <b>${esc(j.code)}</b>.</span> <button class="primary" onclick='decideJoin(${JSON.stringify(j.id)}, "approve")'>Approve</button> <button onclick='decideJoin(${JSON.stringify(j.id)}, "decline")'>Decline</button></div>`).join('') + pend.pending.map(s => `<div class="approve"><b>A browser (${esc(s.from)}) wants to sign in.</b> <span>If it shows <b>${esc(s.code)}</b> and it is you, approve it: it signs in as you.</span> <button class="primary" onclick='approveSignin(${JSON.stringify(s.code)})'>Approve as me</button></div>`).join('');
 }
 window.setRole = (id, role) => post('/api/people/' + encodeURIComponent(id) + '/role', { role });
 window.removePerson = (id, name) => confirm(`Remove ${name} from the swarm? Their devices leave and need a new invitation to come back.`) && post('/api/people/' + encodeURIComponent(id) + '/remove');
 window.approveSignin = code => post('/api/login/approve', { code });
+window.decideJoin = (id, d) => post('/api/joins/' + encodeURIComponent(id) + '/' + d);
 window.setPin = async () => {
   const pin = prompt('New PIN (4 to 12 digits):');
   if (pin) post('/api/me/pin', { pin });

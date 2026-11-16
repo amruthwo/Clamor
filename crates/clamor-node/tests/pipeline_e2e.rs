@@ -565,7 +565,7 @@ fn devices_find_the_swarm_on_the_local_network() {
     let swarm = format!("e2e-{}", std::process::id());
     let coord = spawn(&dir, "coordinator", &["coordinator", "--swarm", &swarm, "--passphrase", "find-me-on-the-lan", "--id", "coord", "--bind", &ctrl_s, "--portal", &portal_s, "--models", &models, "--data-port", &data_s, "--quick-bench", "--no-update-check", "--config-dir", &cfg_dir(&dir, "coordinator"), "--participation", "full", "--allow-battery"]);
     wait_for("the portal", Duration::from_secs(120), &[&coord], || TcpStream::connect(("127.0.0.1", portal)).is_ok());
-    assert!(coord.log().contains("advertising"), "{}", coord.log());
+    wait_for("the coordinator to advertise the swarm", Duration::from_secs(10), &[&coord], || coord.log().contains("advertising"));
     let member_cfg = cfg_dir(&dir, "member");
     let member = |name: &'static str, extra: &[&str]| {
         let mut args = vec!["join"];

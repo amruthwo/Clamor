@@ -148,6 +148,9 @@ enum Cmd {
         /// Also list the swarms advertised on the local network now.
         #[arg(long)]
         scan: bool,
+        /// Machine-readable output (used by the desktop app). Passphrases are left out.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -394,10 +397,22 @@ async fn run(cmd: Cmd, priority: Option<Priority>) -> Result<()> {
             println!("on the new device: {}", r["command"].as_str().unwrap_or(""));
             Ok(())
         }
-        Cmd::Swarms { scan } => {
+        Cmd::Swarms { scan, json } => {
             let config_dir = neighbour::config_dir();
             let coordinated = auth::CoordinatorProfile::all(&config_dir);
             let joined = auth::MemberProfile::all(&config_dir);
+            if json {
+                let found = if scan { tokio::task::spawn_blocking(|| discovery::browse(std::time::Duration::from_secs(3))).await?? } else { Vec::new() };
+                let remembered: Vec<&str> = joined.iter().map(|p| p.swarm_id.as_str()).chain(coordinated.iter().map(|p| p.swarm_id.as_str())).collect();
+                let out = serde_json::json!({
+                    "coordinating": coordinated.iter().map(|p| serde_json::json!({ "id": p.swarm_id, "name": p.name, "approved_devices": p.approved.len() })).collect::<Vec<_>>(),
+                    "joined": joined.iter().map(|p| serde_json::json!({ "id": p.swarm_id, "name": p.name, "address": p.addresses.first(), "last_joined_unix": p.last_joined_unix })).collect::<Vec<_>>(),
+                    "on_network": found.iter().map(|f| serde_json::json!({ "id": f.swarm_id, "name": f.name, "addresses": f.addrs.iter().map(|a| a.to_string()).collect::<Vec<_>>(), "known": remembered.contains(&f.swarm_id.as_str()) })).collect::<Vec<_>>(),
+                    "cache_bytes": cache::size(&default_cache_dir()),
+                });
+                println!("{}", serde_json::to_string_pretty(&out)?);
+                return Ok(());
+            }
             if coordinated.is_empty() && joined.is_empty() {
                 println!("no swarms yet. Start one with `clamor-node coordinator`, or join one with `clamor-node join <coordinator> --passphrase <words>`.");
             }

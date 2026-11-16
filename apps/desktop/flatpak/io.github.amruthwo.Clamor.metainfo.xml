@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.amruthwo.Clamor</id>
+  <name>Clamor</name>
+  <summary>Pool the idle computers on your network to run local AI models</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <description>
+    <p>Clamor lets the computers and phones in your home team up to run AI models too big for any one of them. Start a swarm on one computer, join the others with a code, and chat with models that run entirely on your own devices.</p>
+  </description>
+  <launchable type="desktop-id">io.github.amruthwo.Clamor.desktop</launchable>
+  <url type="homepage">https://github.com/amruthwo/Clamor</url>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.4.0" date="2026-11-15"/>
+  </releases>
+</component>

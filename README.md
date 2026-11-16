@@ -75,14 +75,19 @@ drops off can rejoin later without benchmarking again.
 | **Works** | Llama 3.x, Qwen 2.5 and SmolLM2 models, including compressed (quantized) files; checked against a reference implementation |
 | **Works** | One copy of a model is enough: other machines fetch only their share of the layers from the one that has it |
 | **Works** | Downloadable releases for Linux, macOS, Windows and Android (Termux), which can update themselves (signed) |
-| **Planned** | Chat in the dashboard, an OpenAI-compatible API for agent tools, installers and a desktop app, a phone app, coordinator hand-over, encryption between devices |
+| **In progress** | A desktop app with installers (Flatpak, .deb, .rpm, AppImage, .dmg, .exe) |
+| **Planned** | Chat in the dashboard, an OpenAI-compatible API for agent tools, a phone app, coordinator hand-over, encryption between devices |
 
 CI runs the tests on Linux (x86_64 and arm64), Windows and macOS. The Vulkan, CUDA and Android builds are
 compile-checked only. GPU inference has been tested by hand with Vulkan on an Apple M1 running Asahi Linux.
 
 ## Try it
 
-You need [Rust](https://rustup.rs), CMake and a C++ compiler. Then:
+**With the desktop app** (Linux, macOS, Windows): install it from the
+[latest release](https://github.com/amruthwo/Clamor/releases/latest), then choose **Start a swarm** on one computer
+and **Join a swarm** on the others. See the [desktop app guide](docs/desktop-app.md).
+
+**From source**, with the command line: you need [Rust](https://rustup.rs), CMake and a C++ compiler. Then:
 
 ```bash
 git clone https://github.com/amruthwo/Clamor.git && cd Clamor

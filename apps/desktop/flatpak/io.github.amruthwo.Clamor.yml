@@ -1,0 +1,31 @@
+# Flatpak of the Clamor desktop app, built from the .deb the Tauri bundler makes
+# (build.sh puts it here as clamor.deb). The GNOME runtime provides the web view.
+id: io.github.amruthwo.Clamor
+runtime: org.gnome.Platform
+runtime-version: '48'
+sdk: org.gnome.Sdk
+command: clamor-desktop
+finish-args:
+  - --share=ipc
+  - --share=network        # the swarm, and finding it on the local network (mDNS)
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri           # GPU compute (Vulkan)
+  - --talk-name=org.kde.StatusNotifierWatcher   # tray icon
+modules:
+  - name: clamor
+    buildsystem: simple
+    sources:
+      - type: file
+        path: clamor.deb
+      - type: file
+        path: io.github.amruthwo.Clamor.metainfo.xml
+    build-commands:
+      - ar -x clamor.deb
+      - tar -xf data.tar.*
+      - install -Dm755 usr/bin/clamor-desktop /app/bin/clamor-desktop
+      - install -Dm755 usr/bin/clamor-node /app/bin/clamor-node
+      - install -Dm644 usr/share/applications/Clamor.desktop /app/share/applications/io.github.amruthwo.Clamor.desktop
+      - sed -i 's/^Icon=.*/Icon=io.github.amruthwo.Clamor/' /app/share/applications/io.github.amruthwo.Clamor.desktop
+      - for d in usr/share/icons/hicolor/*/apps; do size=$(basename $(dirname $d)); install -Dm644 $d/*.png /app/share/icons/hicolor/$size/apps/io.github.amruthwo.Clamor.png; done
+      - install -Dm644 io.github.amruthwo.Clamor.metainfo.xml /app/share/metainfo/io.github.amruthwo.Clamor.metainfo.xml

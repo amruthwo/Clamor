@@ -49,6 +49,10 @@ pub async fn serve(bind: String, tls_bind: String, shared: Shared) -> anyhow::Re
         .route("/api/people/{id}/remove", post(person_remove))
         .route("/api/nodes/{id}/person", post(node_person))
         .route("/api/joins", get(joins))
+        .route("/api/overview", get(overview))
+        .route("/api/chats", get(list_chats).post(new_chat))
+        .route("/api/chats/{id}", get(get_chat).delete(delete_chat))
+        .route("/api/chats/{id}/messages", post(send_chat))
         .route("/api/joins/{id}/{decision}", post(decide_join))
         .layer(axum::middleware::from_fn_with_state(shared.clone(), crate::access::layer))
         .with_state(shared.clone());
@@ -665,6 +669,7 @@ async fn person_remove(State(shared): State<Shared>, Extension(caller): Extensio
         return Err((StatusCode::FORBIDDEN, "only the owner can remove an admin".into()));
     }
     let keys = sw.auth.remove_person(&id);
+    sw.chats.remove_person(&id);
     let gone: Vec<NodeId> = sw.nodes.iter().filter(|(_, e)| e.key.as_ref().is_some_and(|k| keys.contains(k))).map(|(n, _)| n.clone()).collect();
     for n in &gone {
         if let Some(tx) = sw.nodes.get(n).and_then(|e| e.tx.clone()) {
@@ -720,4 +725,163 @@ async fn decide_join(State(shared): State<Shared>, Extension(caller): Extension<
     j.decision = Some(yes);
     println!("{} {} {}'s request to join", caller.name, if yes { "approved" } else { "declined" }, j.device);
     Ok(Json(json!({ "ok": true })))
+}
+
+// ---------------------------------------------------------------- conversations
+
+async fn list_chats(State(shared): State<Shared>, Extension(caller): Extension<Caller>) -> Json<Value> {
+    let sw = shared.lock().unwrap();
+    let g = sw.chats.get(crate::chats::GROUP);
+    Json(json!({ "conversations": sw.chats.list(&caller.person), "group": { "id": crate::chats::GROUP, "updated": g.map(|c| c.updated), "count": g.map(|c| c.messages.len()) } }))
+}
+
+async fn new_chat(State(shared): State<Shared>, Extension(caller): Extension<Caller>) -> Json<Value> {
+    let id = shared.lock().unwrap().chats.create(&caller.person, unix_now());
+    Json(json!({ "id": id }))
+}
+
+fn open_chat(sw: &crate::coordinator::Swarm, id: &str, caller: &Caller) -> Result<crate::chats::Conversation, (StatusCode, String)> {
+    if !sw.chats.can_open(id, &caller.person) {
+        return Err((StatusCode::NOT_FOUND, "no such conversation".into()));
+    }
+    Ok(sw.chats.get(id).cloned().expect("checked"))
+}
+
+async fn get_chat(State(shared): State<Shared>, Extension(caller): Extension<Caller>, Path(id): Path<String>) -> ApiResult {
+    let sw = shared.lock().unwrap();
+    Ok(Json(serde_json::to_value(open_chat(&sw, &id, &caller)?).unwrap()))
+}
+
+async fn delete_chat(State(shared): State<Shared>, Extension(caller): Extension<Caller>, Path(id): Path<String>) -> ApiResult {
+    let mut sw = shared.lock().unwrap();
+    let c = open_chat(&sw, &id, &caller)?;
+    if c.owner.is_none() {
+        return Err((StatusCode::BAD_REQUEST, "the group conversation cannot be deleted".into()));
+    }
+    sw.chats.delete(&id);
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct SendReq {
+    content: String,
+}
+
+/// Add a message to a conversation and get the model's reply (the whole conversation is the
+/// prompt, oldest messages dropped if it does not fit the context).
+async fn send_chat(State(shared): State<Shared>, Extension(caller): Extension<Caller>, Path(id): Path<String>, Json(req): Json<SendReq>) -> ApiResult {
+    let content = req.content.trim().to_string();
+    if content.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "say something".into()));
+    }
+    let conv = {
+        let mut sw = shared.lock().unwrap();
+        open_chat(&sw, &id, &caller)?;
+        sw.chats.append(&id, crate::chats::ChatMsg { role: "user".into(), content, by: Some(caller.name.clone()), at: unix_now(), tok_s: None, error: None });
+        sw.chats.get(&id).cloned().expect("exists")
+    };
+    let reply = match ready_pipeline(&shared) {
+        Err((_, e)) => Err(e),
+        Ok((head, _, n_ctx, tok)) => match tok {
+            None => Err("this model's tokenizer is not supported yet".to_string()),
+            Some(tok) => {
+                let mut msgs = crate::chats::model_messages(&conv);
+                let mut keep_system = usize::from(msgs.first().is_some_and(|m| m.role == "system"));
+                // Leave room for a reply; drop the oldest messages until the rest fits, and as a
+                // last resort the group's system note: the latest message always stays.
+                let budget = n_ctx.saturating_sub(256.min(n_ctx / 2)) as usize;
+                let prompt = loop {
+                    match encode_chat(&tok, &msgs) {
+                        Ok(p) if p.len() <= budget => break Ok(p),
+                        Ok(_) if msgs.len() > keep_system + 1 => {
+                            msgs.remove(keep_system);
+                        }
+                        Ok(_) if keep_system == 1 => {
+                            msgs.remove(0);
+                            keep_system = 0;
+                        }
+                        Ok(p) => break Ok(p),
+                        Err(e) => break Err(e.to_string()),
+                    }
+                };
+                match prompt {
+                    Err(e) => Err(e),
+                    Ok(p) if p.len() as u32 >= n_ctx => Err(format!("that message alone is longer than the model's context ({n_ctx} tokens)")),
+                    Ok(p) => {
+                        let room = n_ctx - p.len() as u32;
+                        let r = run(head, p, 1024.min(room)).await;
+                        match r.error {
+                            Some(e) => Err(e),
+                            None => Ok((tok.decode(&r.tokens, true), r.decode_tok_s)),
+                        }
+                    }
+                }
+            }
+        },
+    };
+    let now = unix_now();
+    let msg = match reply {
+        Ok((text, speed)) => crate::chats::ChatMsg { role: "assistant".into(), content: crate::chats::tidy_reply(&conv, &text), by: None, at: now, tok_s: speed.map(|s| s as f32), error: None },
+        Err(e) => crate::chats::ChatMsg { role: "assistant".into(), content: String::new(), by: None, at: now, tok_s: None, error: Some(e) },
+    };
+    let mut sw = shared.lock().unwrap();
+    if let Some(s) = msg.tok_s {
+        sw.speeds.push_back((now, s));
+        while sw.speeds.len() > 30 {
+            sw.speeds.pop_front();
+        }
+    }
+    sw.chats.append(&id, msg.clone());
+    Ok(Json(json!({ "message": msg })))
+}
+
+// ---------------------------------------------------------------- the home screen at a glance
+
+/// Everything the Home widgets show, in one call.
+async fn overview(State(shared): State<Shared>, Extension(caller): Extension<Caller>) -> Json<Value> {
+    let sw = shared.lock().unwrap();
+    let online = |e: &NodeEntry| e.state != NodeState::Away;
+    let total = sw.nodes.len();
+    let up = sw.nodes.values().filter(|e| online(e)).count();
+    let paused = sw.nodes.values().filter(|e| online(e) && e.paused.is_some()).count();
+    // People with at least one device here.
+    let mut here: Vec<String> = Vec::new();
+    let mut mine = Vec::new();
+    let mut pooled: u64 = 0;
+    for (id, e) in &sw.nodes {
+        let person = device_person(&sw, id, e);
+        if online(e) {
+            if let Some(p) = person.as_deref().and_then(|p| sw.auth.profile.person(p)) {
+                if !here.contains(&p.name) {
+                    here.push(p.name.clone());
+                }
+            }
+            if e.paused.is_none() {
+                pooled += crate::neighbour::ram_budget(&e.report.policy, e.report.info.ram_available_bytes, e.report.info.ram_total_bytes);
+            }
+        }
+        if person.as_deref() == Some(caller.person.as_str()) {
+            let in_model = sw.pipeline.as_ref().is_some_and(|p| p.stages.iter().any(|s| &s.node == id));
+            mine.push(json!({ "id": id, "state": e.state, "paused": e.paused, "in_model": in_model, "policy": e.report.policy }));
+        }
+    }
+    let model = sw.pipeline.as_ref().map(|p| {
+        let state = if p.failure().is_some() { "failed" } else if p.ready() { "ready" } else { "loading" };
+        json!({ "name": p.model, "state": state, "failure": p.failure(), "devices": p.stages.iter().map(|s| s.node.0.clone()).collect::<Vec<_>>(), "need_bytes": p.stages.iter().map(|s| s.need_bytes).sum::<u64>() })
+    });
+    let status = match sw.pipeline.as_ref() {
+        Some(p) if p.failure().is_some() => "problem",
+        _ if up == 0 => "problem",
+        _ if paused > 0 || up < total => "partly",
+        _ => "good",
+    };
+    Json(json!({
+        "swarm": sw.name,
+        "health": { "status": status, "online": up, "total": total, "paused": paused },
+        "people": { "here": here, "total": sw.auth.profile.people.len() },
+        "model": model,
+        "speeds": sw.speeds.iter().map(|(_, s)| s).collect::<Vec<_>>(),
+        "memory": { "pooled_bytes": pooled },
+        "mine": mine,
+    }))
 }

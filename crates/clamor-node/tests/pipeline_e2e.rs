@@ -635,3 +635,34 @@ fn devices_join_with_a_one_time_code() {
     drop(again);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Regression (seen on the macOS CI runner): the member ran its benchmark inside its message
+/// loop, so it sent no heartbeats meanwhile and the coordinator timed it out after 30 s. The
+/// standard benchmark takes about a minute on real devices.
+#[test]
+fn a_long_benchmark_does_not_stop_heartbeats() {
+    let dir = std::env::temp_dir().join(format!("clamor-node-bench-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("models")).unwrap();
+    let models = dir.join("models").display().to_string();
+    let (ctrl, portal, data) = (free_port(), free_port(), free_port_run(1));
+    let (ctrl_s, portal_s, data_s) = (format!("127.0.0.1:{ctrl}"), format!("127.0.0.1:{portal}"), data.to_string());
+    let coord = spawn(&dir, "coordinator", &["coordinator", "--passphrase", "slow-bench", "--id", "coord", "--bind", &ctrl_s, "--portal", &portal_s, "--models", &models, "--data-port", &data_s, "--quick-bench", "--no-update-check", "--config-dir", &cfg_dir(&dir, "coordinator"), "--participation", "full", "--allow-battery"]);
+    wait_for("the portal", Duration::from_secs(120), &[&coord], || TcpStream::connect(("127.0.0.1", portal)).is_ok());
+    let log = dir.join("member.log");
+    let f = std::fs::File::create(&log).unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_clamor-node"))
+        .args(["join", &ctrl_s, "--passphrase", "slow-bench", "--id", "m", "--models", &models, "--no-update-check", "--config-dir", &cfg_dir(&dir, "member"), "--participation", "full", "--allow-battery"])
+        .env("CLAMOR_TEST_BENCH_DELAY_SECS", "40")
+        .stdout(Stdio::from(f.try_clone().unwrap()))
+        .stderr(Stdio::from(f))
+        .spawn()
+        .unwrap();
+    let m = Proc(child, "member", log);
+    wait_for("the member to finish a 40 s benchmark", Duration::from_secs(150), &[&coord, &m], || {
+        let (_, r) = http(portal, "GET", "/api/roster", None);
+        r["nodes"].as_array().is_some_and(|ns| ns.iter().any(|n| n["id"] == "m" && n["state"] == "ready"))
+    });
+    assert!(!coord.log().contains("heartbeat timeout"), "{}", coord.log());
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -51,16 +51,24 @@ fn tune(stream: &TcpStream) -> io::Result<()> {
 }
 
 impl Link {
-    /// Connect to `addr`, retrying until `timeout` (neighbours start in any order).
+    /// Connect to `addr`, retrying until `timeout` (neighbours start in any order). The whole
+    /// handshake is retried, not just the TCP connect: when a pipeline restarts, the port can
+    /// still belong to the previous pipeline's listener for a moment, which then resets the
+    /// connection or refuses our epoch before the new listener takes over.
     pub async fn connect(addr: SocketAddr, p: LinkParams, timeout: Duration) -> io::Result<Link> {
         let deadline = Instant::now() + timeout;
-        let mut stream = loop {
-            match TcpStream::connect(addr).await {
-                Ok(s) => break s,
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now()).max(Duration::from_millis(100));
+            match Self::try_connect(addr, p, left).await {
+                Ok(link) => return Ok(link),
                 Err(e) if Instant::now() >= deadline => return Err(e),
                 Err(_) => tokio::time::sleep(Duration::from_millis(40)).await,
             }
-        };
+        }
+    }
+
+    async fn try_connect(addr: SocketAddr, p: LinkParams, timeout: Duration) -> io::Result<Link> {
+        let mut stream = TcpStream::connect(addr).await?;
         tune(&stream)?;
         write_frame(&mut stream, &Frame::ctrl(Kind::Hello, p.epoch, p.session, p.stage).with_window(p.window)).await?;
         stream.flush().await?;
@@ -228,6 +236,26 @@ mod tests {
         let (c, a) = tokio::join!(Link::connect(addr, stale, Duration::from_secs(2)), Link::accept(&l, mine));
         assert!(c.is_err());
         assert!(a.is_err());
+    }
+
+    /// Regression (seen on CI): a restarted pipeline's head reached the member's port while the
+    /// previous pipeline's listener was closing; the reset failed the whole pipeline. A link
+    /// now retries until the real listener answers.
+    #[tokio::test]
+    async fn connect_retries_when_the_first_listener_hangs_up() {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let p = LinkParams { epoch: 2, session: 42, stage: 0, window: 4 };
+        let q = LinkParams { stage: 1, ..p };
+        let server = async {
+            // The old stage: accepts and hangs up without a word.
+            let (s, _) = l.accept().await.unwrap();
+            drop(s);
+            Link::accept(&l, q).await
+        };
+        let (c, a) = tokio::join!(Link::connect(addr, p, Duration::from_secs(5)), server);
+        assert_eq!(c.expect("connect should retry").peer_stage, 1);
+        assert!(a.is_ok());
     }
 
     #[tokio::test]

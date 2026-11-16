@@ -254,6 +254,7 @@ async fn session(addr: &str, creds: &Credentials, allowed: &share::AllowedKeys, 
     // Something the owner should know about the last settings change (e.g. needs a restart).
     let settings_note: Option<String> = None;
     let (stx, mut srx) = unbounded_channel::<StageEvent>();
+    let (btx, mut brx) = unbounded_channel::<BenchReport>();
     let mut slot = Slot::default();
 
     loop {
@@ -264,6 +265,9 @@ async fn session(addr: &str, creds: &Credentials, allowed: &share::AllowedKeys, 
                     models = now;
                     write_msg(&mut wr, &Message::Inventory { models: models.clone() }).await?;
                 }
+            }
+            Some(report) = brx.recv() => {
+                write_msg(&mut wr, &Message::BenchResult { report }).await?;
             }
             Some(ev) = srx.recv() => match ev {
                 StageEvent::Progress { epoch, stage_index, done, total } => {
@@ -322,11 +326,20 @@ async fn session(addr: &str, creds: &Credentials, allowed: &share::AllowedKeys, 
                 };
                 match msg {
                     Message::BenchRequest { quick } => {
+                        // Off this loop: the standard benchmark takes about a minute, and
+                        // heartbeats must keep going meanwhile (the coordinator gives up on a
+                        // device after 30 s of silence).
                         println!("benchmarking at the coordinator's request...");
                         let (_, ram) = sampler.sample();
                         let opts = if quick { bench::BenchOptions::quick() } else { bench::BenchOptions::standard() };
-                        let report = tokio::task::spawn_blocking(move || bench::run(&opts, ram)).await?;
-                        write_msg(&mut wr, &Message::BenchResult { report }).await?;
+                        let btx = btx.clone();
+                        tokio::task::spawn_blocking(move || {
+                            // Test hook: make the benchmark outlast the heartbeat timeout.
+                            if let Some(s) = std::env::var("CLAMOR_TEST_BENCH_DELAY_SECS").ok().and_then(|s| s.parse().ok()) {
+                                std::thread::sleep(Duration::from_secs(s));
+                            }
+                            let _ = btx.send(bench::run(&opts, ram));
+                        });
                     }
                     Message::SetPolicy { policy: p } => {
                         println!("settings updated: {}", describe_policy(&p));

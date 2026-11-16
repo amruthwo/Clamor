@@ -65,6 +65,54 @@
   .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
   .code { font:600 34px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing:.08em; text-align:center; padding:8px 0; }
   .cmd { margin:0; padding:10px 12px; border:1px solid var(--line); border-radius:8px; white-space:pre-wrap; word-break:break-all; font-size:13px; }
+  /* Navigation */
+  nav.tabs { display:flex; gap:4px; flex-wrap:wrap; }
+  nav.tabs a { color:var(--mute); text-decoration:none; padding:6px 10px; border-radius:8px; font-size:14px; }
+  nav.tabs a[aria-current=page] { color:var(--ink); background:var(--bg); font-weight:600; }
+  .page-title { margin:4px 0 0; font-size:22px; }
+  /* Home widgets */
+  .widgets { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:12px; }
+  .widget { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:12px 14px; display:grid; gap:6px; align-content:start; min-height:118px; min-width:0; }
+  .widget > * { min-width:0; }
+  .widget h3 { margin:0; font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--mute); font-weight:600; }
+  .widget .big { font-size:22px; font-weight:650; line-height:1.1; }
+  .widget .cap { font-size:13px; color:var(--mute); }
+  .widget svg { display:block; }
+  .w-row { display:flex; align-items:center; gap:12px; }
+  .avatars { display:flex; }
+  .avatar { width:30px; height:30px; border-radius:50%; display:grid; place-items:center; color:#fff; font-size:12px; font-weight:650; border:2px solid var(--card); margin-left:-8px; }
+  .avatar:first-child { margin-left:0; }
+  .bar { height:10px; background:var(--bg); border-radius:99px; overflow:hidden; border:1px solid var(--line); }
+  .bar > span { display:block; height:100%; background:var(--accent); border-radius:99px; }
+  .chip { display:inline-block; font-size:12px; padding:1px 8px; border-radius:99px; background:var(--bg); color:var(--mute); }
+  .chip.ok { color:var(--ok); } .chip.warn { color:var(--warn); } .chip.bad { color:var(--bad); }
+  .mydev { display:flex; align-items:center; gap:8px; font-size:13px; }
+  .mydev span.name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  /* Chat */
+  .chatbox { display:grid; grid-template-columns:220px 1fr; min-height:420px; padding:0; overflow:hidden; }
+  .convs { border-right:1px solid var(--line); padding:10px; display:flex; flex-direction:column; gap:4px; overflow-y:auto; max-height:560px; }
+  .convs button { text-align:left; border:0; background:transparent; padding:7px 9px; border-radius:8px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .convs button[aria-current=true] { background:var(--bg); font-weight:600; }
+  .convs .new { color:var(--accent); }
+  .thread { display:flex; flex-direction:column; min-width:0; }
+  .msgs { flex:1; overflow-y:auto; padding:14px; display:flex; flex-direction:column; gap:10px; max-height:520px; }
+  .msg { max-width:min(80%, 640px); padding:9px 12px; border-radius:14px; white-space:pre-wrap; word-wrap:break-word; line-height:1.45; }
+  .msg.user { align-self:flex-end; background:var(--accent); color:#fff; border-bottom-right-radius:4px; }
+  .msg.assistant { align-self:flex-start; background:var(--bg); border-bottom-left-radius:4px; }
+  .msg .who { display:block; font-size:12px; opacity:.8; margin-bottom:2px; }
+  .msg .meta { display:block; font-size:11px; color:var(--mute); margin-top:4px; }
+  .msg.error { color:var(--bad); background:transparent; border:1px solid var(--bad); }
+  .composer { display:flex; gap:8px; padding:10px; border-top:1px solid var(--line); }
+  .composer textarea { flex:1; font:inherit; color:inherit; background:var(--card); border:1px solid var(--line); border-radius:10px; padding:8px 10px; resize:none; min-height:42px; max-height:160px; }
+  .empty { margin:auto; text-align:center; color:var(--mute); padding:24px; max-width:420px; }
+  .typing::after { content:'…'; animation: blink 1s steps(3) infinite; }
+  @keyframes blink { 50% { opacity:.3; } }
+  .convpick { display:none; }
+  @media (max-width: 700px) {
+    .chatbox { grid-template-columns:1fr; }
+    .convs { display:none; }
+    .convpick { display:block; margin:10px 10px 0; }
+  }
   @media (max-width: 520px) {
     .row { flex-wrap:wrap; } .row input[type=range] { flex-basis:100%; } .readout { text-align:left; min-width:0; }
     .dlg-foot { flex-wrap:wrap; } .dlg-foot .spacer { display:none; }
@@ -79,8 +127,12 @@
   <span class="mute" id="whoami"></span>
   <button id="signout" hidden>Sign out</button>
   <button id="add-device">Add device</button>
-  <button class="primary" id="muster">Re-muster</button>
 </header>
+<div style="background:var(--card);border-bottom:1px solid var(--line);padding:6px 14px" id="navbar" hidden>
+  <nav class="tabs" aria-label="Pages">
+    <a href="#home">Home</a><a href="#models">Models</a><a href="#people">People</a><a href="#devices">Devices</a><a href="#advanced">Advanced</a>
+  </nav>
+</div>
 <section id="signin" class="signin" hidden>
   <h2 style="text-transform:none;letter-spacing:0;font-size:22px;color:var(--ink)">Sign in</h2>
   <p>Ask someone already in the swarm to approve this code in their Clamor app or dashboard (or approve it yourself on one of your devices):</p>
@@ -97,16 +149,28 @@
 </section>
 <main id="main">
   <div id="approvals"></div>
-  <section><h2>Group</h2><div class="stats" id="stats"></div><div id="warnings"></div></section>
 
-  <section><h2>Devices</h2>
-    <table>
-      <thead><tr><th>Device</th><th>State</th><th>Type</th><th>Clamor</th><th class="num">RAM free</th><th class="num">Mem BW</th><th class="num">GFLOP/s</th><th class="num">RTT</th><th class="num">Link</th><th></th></tr></thead>
-      <tbody id="roster"></tbody>
-    </table>
+  <div data-page="home">
+    <div class="widgets" id="widgets"></div>
+  </div>
+  <section data-page="home" class="chatbox" aria-label="Chat">
+    <div class="convs" id="convs"></div>
+    <div class="thread">
+      <select class="convpick" id="convpick" aria-label="Conversation"></select>
+      <div class="msgs" id="msgs" aria-live="polite"></div>
+      <form class="composer" id="composer">
+        <textarea id="say" rows="1" placeholder="Message the model…" aria-label="Message"></textarea>
+        <button class="primary" id="send">Send</button>
+      </form>
+    </div>
   </section>
 
-  <section><h2>What can this group run?</h2>
+  <section data-page="models"><h2>Running now</h2><div id="running"></div></section>
+  <section data-page="models"><h2>Models in the swarm</h2>
+    <p class="mute" style="margin-top:0">Model files on the swarm's devices. One copy is enough: the other devices fetch the layers they run.</p>
+    <table><thead><tr><th>Model</th><th class="num">Size</th><th>On</th><th></th></tr></thead><tbody id="modelfiles"></tbody></table>
+  </section>
+  <section data-page="models"><h2>What could this group run?</h2>
     <div class="controls">
       Quant <select id="quant"><option>q4</option><option>q6</option><option>q8</option><option>f16</option></select>
       Context <select id="ctx"><option>4096</option><option selected>8192</option><option>16384</option><option>32768</option></select>
@@ -120,12 +184,23 @@
     <small id="assume"></small>
   </section>
 
-  <section><h2>Chat and tasks</h2>
-    <div class="chat"><input disabled placeholder="Chat and task console arrive in v0.2"><button disabled>Send</button></div>
-  </section>
-  <section><h2>People</h2>
+  <section data-page="people"><h2>People</h2>
     <table><thead><tr><th>Name</th><th>Role</th><th>Devices</th><th></th></tr></thead><tbody id="people"></tbody></table>
     <p class="mute" id="pin-row"></p>
+  </section>
+
+  <section data-page="devices"><h2>Devices</h2>
+    <table><thead><tr><th>Device</th><th>Whose</th><th>State</th><th class="num">Memory Clamor may use</th><th></th></tr></thead><tbody id="devlist"></tbody></table>
+  </section>
+
+  <section data-page="advanced"><h2>Group</h2><div class="stats" id="stats"></div><div id="warnings"></div>
+    <p><button id="muster">Re-run the muster</button> <span class="mute">Measures every device and link again.</span></p>
+  </section>
+  <section data-page="advanced"><h2>Measurements</h2>
+    <table>
+      <thead><tr><th>Device</th><th>State</th><th>Type</th><th>Clamor</th><th class="num">RAM free</th><th class="num">Mem BW</th><th class="num">GFLOP/s</th><th class="num">RTT</th><th class="num">Link</th></tr></thead>
+      <tbody id="roster"></tbody>
+    </table>
   </section>
 </main>
 <dialog id="invite" aria-labelledby="inv-title">
@@ -296,29 +371,57 @@ $('add-device').onclick = async () => {
 $('invite').onclose = () => clearInterval(inviteTimer);
 $('inv-copy').onclick = () => navigator.clipboard?.writeText($('inv-cmd').textContent);
 
+let roster = null;
 function renderRoster(data) {
-  $('sub').textContent = `swarm “${data.swarm}” · coordinator ${data.coordinator}`;
+  roster = data;
+  $('sub').textContent = `swarm “${data.swarm}”`;
   nodes = Object.fromEntries(data.nodes.map(n => [n.id, n]));
+  const stateText = n => n.paused ? `<span class="paused-chip" title="${esc(n.paused)}">paused · ${esc(n.paused)}</span>` : esc(n.state === 'away' ? (n.note || 'away') : n.state);
   $('roster').innerHTML = data.nodes.map(n => {
-    const r = n.report, b = r.bench, l = r.link, p = r.policy;
-    const paused = p.participation === 'paused';
-    const mine = me && (me.role !== 'member' || (n.person && n.person[0] === me.id));
-    const settings = mine ? `<button onclick='openSettings(${JSON.stringify(n.id)})'>Settings</button>` : '';
-    const actions = n.state === 'away' ? `<span class="mute">${esc(n.note || 'away')}</span> ${settings}`
-      : `${n.is_coordinator || !mine ? '' : `<button onclick='togglePause(${JSON.stringify(n.id)}, ${paused}, ${JSON.stringify(p)})'>${paused ? 'Resume' : 'Pause'}</button> `}${settings}`;
-    const state = n.paused ? `<span class="paused-chip" title="${esc(n.paused)}">paused · ${esc(n.paused)}</span>` : esc(n.state);
+    const r = n.report, b = r.bench, l = r.link;
     return `<tr class="${esc(n.state)}">
-      <td><span class="dot"></span>${esc(n.id)}${n.is_coordinator ? ' <small>(coordinator)</small>' : ''}${n.person ? ` <small>· ${esc(n.person[1])}</small>` : ''}</td><td>${state}</td>
+      <td><span class="dot"></span>${esc(n.id)}${n.is_coordinator ? ' <small>(coordinator)</small>' : ''}</td><td>${stateText(n)}</td>
       <td>${esc(r.info.class)} · ${esc(r.info.os)}/${esc(r.info.arch)}</td>
       <td>${n.build ? esc(n.build.version) + (n.build.variant !== 'cpu' ? ' · ' + esc(n.build.variant) : '') : '<span class="mute">older</span>'}${n.update_available ? ` <span class="mute" title="clamor-node update">→ ${esc(n.update_available)} available</span>` : ''}</td>
       <td class="num">${gib(r.info.ram_available_bytes)} / ${gib(r.info.ram_total_bytes)} GiB</td>
       <td class="num">${b ? b.mem_bw_gbps.toFixed(1) + ' GB/s' : '–'}</td>
       <td class="num">${b ? b.cpu_gflops_mt.toFixed(0) : '–'}</td>
       <td class="num">${l ? l.rtt_ms_p50.toFixed(1) + ' ms' : (n.is_coordinator ? 'local' : '–')}</td>
-      <td class="num">${l && l.up_mbps ? Math.min(l.up_mbps, l.down_mbps).toFixed(0) + ' Mbit/s' : '–'}</td>
-      <td>${actions}</td></tr>`;
-  }).join('') || '<tr><td colspan="10" class="mute">no devices yet</td></tr>';
+      <td class="num">${l && l.up_mbps ? Math.min(l.up_mbps, l.down_mbps).toFixed(0) + ' Mbit/s' : '–'}</td></tr>`;
+  }).join('') || '<tr><td colspan="9" class="mute">no devices yet</td></tr>';
+  // Devices page: yours first.
+  const ordered = [...data.nodes].sort((a, b) => (isMine(b) - isMine(a)) || a.id.localeCompare(b.id));
+  $('devlist').innerHTML = ordered.map(n => {
+    const p = n.report.policy, paused = p.participation === 'paused';
+    const can = me && (me.role !== 'member' || isMine(n));
+    const settings = can ? `<button onclick='openSettings(${JSON.stringify(n.id)})'>Settings</button>` : '';
+    const pause = can && !n.is_coordinator && n.state !== 'away' ? `<button onclick='togglePause(${JSON.stringify(n.id)}, ${paused}, ${JSON.stringify(p)})'>${paused ? 'Resume' : 'Pause'}</button> ` : '';
+    return `<tr class="${esc(n.state)}"><td><span class="dot"></span>${esc(n.id)}${n.is_coordinator ? ' <small>(coordinator)</small>' : ''}</td>
+      <td>${n.person ? esc(n.person[1]) + (isMine(n) ? ' <small>(you)</small>' : '') : '<span class="mute">–</span>'}</td><td>${stateText(n)}</td>
+      <td class="num">${Math.round(p.max_ram_fraction * 100)}% · ${gib(n.report.info.ram_total_bytes * p.max_ram_fraction)} GiB</td><td>${pause}${settings}</td></tr>`;
+  }).join('');
+  renderModelFiles(data);
 }
+const isMine = n => !!(me && n.person && n.person[0] === me.id);
+
+function renderModelFiles(data) {
+  const files = {};
+  for (const n of data.nodes) for (const m of (n.models || [])) {
+    const f = files[m.id] ??= { name: m.name, size: m.size, on: [] };
+    f.on.push(n.id);
+  }
+  const list = Object.values(files).sort((a, b) => a.name.localeCompare(b.name));
+  const admin = me && me.role !== 'member';
+  $('modelfiles').innerHTML = list.map(f => `<tr><td>${esc(f.name)}</td><td class="num">${gib(f.size)} GiB</td><td>${f.on.map(esc).join(', ')}</td>
+    <td>${admin ? `<button onclick='startModel(${JSON.stringify(f.name)})'>Start</button>` : ''}</td></tr>`).join('')
+    || `<tr><td colspan="4" class="mute">No model files yet. Put a .gguf file in the models folder of any device (in the app: tray menu, Open models folder).</td></tr>`;
+}
+window.startModel = async name => {
+  const r = await fetch('/api/pipeline', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ model: name }) });
+  if (!r.ok) alert(await r.text());
+  refresh();
+};
+window.stopModel = () => confirm('Stop the running model? Chats wait until a model runs again.') && fetch('/api/pipeline', { method:'DELETE' }).then(refresh);
 
 function renderPlan(data) {
   const s = data.summary;
@@ -337,13 +440,121 @@ function renderPlan(data) {
   $('assume').textContent = `Estimates assume ${(data.assumptions.mem_efficiency*100).toFixed(0)}% memory-bandwidth and ${(data.assumptions.compute_efficiency*100).toFixed(0)}% compute efficiency. Treat them as planning numbers, not promises.`;
 }
 
+// ---- pages
+const PAGES = ['home', 'models', 'people', 'devices', 'advanced'];
+function showPage() {
+  const h = location.hash.replace(/^#/, '');
+  const page = PAGES.includes(h) ? h : 'home';
+  document.querySelectorAll('[data-page]').forEach(el => el.hidden = el.dataset.page !== page);
+  document.querySelectorAll('nav.tabs a').forEach(a => a.setAttribute('aria-current', a.getAttribute('href') === '#' + page ? 'page' : 'false'));
+}
+window.addEventListener('hashchange', showPage);
+
+// ---- home widgets
+const COLORS = ['#2f6fed', '#12805c', '#b54708', '#7a5af8', '#c11574', '#0e9384', '#dd6b20', '#475467'];
+const colorOf = name => COLORS[[...name].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7) % COLORS.length];
+const initials = name => name.split(/\s+/).filter(Boolean).slice(0, 2).map(w => w[0].toUpperCase()).join('') || '?';
+function donut(parts, label) {
+  const total = parts.reduce((a, p) => a + p.v, 0) || 1, r = 26, c = 2 * Math.PI * r;
+  let off = 0;
+  const arcs = parts.filter(p => p.v > 0).map(p => {
+    const len = c * p.v / total, el = `<circle r="${r}" cx="34" cy="34" fill="none" stroke="${p.color}" stroke-width="9" stroke-dasharray="${len} ${c - len}" stroke-dashoffset="${-off}" transform="rotate(-90 34 34)"/>`;
+    off += len; return el;
+  }).join('');
+  return `<svg width="68" height="68" viewBox="0 0 68 68" role="img" aria-label="${esc(label)}"><circle r="${r}" cx="34" cy="34" fill="none" stroke="var(--line)" stroke-width="9"/>${arcs}<text x="34" y="39" text-anchor="middle" font-size="14" font-weight="650" fill="currentColor">${esc(label)}</text></svg>`;
+}
+function sparkline(vals) {
+  if (vals.length < 2) return '';
+  const w = 140, h = 30, max = Math.max(...vals) * 1.1 || 1;
+  const pts = vals.map((v, i) => `${(i / (vals.length - 1) * w).toFixed(1)},${(h - v / max * h).toFixed(1)}`).join(' ');
+  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" aria-hidden="true"><polyline points="${pts}" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linejoin="round"/></svg>`;
+}
+function renderWidgets(o) {
+  const h = o.health, ok = h.online - h.paused, away = h.total - h.online;
+  const status = { good: ['All good', 'ok'], partly: [h.paused ? `${h.paused} paused` : `${away} away`, 'warn'], problem: ['Needs attention', 'bad'] }[h.status];
+  const health = `<div class="widget"><h3>Swarm</h3><div class="w-row">${donut([{ v: ok, color: 'var(--ok)' }, { v: h.paused, color: 'var(--warn)' }, { v: away, color: 'var(--line)' }], `${h.online}/${h.total}`)}
+    <div><div class="big">${h.online} online</div><span class="chip ${status[1]}">${esc(status[0])}</span></div></div><div class="cap">${h.total === 1 ? '1 device' : h.total + ' devices'} in the swarm</div></div>`;
+  const shown = o.people.here.slice(0, 5);
+  const people = `<div class="widget"><h3>People here</h3><div class="avatars">${shown.map(n => `<span class="avatar" title="${esc(n)}" style="background:${colorOf(n)}">${esc(initials(n))}</span>`).join('')}${o.people.here.length > 5 ? `<span class="avatar" style="background:var(--mute)">+${o.people.here.length - 5}</span>` : ''}</div>
+    <div class="cap">${o.people.here.length} of ${o.people.total} ${o.people.total === 1 ? 'person' : 'people'} online</div></div>`;
+  const m = o.model, last = o.speeds.length ? o.speeds[o.speeds.length - 1] : null;
+  const chip = m ? { ready: ['ready', 'ok'], loading: ['loading…', 'warn'], failed: ['stopped', 'bad'] }[m.state] : null;
+  const model = `<div class="widget"><h3>Model</h3>${m ? `<div class="big" style="font-size:16px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(m.name)}">${esc(m.name.replace(/\.gguf$/, ''))}</div>
+    <div><span class="chip ${chip[1]}">${chip[0]}</span> <span class="cap">on ${m.devices.length} device${m.devices.length === 1 ? '' : 's'}</span></div>
+    ${sparkline(o.speeds)}<div class="cap">${last ? last.toFixed(1) + ' tokens/s on the last reply' : 'no replies yet'}</div>`
+    : `<div class="cap">No model is running.</div>${me.role !== 'member' ? '<a href="#models">Start one</a>' : '<div class="cap">An admin can start one.</div>'}`}</div>`;
+  const used = m ? m.need_bytes : 0, pooled = Math.max(o.memory.pooled_bytes, used, 1);
+  const memory = `<div class="widget"><h3>Pooled memory</h3><div class="big">${gib(o.memory.pooled_bytes)} GiB</div>
+    <div class="bar" role="img" aria-label="${gib(used)} of ${gib(pooled)} GiB in use"><span style="width:${(used / pooled * 100).toFixed(1)}%"></span></div>
+    <div class="cap">${m ? gib(used) + ' GiB used by the model' : 'what the swarm can lend a model now'}</div></div>`;
+  const mine = `<div class="widget"><h3>Your devices</h3>${o.mine.length ? o.mine.map(d => {
+      const paused = d.policy.participation === 'paused';
+      const dot = d.state === 'away' ? 'var(--bad)' : d.paused ? 'var(--warn)' : 'var(--ok)';
+      const what = d.state === 'away' ? 'away' : d.paused ? 'paused' : d.in_model ? 'helping run the model' : 'ready';
+      const btn = nodes[d.id] && !nodes[d.id].is_coordinator && d.state !== 'away' ? `<button onclick='togglePause(${JSON.stringify(d.id)}, ${paused}, ${JSON.stringify(d.policy)})'>${paused ? 'Resume' : 'Pause'}</button>` : '';
+      return `<div class="mydev"><span class="dot" style="background:${dot}"></span><span class="name" title="${esc(d.paused || '')}">${esc(d.id)} <small>· ${what}</small></span>${btn}</div>`;
+    }).join('') : '<div class="cap">None in this swarm yet.</div>'}<a href="#devices" class="cap">Device settings</a></div>`;
+  $('widgets').innerHTML = health + people + model + memory + mine;
+}
+function renderRunning(o) {
+  const m = o.model, admin = me.role !== 'member';
+  $('running').innerHTML = m ? `<p style="margin-top:0"><b>${esc(m.name)}</b> <span class="chip">${esc(m.state)}</span> on ${m.devices.map(esc).join(' → ')}</p>
+    ${m.failure ? `<p class="err">${esc(m.failure)}</p>` : ''}${admin ? '<button onclick="stopModel()">Stop</button>' : ''}`
+    : `<p class="mute" style="margin-top:0">Nothing is running. ${admin ? 'Start a model below.' : 'An admin can start one.'}</p>`;
+}
+
+// ---- chat
+let chatId = 'group', chatList = null, sending = false, shownCount = -1;
+function bubble(m) {
+  if (m.error) return `<div class="msg assistant error">Couldn't answer: ${esc(m.error)}</div>`;
+  const who = m.role === 'user' && chatId === 'group' && m.by ? `<span class="who">${esc(m.by)}</span>` : '';
+  const meta = m.tok_s ? `<span class="meta">${m.tok_s.toFixed(1)} tokens/s</span>` : '';
+  return `<div class="msg ${m.role === 'user' ? 'user' : 'assistant'}">${who}${esc(m.content)}${meta}</div>`;
+}
+async function loadChats() {
+  chatList = await fetch('/api/chats').then(r => r.json());
+  const items = [{ id: 'group', title: 'Group' }, ...chatList.conversations];
+  $('convs').innerHTML = `<button class="new" onclick="newChat()">+ New chat</button>` + items.map(c => `<button aria-current="${c.id === chatId}" onclick='openChat(${JSON.stringify(c.id)})'>${c.id === 'group' ? '👥 ' : ''}${esc(c.title)}</button>`).join('');
+  $('convpick').innerHTML = items.map(c => `<option value="${esc(c.id)}"${c.id === chatId ? ' selected' : ''}>${esc(c.title)}</option>`).join('') + '<option value="__new">+ New chat</option>';
+}
+async function loadThread(force) {
+  if (sending) return;
+  const r = await fetch('/api/chats/' + encodeURIComponent(chatId));
+  if (!r.ok) { chatId = 'group'; return; }
+  const c = await r.json();
+  if (!force && c.messages.length === shownCount) return;
+  shownCount = c.messages.length;
+  const empty = chatId === 'group' ? 'The group chat: everyone in the swarm sees it, and the model answers.' : 'A chat of your own: only you can see it, on any of your devices.';
+  $('msgs').innerHTML = c.messages.map(bubble).join('') || `<div class="empty">${empty}</div>`;
+  $('msgs').scrollTop = $('msgs').scrollHeight;
+}
+window.openChat = async id => { chatId = id; shownCount = -1; await loadChats(); await loadThread(true); };
+window.newChat = async () => { const r = await (await fetch('/api/chats', { method:'POST' })).json(); openChat(r.id); };
+$('convpick').onchange = e => e.target.value === '__new' ? newChat() : openChat(e.target.value);
+$('composer').onsubmit = async e => {
+  e.preventDefault();
+  const text = $('say').value.trim();
+  if (!text || sending) return;
+  sending = true; $('send').disabled = true; $('say').value = '';
+  const empty = $('msgs').querySelector('.empty'); if (empty) empty.remove();
+  $('msgs').insertAdjacentHTML('beforeend', bubble({ role: 'user', content: text, by: me.name }) + '<div class="msg assistant typing" id="typing"></div>');
+  $('msgs').scrollTop = $('msgs').scrollHeight;
+  try {
+    const r = await fetch('/api/chats/' + encodeURIComponent(chatId) + '/messages', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ content: text }) });
+    if (!r.ok) throw new Error(await r.text());
+  } catch (err) { $('typing')?.remove(); $('msgs').insertAdjacentHTML('beforeend', bubble({ role: 'assistant', error: String(err.message || err) })); }
+  sending = false; $('send').disabled = false;
+  await loadChats(); await loadThread(true);
+};
+$('say').onkeydown = e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('composer').requestSubmit(); } };
+
 let me = null, signin = null;
 async function checkMe() {
   const r = await fetch('/api/me');
   if (r.status === 401) {
     me = null;
-    $('main').hidden = true; $('signin').hidden = false;
-    for (const id of ['muster', 'add-device', 'signout']) $(id).hidden = true;
+    $('main').hidden = true; $('signin').hidden = false; $('navbar').hidden = true;
+    for (const id of ['add-device', 'signout']) $(id).hidden = true;
     $('whoami').textContent = '';
     $('sub').textContent = 'sign in to see the swarm';
     if (!signin) {
@@ -356,10 +567,10 @@ async function checkMe() {
     return false;
   }
   me = await r.json();
-  $('main').hidden = false; $('signin').hidden = true;
+  $('main').hidden = false; $('signin').hidden = true; $('navbar').hidden = false;
   $('whoami').textContent = `${me.name} · ${me.role}`;
   $('signout').hidden = me.how !== 'session';
-  $('muster').hidden = me.role === 'member';
+  $('muster').disabled = me.role === 'member';
   $('add-device').hidden = false;
   $('set-drain').hidden = me.role === 'member';
   return true;
@@ -394,14 +605,18 @@ async function refresh() {
   try {
     if (!await checkMe()) { busy = false; return; }
     refreshPeople().catch(() => {});
+    const o = await fetch('/api/overview').then(r => r.json());
     const q = new URLSearchParams({ quant: $('quant').value, ctx: $('ctx').value, target: $('target').value, topology: $('topology').value });
-    const [roster, plan] = await Promise.all([fetch('/api/roster').then(r => r.json()), fetch('/api/plan?' + q).then(r => r.json())]);
-    renderRoster(roster); renderPlan(plan);
+    const [rosterData, plan] = await Promise.all([fetch('/api/roster').then(r => r.json()), fetch('/api/plan?' + q).then(r => r.json())]);
+    renderRoster(rosterData); renderPlan(plan); renderWidgets(o); renderRunning(o);
+    if (!chatList) await loadChats();
+    loadThread(false);
   } catch (e) { $('sub').textContent = 'portal unreachable: ' + e; }
   busy = false;
 }
 ['quant','ctx','target','topology'].forEach(id => $(id).onchange = refresh);
 // Deep link: /#settings=<device id> opens that device's settings.
+showPage();
 refresh().then(() => {
   const m = location.hash.match(/^#settings=(.+)$/);
   if (m) openSettings(decodeURIComponent(m[1]));

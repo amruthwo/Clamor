@@ -40,8 +40,11 @@ fn python_fixture(dir: &Path) -> Option<Vec<u32>> {
     Some(std::fs::read_to_string(dir.join("ref/generated.txt")).unwrap().split(',').map(|t| t.parse().unwrap()).collect())
 }
 
+/// A free port for a listener, outside the OS's ephemeral range (see `free_port_run`: ports
+/// from that range get reused as the source ports of other tests' outgoing connections, which
+/// once made a coordinator's dashboard unreachable mid-test on CI).
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    free_port_run(1)
 }
 
 /// A run of `n` consecutive free ports (data ports for the stages). Chosen from 20000-32000,
@@ -73,6 +76,12 @@ impl Drop for Proc {
     fn drop(&mut self) {
         let _ = self.0.kill();
         let _ = self.0.wait();
+        // A failing test shows what every process it started was doing.
+        if std::thread::panicking() {
+            let log = self.log();
+            let tail: Vec<&str> = log.lines().rev().take(40).collect();
+            eprintln!("--- {} (last lines) ---\n{}", self.1, tail.into_iter().rev().collect::<Vec<_>>().join("\n"));
+        }
     }
 }
 impl Proc {
@@ -207,6 +216,20 @@ fn coordinator_and_two_members_generate_through_the_api() {
     let p2 = start(json!([{ "node": "coord", "layers": [0, 1] }, { "node": "a", "layers": [1, 3] }, { "node": "b", "layers": [3, 4] }]));
     assert!(p2["pipeline"]["epoch"].as_u64() > p["pipeline"]["epoch"].as_u64());
     assert_eq!(generate(), greedy, "coordinator with layers + 2 members");
+
+    // Conversations: the group gets the message and the model's reply; the Home overview
+    // shows the model running and the reply's speed.
+    let (st, r) = http(portal, "POST", "/api/chats/group/messages", Some(json!({ "content": "Hello" })));
+    assert_eq!(st, 200, "{r}");
+    assert_eq!(r["message"]["role"], "assistant");
+    assert!(r["message"]["error"].is_null() && r["message"]["tok_s"].as_f64().is_some_and(|t| t > 0.0), "{r}");
+    let (_, g) = http(portal, "GET", "/api/chats/group", None);
+    let msgs = g["messages"].as_array().unwrap();
+    assert_eq!((msgs.len(), msgs[0]["role"].as_str(), msgs[0]["content"].as_str()), (2, Some("user"), Some("Hello")), "{g}");
+    let (_, o) = http(portal, "GET", "/api/overview", None);
+    assert_eq!((o["model"]["state"].as_str(), o["health"]["online"].as_u64(), o["health"]["status"].as_str()), (Some("ready"), Some(3), Some("good")), "{o}");
+    assert_eq!(o["speeds"].as_array().map(|s| s.len()), Some(1), "{o}");
+    assert_eq!(http(portal, "POST", "/api/chats/group/messages", Some(json!({ "content": "  " }))).0, 400);
 
     // Limits: a at the smallest RAM share (5%), asked for a 16M-token context (~8 GB of KV cache
     // per request for its two layers): refused up front with the numbers, not loaded until the
@@ -729,6 +752,18 @@ fn people_roles_and_signing_in() {
     assert_eq!(http(dash, "POST", "/api/invite", Some(json!({ "kind": "person" }))).0, 403, "members cannot invite people");
     let (st, inv) = http(dash, "POST", "/api/invite", Some(json!({ "kind": "device" })));
     assert_eq!(st, 200, "but can add their own devices: {inv}");
+
+    // Bea's own conversation is hers alone; without a model, the reply says why.
+    let (_, c) = http(dash, "POST", "/api/chats", None);
+    let chat = c["id"].as_str().unwrap().to_string();
+    let (st, r) = http(dash, "POST", &format!("/api/chats/{chat}/messages"), Some(json!({ "content": "Hello?" })));
+    assert_eq!(st, 200, "{r}");
+    assert!(r["message"]["error"].as_str().is_some_and(|e| e.contains("pipeline")), "{r}");
+    let (_, list) = http(dash, "GET", "/api/chats", None);
+    assert_eq!(list["conversations"][0]["title"], "Hello?", "{list}");
+    assert_eq!(http(portal, "GET", &format!("/api/chats/{chat}"), None).0, 404, "not even the owner opens someone's personal chat");
+    assert_eq!(http(portal, "DELETE", &format!("/api/chats/{chat}"), None).0, 404);
+    assert_eq!(http(dash, "GET", "/api/chats/group", None).0, 200, "the group is everyone's");
 
     // The owner (the coordinator machine) sees both, and makes Bea an admin.
     let (_, ppl) = http(portal, "GET", "/api/people", None);

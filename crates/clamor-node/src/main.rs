@@ -4,6 +4,7 @@ mod access;
 mod auth;
 mod build_info;
 mod cache;
+mod chats;
 mod coordinator;
 mod dashproxy;
 mod discovery;

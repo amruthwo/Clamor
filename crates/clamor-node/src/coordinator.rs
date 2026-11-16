@@ -186,6 +186,10 @@ pub struct Swarm {
     pub portal_tls_port: Option<u16>,
     /// Devices asking to join.
     pub joins: Vec<PendingJoin>,
+    /// Conversations (personal and group).
+    pub chats: crate::chats::Chats,
+    /// Recent replies: (unix time, tokens per second), newest last.
+    pub speeds: std::collections::VecDeque<(u64, f32)>,
     pub coordinator: NodeId,
     pub nodes: BTreeMap<NodeId, NodeEntry>,
     next_generation: u64,
@@ -203,11 +207,12 @@ pub struct Swarm {
 impl Swarm {
     pub fn new(name: String, auth: SwarmAuth, coordinator: NodeId, mut engine: EngineConfig, data_port: u16, quick_bench: bool, share_port: Option<u16>) -> Self {
         let tls = coordinator_identity(&auth.config_dir, &auth.profile.swarm_id);
+        let chats = crate::chats::Chats::load(&auth.config_dir, &auth.profile.swarm_id);
         let tls_server = clamor_transport::tls::server_config(&tls, None).expect("TLS config");
         engine.tls = Some(tls.clone());
         Swarm {
             tls,
-            tls_server, name, auth, invite: None, join_hint: String::new(), portal_tls_port: None, joins: Vec::new(), coordinator, nodes: BTreeMap::new(), next_generation: 1, engine, data_port, quick_bench, pipeline: None, next_epoch: 1, share_port }
+            tls_server, name, auth, invite: None, join_hint: String::new(), portal_tls_port: None, joins: Vec::new(), chats, speeds: Default::default(), coordinator, nodes: BTreeMap::new(), next_generation: 1, engine, data_port, quick_bench, pipeline: None, next_epoch: 1, share_port }
     }
 
     /// A node that held a pipeline stage is gone: that pipeline cannot run any more.

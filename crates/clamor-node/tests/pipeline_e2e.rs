@@ -395,16 +395,17 @@ fn only_compute_threads_run_at_low_priority() {
     assert_eq!(st, 200, "{r}");
 
     // (thread name, nice) for every thread of the coordinator.
+    // Threads come and go (tokio's blocking pool): skip one that exits while we look.
     let threads: Vec<(String, i64)> = std::fs::read_dir(format!("/proc/{}/task", coord.0.id()))
         .unwrap()
         .flatten()
-        .map(|t| {
-            let name = std::fs::read_to_string(t.path().join("comm")).unwrap().trim().to_string();
-            let stat = std::fs::read_to_string(t.path().join("stat")).unwrap();
+        .filter_map(|t| {
+            let name = std::fs::read_to_string(t.path().join("comm")).ok()?.trim().to_string();
+            let stat = std::fs::read_to_string(t.path().join("stat")).ok()?;
             // Fields after the ")" that closes the name; nice is field 19 overall.
             let after = &stat[stat.rfind(')').unwrap() + 2..];
-            let nice = after.split(' ').nth(16).unwrap().parse().unwrap();
-            (name, nice)
+            let nice = after.split(' ').nth(16)?.parse().ok()?;
+            Some((name, nice))
         })
         .collect();
     let compute: Vec<i64> = threads.iter().filter(|(n, _)| n == "clamor-compute").map(|t| t.1).collect();

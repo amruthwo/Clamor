@@ -81,6 +81,12 @@ impl Proc {
     }
 }
 
+/// The settings a device saved for the (only) swarm it is in.
+fn swarm_settings(config_dir: &Path) -> Option<String> {
+    let e = std::fs::read_dir(config_dir.join("swarms")).ok()?.flatten().find(|e| e.file_name().to_string_lossy().starts_with("settings-"))?;
+    std::fs::read_to_string(e.path()).ok()
+}
+
 /// A per-process settings folder, so test nodes never touch the real ~/.config/clamor.
 fn cfg_dir(dir: &Path, name: &str) -> String {
     dir.join(format!("{name}-config")).display().to_string()
@@ -216,12 +222,12 @@ fn coordinator_and_two_members_generate_through_the_api() {
     // Settings: nonsense is refused; a device remembers what it was given (its own folder).
     let (st, r) = http(portal, "POST", "/api/nodes/a/policy", Some(json!({ "participation": "full", "max_ram_fraction": 1.5, "max_cpu_fraction": 0.5, "require_plugged_in": false })));
     assert_eq!(st, 400, "{r}");
-    let saved: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("member-a-config/device-settings.json")).expect("a saved its settings")).unwrap();
+    let saved: Value = serde_json::from_str(&swarm_settings(&dir.join("member-a-config")).expect("a saved its settings")).unwrap();
     assert_eq!(saved["participation"], "full", "{saved}");
     // Priority is just another setting now (it applies from the next pipeline, on every OS).
     policy("a", json!({ "participation": "full", "max_ram_fraction": 0.7, "max_cpu_fraction": 0.8, "require_plugged_in": false, "low_priority": false }));
     wait_for("a to save normal priority", Duration::from_secs(20), &all, || {
-        std::fs::read_to_string(dir.join("member-a-config/device-settings.json")).is_ok_and(|s| s.contains("\"low_priority\": false"))
+        swarm_settings(&dir.join("member-a-config")).is_some_and(|s| s.contains("\"low_priority\": false"))
     });
     policy("a", full);
 
@@ -428,10 +434,12 @@ fn devices_join_by_passphrase_and_rejoin_by_key() {
         args.extend_from_slice(&["--id", "m", "--models", &models, "--no-update-check", "--config-dir", &member_cfg, "--participation", "full", "--allow-battery"]);
         spawn(&dir, name, &args)
     };
+    // The new process must say it joined: right after the previous member process is killed, the
+    // roster can still show it as ready for a moment.
     let joined = |procs: &[&Proc]| {
         wait_for("the member to join", Duration::from_secs(60), procs, || {
             let (_, r) = http(portal, "GET", "/api/roster", None);
-            r["nodes"].as_array().is_some_and(|ns| ns.iter().any(|n| n["id"] == "m" && n["state"] == "ready"))
+            procs.last().unwrap().log().contains("joined swarm") && r["nodes"].as_array().is_some_and(|ns| ns.iter().any(|n| n["id"] == "m" && n["state"] == "ready"))
         })
     };
 
@@ -473,6 +481,11 @@ fn devices_join_by_passphrase_and_rejoin_by_key() {
     assert!(m.log().contains("not approved"), "{}", m.log());
     let m = member("member-readded", &["--passphrase", &pass]);
     joined(&[&coord, &m]);
+    // Settings given in the dashboard are remembered by the device, for this swarm.
+    let (st, r) = http(portal, "POST", "/api/nodes/m/policy", Some(json!({ "participation": "full", "max_ram_fraction": 0.3, "max_cpu_fraction": 0.5, "require_plugged_in": false })));
+    assert_eq!(st, 200, "{r}");
+    let member_dir = dir.join("member-config");
+    wait_for("m to save its settings", Duration::from_secs(20), &[&coord, &m], || swarm_settings(&member_dir).is_some_and(|s| s.contains("0.3")));
     drop(m);
 
     // The coordinator restarts: same swarm, same passphrase, same approvals.
@@ -481,6 +494,11 @@ fn devices_join_by_passphrase_and_rejoin_by_key() {
     assert!(coord.log().contains(&pass) && coord.log().contains("1 device(s) approved"), "{}", coord.log());
     let m = member("member-after-restart", &[]);
     joined(&[&coord, &m]);
+    // The restarted coordinator knew nothing of m's settings: the device brought them.
+    wait_for("m's settings to reach the coordinator", Duration::from_secs(20), &[&coord, &m], || {
+        let (_, r) = http(portal, "GET", "/api/roster", None);
+        r["nodes"].as_array().is_some_and(|ns| ns.iter().any(|n| n["id"] == "m" && n["report"]["policy"]["max_ram_fraction"].as_f64().is_some_and(|f| (f - 0.3).abs() < 1e-6)))
+    });
     drop(m);
     drop(coord);
 
@@ -527,10 +545,12 @@ fn devices_find_the_swarm_on_the_local_network() {
         args.extend_from_slice(&["--id", "m", "--models", &models, "--no-update-check", "--config-dir", &member_cfg, "--participation", "full", "--allow-battery"]);
         spawn(&dir, name, &args)
     };
+    // The new process must say it joined: right after the previous member process is killed, the
+    // roster can still show it as ready for a moment.
     let joined = |procs: &[&Proc]| {
         wait_for("the member to join", Duration::from_secs(60), procs, || {
             let (_, r) = http(portal, "GET", "/api/roster", None);
-            r["nodes"].as_array().is_some_and(|ns| ns.iter().any(|n| n["id"] == "m" && n["state"] == "ready"))
+            procs.last().unwrap().log().contains("joined swarm") && r["nodes"].as_array().is_some_and(|ns| ns.iter().any(|n| n["id"] == "m" && n["state"] == "ready"))
         })
     };
     let mut m = member("member-first", &["--swarm", &swarm, "--passphrase", "find-me-on-the-lan"]);
@@ -573,6 +593,9 @@ fn devices_join_with_a_one_time_code() {
     };
     let joined = |id: &str, procs: &[&Proc]| {
         wait_for("the member to join", Duration::from_secs(60), procs, || {
+            if !procs.last().unwrap().log().contains("joined swarm") {
+                return false; // the roster may still show a just-killed process as ready
+            }
             let (_, r) = http(portal, "GET", "/api/roster", None);
             r["nodes"].as_array().is_some_and(|ns| ns.iter().any(|n| n["id"] == id && n["state"] == "ready"))
         })

@@ -177,35 +177,19 @@ enum ParticipationArg {
 }
 
 impl PolicyArgs {
-    /// The owner's settings on top of the defaults for this kind of device, or None if the
-    /// owner set nothing (the coordinator then applies its defaults).
-    /// Command-line flags, on top of the settings saved from the dashboard, on top of the
-    /// defaults for this kind of device. None if there are neither flags nor saved settings.
-    fn policy(&self, priority: Option<Priority>) -> Option<Policy> {
-        let saved = neighbour::saved_settings();
-        if saved.is_none() && self.participation.is_none() && !self.allow_battery && self.ram_share.is_none() && self.cpu_share.is_none() && priority.is_none() {
-            return None;
-        }
-        let mut p = saved.unwrap_or_else(|| Policy::default_for(clamor_muster::probe::probe_node(NodeId("local".into())).class));
-        if let Some(x) = self.participation {
-            p.participation = match x {
+    /// The owner's command-line settings; they win in every swarm, over what the device
+    /// remembers for that swarm, over the defaults.
+    fn overrides(&self, priority: Option<Priority>) -> neighbour::Overrides {
+        neighbour::Overrides {
+            participation: self.participation.map(|x| match x {
                 ParticipationArg::Full => Participation::Full,
                 ParticipationArg::IdleOnly => Participation::IdleOnly,
-            };
+            }),
+            allow_battery: self.allow_battery,
+            ram_share: self.ram_share,
+            cpu_share: self.cpu_share,
+            low_priority: priority.map(|p| p == Priority::Low),
         }
-        if self.allow_battery {
-            p.require_plugged_in = false;
-        }
-        if let Some(r) = self.ram_share {
-            p.max_ram_fraction = r.clamp(0.05, 0.95);
-        }
-        if let Some(c) = self.cpu_share {
-            p.max_cpu_fraction = c.clamp(0.05, 1.0);
-        }
-        if let Some(pr) = priority {
-            p.low_priority = pr == Priority::Low;
-        }
-        Some(p)
     }
 }
 
@@ -347,7 +331,7 @@ async fn run(cmd: Cmd, priority: Option<Priority>) -> Result<()> {
             let share_port = share::serve(DEFAULT_SHARE_PORT, engine.models_dir.clone(), swarm_auth.allowed.clone()).await?;
             let shared = Arc::new(Mutex::new(coordinator::Swarm::new(swarm, swarm_auth, id.clone(), engine, data_port, quick_bench, Some(share_port))));
             shared.lock().unwrap().join_hint = join_hint(&bind);
-            coordinator::register_self(shared.clone(), id, policy.policy(priority)).await;
+            coordinator::register_self(shared.clone(), id, policy.overrides(priority)).await;
             tokio::spawn(coordinator::bench_self(shared.clone()));
             tokio::spawn(coordinator::reaper(shared.clone()));
             tokio::spawn(coordinator::monitor_self(shared.clone()));
@@ -370,7 +354,7 @@ async fn run(cmd: Cmd, priority: Option<Priority>) -> Result<()> {
             let engine = engine.config(None, None); // the key is per swarm: set once joined
             engine.validate()?;
             let creds = member::Credentials { device: auth::Device::load_or_create(&config_dir)?, passphrase, code, config_dir };
-            member::join(addr, creds, id, engine, updates.policy(), policy.policy(priority), !no_mdns).await
+            member::join(addr, creds, id, engine, updates.policy(), policy.overrides(priority), !no_mdns).await
         }
         Cmd::Leave { swarm, purge, delete_swarm, cache_dir } => {
             let config_dir = neighbour::config_dir();

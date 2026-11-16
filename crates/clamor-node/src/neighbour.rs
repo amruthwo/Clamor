@@ -198,22 +198,106 @@ pub fn config_dir() -> std::path::PathBuf {
     CONFIG_DIR.get_or_init(|| dirs::config_dir().unwrap_or_else(std::env::temp_dir).join("clamor")).clone()
 }
 
-fn settings_path() -> std::path::PathBuf {
+/// Settings are kept per swarm: a device can be generous at home and frugal in a friend's swarm.
+fn settings_path(swarm_id: &str) -> std::path::PathBuf {
+    config_dir().join("swarms").join(format!("settings-{swarm_id}.json"))
+}
+
+/// Settings saved before they were kept per swarm (Clamor 0.4): used for a swarm that has none
+/// of its own yet.
+fn legacy_settings_path() -> std::path::PathBuf {
     config_dir().join("device-settings.json")
 }
 
-/// The settings this device last received (from the dashboard), if any. Read at startup, before
-/// the priority is set: once lowered, Linux and macOS will not let it be raised again.
-pub fn saved_settings() -> Option<clamor_proto::Policy> {
-    let p = std::fs::read(settings_path()).ok()?;
-    serde_json::from_slice(&p).ok().filter(|p| validate(p).is_ok())
+/// The settings this device was last given in swarm `swarm_id` (from the dashboard), if any.
+pub fn saved_settings(swarm_id: &str) -> Option<clamor_proto::Policy> {
+    let read = |path: std::path::PathBuf| -> Option<clamor_proto::Policy> { serde_json::from_slice(&std::fs::read(path).ok()?).ok().filter(|p| validate(p).is_ok()) };
+    read(settings_path(swarm_id)).or_else(|| read(legacy_settings_path()))
 }
 
-/// Remember this device's settings for the next start.
-pub fn save_settings(p: &clamor_proto::Policy) {
-    let path = settings_path();
+/// Remember this device's settings in swarm `swarm_id`.
+pub fn save_settings(swarm_id: &str, p: &clamor_proto::Policy) {
+    let path = settings_path(swarm_id);
     let r = std::fs::create_dir_all(path.parent().unwrap()).and_then(|_| std::fs::write(&path, serde_json::to_vec_pretty(p).unwrap()));
     if let Err(e) = r {
         eprintln!("could not save settings to {}: {e}", path.display());
+    }
+}
+
+/// Settings the device's owner gave on the command line. They win over everything, in every swarm.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Overrides {
+    pub participation: Option<Participation>,
+    pub allow_battery: bool,
+    pub ram_share: Option<f32>,
+    pub cpu_share: Option<f32>,
+    pub low_priority: Option<bool>,
+}
+
+impl Overrides {
+    pub fn is_empty(&self) -> bool {
+        self.participation.is_none() && !self.allow_battery && self.ram_share.is_none() && self.cpu_share.is_none() && self.low_priority.is_none()
+    }
+
+    pub fn apply(&self, mut p: Policy) -> Policy {
+        if let Some(x) = self.participation {
+            p.participation = x;
+        }
+        if self.allow_battery {
+            p.require_plugged_in = false;
+        }
+        if let Some(r) = self.ram_share {
+            p.max_ram_fraction = r.clamp(0.05, 0.95);
+        }
+        if let Some(c) = self.cpu_share {
+            p.max_cpu_fraction = c.clamp(0.05, 1.0);
+        }
+        if let Some(l) = self.low_priority {
+            p.low_priority = l;
+        }
+        p
+    }
+
+    /// The owner's settings for one swarm: command-line flags, over what this device was last
+    /// given in that swarm, over the defaults for this kind of device. None if there are
+    /// neither flags nor saved settings (the coordinator then uses what it holds, or defaults).
+    pub fn for_swarm(&self, swarm_id: &str, class: clamor_proto::DeviceClass) -> Option<Policy> {
+        let saved = saved_settings(swarm_id);
+        if saved.is_none() && self.is_empty() {
+            return None;
+        }
+        Some(self.apply(saved.unwrap_or_else(|| Policy::default_for(class))))
+    }
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use super::*;
+    use clamor_proto::DeviceClass;
+
+    /// Each swarm keeps its own settings; flags win in all of them.
+    #[test]
+    fn settings_are_kept_per_swarm() {
+        let dir = std::env::temp_dir().join(format!("clamor-settings-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        set_config_dir(Some(dir.clone()));
+        assert_eq!(config_dir(), dir, "set before any other test reads it");
+        let none = Overrides::default();
+        assert_eq!(none.for_swarm("home", DeviceClass::Laptop), None);
+        let mut home = Policy::default_for(DeviceClass::Laptop);
+        home.max_ram_fraction = 0.8;
+        save_settings("home", &home);
+        assert_eq!(none.for_swarm("home", DeviceClass::Laptop), Some(home));
+        assert_eq!(none.for_swarm("friends", DeviceClass::Laptop), None, "another swarm does not inherit it");
+        let flags = Overrides { ram_share: Some(0.2), ..Default::default() };
+        assert_eq!(flags.for_swarm("home", DeviceClass::Laptop).unwrap().max_ram_fraction, 0.2);
+        assert_eq!(flags.for_swarm("friends", DeviceClass::Laptop).unwrap().max_ram_fraction, 0.2);
+        // Settings from before they were per swarm are used where a swarm has none.
+        let mut old = Policy::default_for(DeviceClass::Laptop);
+        old.max_cpu_fraction = 0.3;
+        std::fs::write(dir.join("device-settings.json"), serde_json::to_vec(&old).unwrap()).unwrap();
+        assert_eq!(none.for_swarm("friends", DeviceClass::Laptop), Some(old));
+        assert_eq!(none.for_swarm("home", DeviceClass::Laptop), Some(home));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

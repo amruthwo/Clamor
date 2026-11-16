@@ -174,7 +174,7 @@ impl Swarm {
 /// take well under a second), so a pipeline can use it at once; the benchmark follows in the
 /// background (`bench_self`). Registering only after the benchmark left a window in which the
 /// coordinator's own models were unknown.
-pub async fn register_self(shared: Shared, id: NodeId, owner_policy: Option<Policy>) {
+pub async fn register_self(shared: Shared, id: NodeId, overrides: crate::neighbour::Overrides) {
     let models_dir = shared.lock().unwrap().engine.models_dir.clone();
     let result = tokio::task::spawn_blocking(move || {
         let mut info = probe::probe_node(id);
@@ -185,7 +185,7 @@ pub async fn register_self(shared: Shared, id: NodeId, owner_policy: Option<Poli
     let Ok((info, models)) = result else { return };
     let mut sw = shared.lock().unwrap();
     let share_port = sw.share_port;
-    let policy = owner_policy.unwrap_or_else(|| Policy::default_for(info.class));
+    let policy = overrides.for_swarm(&sw.auth.profile.swarm_id, info.class).unwrap_or_else(|| Policy::default_for(info.class));
     let generation = sw.next_generation;
     sw.next_generation += 1;
     let id = info.id.clone();
@@ -285,7 +285,7 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
         Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
         Err(e) => return Err(e.into()),
     };
-    let Message::Hello { proto, info, bench_port, build, models, share_port, policy: owner_policy, auth_nonce, invite } = hello else {
+    let Message::Hello { proto, info, bench_port, build, models, share_port, auth_nonce, invite } = hello else {
         write_msg(&mut wr, &Message::Reject { reason: "expected hello".into() }).await?;
         return Ok(());
     };
@@ -387,8 +387,6 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
                 Some(p) => (p.report.policy, p.report.bench, p.report.link),
                 None => (Policy::default_for(info.class), None, None),
             };
-            // The device owner's own settings win.
-            let policy = owner_policy.unwrap_or(policy);
             let cached = bench.is_some();
             sw.nodes.insert(
                 id.clone(),
@@ -426,11 +424,8 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
     println!("{id} joined from {addr}{}", if cached_bench { " (cached benchmark)" } else { "" });
 
     let _ = tx.send(Message::Welcome { swarm, coordinator, heartbeat_secs: HEARTBEAT_SECS, auth: Some(welcome_auth) });
-    // The node starts from its class defaults; send the policy we hold for it (it may have been
-    // changed in the dashboard, and survives the node reconnecting).
-    if let Some(policy) = shared.lock().unwrap().nodes.get(&id).map(|e| e.report.policy) {
-        let _ = tx.send(Message::SetPolicy { policy });
-    }
+    // The device answers Welcome with its owner's settings for this swarm (OwnerPolicy); until
+    // then it keeps what we hold for it (from before it reconnected) or the defaults.
     if !cached_bench {
         set_state(&shared, &id, generation, NodeState::Benchmarking);
         let _ = tx.send(Message::BenchRequest { quick });
@@ -496,6 +491,17 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
             Message::Leave => {
                 leave_note = "left at the owner's request".into();
                 break;
+            }
+            Message::OwnerPolicy { policy } => {
+                // The owner's settings win; with none, the device takes what we hold (it may have
+                // been changed in the dashboard while the device was away).
+                let mut sw = shared.lock().unwrap();
+                if let Some(e) = sw.nodes.get_mut(&id) {
+                    if let Some(p) = policy.filter(|p| crate::neighbour::validate(p).is_ok()) {
+                        e.report.policy = p;
+                    }
+                    let _ = tx.send(Message::SetPolicy { policy: e.report.policy });
+                }
             }
             Message::Inventory { models } => {
                 if let Some(e) = shared.lock().unwrap().nodes.get_mut(&id) {

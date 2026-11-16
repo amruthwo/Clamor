@@ -12,7 +12,9 @@ use std::io::{self, Read, Write};
 /// v2: `ShardAssign` gained `n_ctx`, `embed` and `sampling`; added `ShardFailed`.
 /// v3: joining by passphrase (SPAKE2) and device keys: `AuthChallenge`, `AuthProve`,
 /// `Welcome.auth`, `Approved`; the plain join token is gone.
-pub const PROTOCOL_VERSION: u16 = 3;
+/// v4: settings per swarm: the device sends its owner's settings for this swarm after Welcome
+/// (`OwnerPolicy`), no longer in `Hello`.
+pub const PROTOCOL_VERSION: u16 = 4;
 /// Model sharing: every node serves layer slices of the models it holds on this HTTP port.
 pub const DEFAULT_SHARE_PORT: u16 = 7423;
 /// First data-plane port: stage `i` listens on `DEFAULT_DATA_PORT + i`.
@@ -332,10 +334,6 @@ pub enum Message {
         /// Port serving layer slices of those models (see `DEFAULT_SHARE_PORT`).
         #[serde(default)]
         share_port: Option<u16>,
-        /// The device owner's own policy settings, if they gave any (they win over the
-        /// coordinator's defaults for this kind of device).
-        #[serde(default)]
-        policy: Option<Policy>,
     },
     /// The node's models changed (a file was added or removed).
     Inventory {
@@ -412,6 +410,12 @@ pub enum Message {
     },
     SetPolicy {
         policy: Policy,
+    },
+    /// Device -> coordinator, right after Welcome: the owner's settings for this swarm (flags and
+    /// what the device remembers), which win over what the coordinator holds; None if the owner
+    /// set nothing. The coordinator answers with `SetPolicy` (the settings in force).
+    OwnerPolicy {
+        policy: Option<Policy>,
     },
 
     // --- leaving and rejoining ---
@@ -580,7 +584,7 @@ mod tests {
 
     #[test]
     fn hello_roundtrip() {
-        let msg = Message::Hello { proto: PROTOCOL_VERSION, info: sample_info(), bench_port: 7422, build: None, auth_nonce: None, invite: false, models: vec![ModelInfo { name: "m.gguf".into(), size: 9, id: "ab".into() }], share_port: Some(7423), policy: None };
+        let msg = Message::Hello { proto: PROTOCOL_VERSION, info: sample_info(), bench_port: 7422, build: None, auth_nonce: None, invite: false, models: vec![ModelInfo { name: "m.gguf".into(), size: 9, id: "ab".into() }], share_port: Some(7423) };
         let mut buf = Vec::new();
         write_frame(&mut buf, &msg).unwrap();
         let back = read_frame(&mut buf.as_slice()).unwrap();
@@ -617,8 +621,8 @@ mod tests {
     fn older_hello_and_heartbeat_still_parse() {
         let hb = r#"{"type":"heartbeat","cpu_load":0.5,"ram_available_bytes":1,"power":null,"running_tasks":0}"#;
         assert!(matches!(decode(hb.as_bytes()).unwrap(), Message::Heartbeat { update_available: None, .. }));
-        let mut hello = serde_json::to_value(Message::Hello { proto: PROTOCOL_VERSION, info: sample_info(), bench_port: 1, build: None, auth_nonce: None, invite: false, models: vec![], share_port: None, policy: None }).unwrap();
-        for k in ["build", "models", "share_port", "policy", "auth_nonce"] {
+        let mut hello = serde_json::to_value(Message::Hello { proto: PROTOCOL_VERSION, info: sample_info(), bench_port: 1, build: None, auth_nonce: None, invite: false, models: vec![], share_port: None }).unwrap();
+        for k in ["build", "models", "share_port", "auth_nonce"] {
             hello.as_object_mut().unwrap().remove(k);
         }
         assert!(matches!(decode(hello.to_string().as_bytes()).unwrap(), Message::Hello { build: None, .. }));

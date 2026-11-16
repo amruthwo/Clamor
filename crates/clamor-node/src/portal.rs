@@ -215,12 +215,13 @@ async fn set_policy(State(shared): State<Shared>, Path(id): Path<String>, Json(p
     let id = NodeId(id);
     let mut sw = shared.lock().unwrap();
     let is_coordinator = id == sw.coordinator;
+    let swarm_id = sw.auth.profile.swarm_id.clone();
     let entry = sw.nodes.get_mut(&id).ok_or((StatusCode::NOT_FOUND, format!("unknown node {id}")))?;
     entry.report.policy = policy;
     if is_coordinator {
         // This device: remember here (pausing is picked up by monitor_self; priority and shares
         // apply to the next pipeline).
-        crate::neighbour::save_settings(&policy);
+        crate::neighbour::save_settings(&swarm_id, &policy);
         return Ok(Json(json!({ "ok": true, "note": entry.settings_note })));
     }
     if let Some(tx) = &entry.tx {

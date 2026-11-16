@@ -29,9 +29,16 @@ impl ChatMessage {
 /// Used when a model has no template of its own.
 pub const CHATML: &str = "{% for message in messages %}{{ '<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>\n' }}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}";
 
-/// Today's date via a tiny subset of `strftime`, for templates that print it (Llama 3.x).
+/// Today's date via a tiny subset of `strftime`, for templates that print it (Llama 3.x). Local
+/// time, like Hugging Face's (Python's) `strftime_now`: in the evening west of Greenwich the UTC
+/// date is already tomorrow.
 fn strftime_now(fmt: String) -> String {
-    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    let now = chrono::Local::now();
+    strftime_at(fmt, now.timestamp() + i64::from(now.offset().local_minus_utc()))
+}
+
+/// `strftime_now` for `secs` seconds since 1970-01-01 in local time.
+fn strftime_at(fmt: String, secs: i64) -> String {
     let days = secs.div_euclid(86_400);
     // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
     let z = days + 719_468;
@@ -134,6 +141,13 @@ mod tests {
         let t = "{{ raise_exception('roles must alternate') }}";
         let e = render(Some(t), &[], "", "").unwrap_err().to_string();
         assert!(e.contains("roles must alternate"), "{e}");
+    }
+
+    #[test]
+    fn strftime_formats_known_dates() {
+        // 2026-11-16 00:30 local.
+        assert_eq!(strftime_at("%d %b %Y".into(), 1_794_789_000), "16 Nov 2026");
+        assert_eq!(strftime_at("%Y-%m-%d".into(), 951_782_400), "2000-02-29");
     }
 
     #[test]

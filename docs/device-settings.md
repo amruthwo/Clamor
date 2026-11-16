@@ -43,7 +43,8 @@ clamor-node join <coordinator> --priority normal
 ```
 
 The same options work for `clamor-node coordinator`. Options given on the command line win;
-otherwise a device uses the settings it was last given from the dashboard; otherwise the defaults.
+otherwise a device uses the settings it was last given from the dashboard *in that swarm*;
+otherwise the defaults.
 
 ## When changes take effect
 
@@ -62,14 +63,18 @@ otherwise a device uses the settings it was last given from the dashboard; other
 
 ## Where settings are kept
 
-Each device remembers its settings in its own config folder, so they survive restarts even if
-the coordinator changes:
+Each device remembers its settings **per swarm**, in its own config folder, so they survive
+restarts, and a device can be generous in your home swarm and frugal in a friend's. When a
+device joins, it tells the coordinator its settings for that swarm, so they also survive the
+coordinator being restarted or replaced.
 
-- Linux: `~/.config/clamor/device-settings.json`
-- macOS: `~/Library/Application Support/clamor/device-settings.json`
-- Windows: `%APPDATA%\clamor\device-settings.json`
+- Linux: `~/.config/clamor/swarms/settings-<swarm>.json`
+- macOS: `~/Library/Application Support/clamor/swarms/settings-<swarm>.json`
+- Windows: `%APPDATA%\clamor\swarms\settings-<swarm>.json`
 
-Use `--config-dir` to keep them somewhere else.
+Settings saved by Clamor 0.4 (`device-settings.json`) are used for any swarm that has none of
+its own yet. Command-line options apply in every swarm. Use `--config-dir` to keep all of this
+somewhere else.
 
 ## Who can change them
 

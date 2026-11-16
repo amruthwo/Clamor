@@ -90,7 +90,7 @@ pub struct Credentials {
 /// `rediscover`: when the coordinator cannot be reached, look for the same swarm on the local
 /// network (it may have a new address).
 #[allow(clippy::too_many_arguments)]
-pub async fn join(mut addr: String, creds: Credentials, id: Option<String>, engine: EngineConfig, updates: update::Policy, owner_policy: Option<Policy>, rediscover: bool) -> Result<()> {
+pub async fn join(mut addr: String, creds: Credentials, id: Option<String>, engine: EngineConfig, updates: update::Policy, overrides: crate::neighbour::Overrides, rediscover: bool) -> Result<()> {
     let update_flag: update::UpdateFlag = Default::default();
     if updates.check || updates.auto {
         update::spawn_checker(update_flag.clone());
@@ -109,7 +109,7 @@ pub async fn join(mut addr: String, creds: Credentials, id: Option<String>, engi
     let mut backoff = 2u64;
     let mut swarm_id: Option<String> = None;
     loop {
-        match session(&addr, &creds, &allowed, &mut swarm_id, &id, bench_port, share_port, &mut backoff, &engine, &update_flag, updates.auto, owner_policy).await {
+        match session(&addr, &creds, &allowed, &mut swarm_id, &id, bench_port, share_port, &mut backoff, &engine, &update_flag, updates.auto, overrides).await {
             Ok(Exit::Update) => {
                 // Returns only if the update failed; then carry on with this version.
                 if let Err(e) = update::update_and_restart().await {
@@ -159,7 +159,7 @@ pub async fn join(mut addr: String, creds: Credentials, id: Option<String>, engi
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn session(addr: &str, creds: &Credentials, allowed: &share::AllowedKeys, swarm_id: &mut Option<String>, id: &NodeId, bench_port: u16, share_port: u16, backoff: &mut u64, engine: &EngineConfig, update_flag: &update::UpdateFlag, auto_update: bool, owner_policy: Option<Policy>) -> Result<Exit> {
+async fn session(addr: &str, creds: &Credentials, allowed: &share::AllowedKeys, swarm_id: &mut Option<String>, id: &NodeId, bench_port: u16, share_port: u16, backoff: &mut u64, engine: &EngineConfig, update_flag: &update::UpdateFlag, auto_update: bool, overrides: crate::neighbour::Overrides) -> Result<Exit> {
     let scan = |dir: std::path::PathBuf| async move { tokio::task::spawn_blocking(move || share::scan(&dir)).await.unwrap_or_default() };
     let mut models = scan(engine.models_dir.clone()).await;
     let id2 = id.clone();
@@ -173,7 +173,7 @@ async fn session(addr: &str, creds: &Credentials, allowed: &share::AllowedKeys, 
     let nonce_m = hex::encode(crate::auth::random_bytes::<16>());
     // A one-time code is good for the first join only; reconnects use this device's key.
     let code = creds.code.as_deref().filter(|_| swarm_id.is_none());
-    write_msg(&mut wr, &Message::Hello { proto: PROTOCOL_VERSION, info, bench_port, build: Some(crate::build_info::current()), auth_nonce: Some(nonce_m.clone()), invite: code.is_some(), models: models.clone(), share_port: Some(share_port), policy: owner_policy }).await?;
+    write_msg(&mut wr, &Message::Hello { proto: PROTOCOL_VERSION, info, bench_port, build: Some(crate::build_info::current()), auth_nonce: Some(nonce_m.clone()), invite: code.is_some(), models: models.clone(), share_port: Some(share_port) }).await?;
 
     // The coordinator's challenge: prove we are approved (or know the passphrase), and check
     // that it is the coordinator we joined before (or knows the passphrase).
@@ -244,6 +244,10 @@ async fn session(addr: &str, creds: &Credentials, allowed: &share::AllowedKeys, 
     rescan.tick().await;
     let mut sampler = probe::LoadSampler::new();
     // Until the coordinator sends this device's stored policy (right after Welcome).
+    // This swarm's settings, as the owner wants them; the coordinator answers with SetPolicy.
+    let sid = ch.swarm_id.clone();
+    let owner_policy = overrides.for_swarm(&sid, class);
+    write_msg(&mut wr, &Message::OwnerPolicy { policy: owner_policy }).await?;
     let mut policy = owner_policy.unwrap_or_else(|| Policy::default_for(class));
     let mut pause = crate::neighbour::PauseState::default();
     let mut paused_reason: Option<String> = None;
@@ -326,7 +330,7 @@ async fn session(addr: &str, creds: &Credentials, allowed: &share::AllowedKeys, 
                     }
                     Message::SetPolicy { policy: p } => {
                         println!("settings updated: {}", describe_policy(&p));
-                        crate::neighbour::save_settings(&p);
+                        crate::neighbour::save_settings(&sid, &p);
                         policy = p;
                     }
                     Message::Approved { keys } => set_allowed(allowed, &keys, &ch.coordinator_key),

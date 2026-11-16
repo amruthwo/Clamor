@@ -22,6 +22,13 @@ people's.
 Admins also see devices **asking to join** (see [joining](joining.md)): approve one only if it
 shows the same check code as the dashboard.
 
+## Chats
+
+The **Home** page has a **Group** chat that everyone in the swarm shares (each message shows who
+wrote it), and your own conversations (**New chat**), which only you can open, from any of your
+devices. Conversations are kept on the coordinator, so whoever runs the coordinator's computer
+could read the files; chats that even the owner cannot read are planned.
+
 ## Signing in
 
 You rarely need to:

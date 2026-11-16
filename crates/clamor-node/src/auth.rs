@@ -39,9 +39,11 @@ fn words() -> impl Iterator<Item = &'static str> {
     WORDLIST.lines().filter_map(|l| l.split_whitespace().nth(1))
 }
 
-/// Five random words from the EFF large wordlist (7776 words: ~64 bits), joined by hyphens.
+/// Five random words from the EFF large wordlist, joined by hyphens. The four words that contain
+/// a hyphen themselves (drop-down, felt-tip, t-shirt, yo-yo) are left out, so a passphrase always
+/// reads as exactly five words. 7772 words: ~64 bits.
 pub fn generate_passphrase() -> String {
-    let list: Vec<&str> = words().collect();
+    let list: Vec<&str> = words().filter(|w| !w.contains('-')).collect();
     (0..5)
         .map(|_| {
             // Rejection sampling: no modulo bias.
@@ -481,6 +483,11 @@ mod tests {
         assert_eq!(words().count(), 7776);
         let p = generate_passphrase();
         assert_eq!(p.split('-').count(), 5, "{p}");
+        // Regression (CI): "yo-yo" made a six-part passphrase. Check many, since it was luck.
+        for _ in 0..2000 {
+            let p = generate_passphrase();
+            assert_eq!(p.split('-').count(), 5, "{p}");
+        }
         assert_ne!(p, generate_passphrase());
         assert_eq!(normalize_passphrase("  Harbor velvet__crab-Lantern.ninety "), "harbor-velvet-crab-lantern-ninety");
     }

@@ -69,14 +69,13 @@ drops off can rejoin later without benchmarking again.
 
 | | |
 |---|---|
-| **Works** | Starting a swarm, joining with a token, automatic benchmarks, a web dashboard showing devices and which models fit |
+| **Works** | Starting a swarm, joining with a generated passphrase (never sent over the network), finding the swarm on the local network, one-time codes from the dashboard, remembered swarms, automatic benchmarks, a web dashboard showing devices and which models fit |
 | **Works** | Splitting a real model across machines: the coordinator hands out layers, each machine loads its share, and they pass the work around the ring |
 | **Works** | Text chat through the API, using the model's own tokenizer and chat template (both checked against Hugging Face's) |
 | **Works** | Llama 3.x, Qwen 2.5 and SmolLM2 models, including compressed (quantized) files; checked against a reference implementation |
 | **Works** | One copy of a model is enough: other machines fetch only their share of the layers from the one that has it |
 | **Works** | Downloadable releases for Linux, macOS, Windows and Android (Termux), which can update themselves (signed) |
-| **In progress** | Easier joining: generated passphrases, remembered swarms, finding the swarm without an IP address |
-| **Planned** | Chat in the dashboard, an OpenAI-compatible API for agent tools, installers and a desktop app, a phone app, automatic discovery and coordinator hand-over, encryption between devices |
+| **Planned** | Chat in the dashboard, an OpenAI-compatible API for agent tools, installers and a desktop app, a phone app, coordinator hand-over, encryption between devices |
 
 CI runs the tests on Linux (x86_64 and arm64), Windows and macOS. The Vulkan, CUDA and Android builds are
 compile-checked only. GPU inference has been tested by hand with Vulkan on an Apple M1 running Asahi Linux.
@@ -90,17 +89,17 @@ git clone https://github.com/amruthwo/Clamor.git && cd Clamor
 cargo build --release
 ```
 
-On the first computer, start a swarm (pick your own secret):
+On the first computer, start a swarm. It makes up a passphrase of five words and prints the command to join:
 
 ```bash
-./target/release/clamor-node coordinator --swarm home --token SECRET
+./target/release/clamor-node coordinator --swarm home
+#   swarm 'home' passphrase: harbor-velvet-crab-lantern-ninety
+#   add a device: clamor-node join 192.168.1.20 --passphrase harbor-velvet-crab-lantern-ninety
 ```
 
-On each other computer, join it:
-
-```bash
-./target/release/clamor-node join <first-computer-ip> --token SECRET
-```
+On each other computer, run that command once (or just `clamor-node join --passphrase <words>`: it finds the
+swarm on the network). After that, `clamor-node join` on its own is enough: the device remembers the swarm and
+is recognised by its own key. See the [joining guide](docs/joining.md).
 
 Then open `http://<first-computer-ip>:7421/` in any browser on your network, phone included, to see the swarm
 measure itself and suggest models.
@@ -136,7 +135,8 @@ whether it steps aside while you use it. Change these from the **Settings** butt
 in the dashboard; see the [device settings guide](docs/device-settings.md).
 
 > [!WARNING]
-> For now, devices join with a shared token over unencrypted connections. Only run Clamor on a network you trust.
+> The passphrase is never sent over the network, and only approved devices can join or download models. But the
+> connections themselves are not encrypted yet, and the dashboard has no login: only run Clamor on a network you trust.
 
 ## For developers
 
@@ -179,4 +179,6 @@ Clamor is free software, licensed under the [GNU General Public License v3.0 or 
 share and change it. If you distribute Clamor or a modified version, you must share its source under the same terms.
 
 Clamor includes [ggml](https://github.com/ggml-org/ggml) in `vendor/ggml`, which is MIT-licensed
-(see [`vendor/ggml/LICENSE`](vendor/ggml/LICENSE)).
+(see [`vendor/ggml/LICENSE`](vendor/ggml/LICENSE)). Passphrases are made from the
+[EFF large wordlist](https://www.eff.org/dice) (`crates/clamor-node/data/eff_large_wordlist.txt`) by the Electronic
+Frontier Foundation, used under [CC BY 3.0 US](https://creativecommons.org/licenses/by/3.0/us/).

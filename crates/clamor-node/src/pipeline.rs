@@ -281,10 +281,12 @@ pub async fn start(shared: &Shared, req: PipelineRequest) -> Result<()> {
             share_url(&sw, &holders[0], &coordinator).ok_or_else(|| anyhow!("cannot reach {} for {}", holders[0], req.model))?
         };
         let dest = crate::share::cached_slice_path(&engine.cache_dir, &info.id, &req.model, 0..0, false);
-        let (name, id, token, d) = (req.model.clone(), info.id.clone(), engine.share_token.clone(), dest.clone());
-        tokio::task::spawn_blocking(move || crate::share::fetch_slice(&src, &name, &id, 0..0, false, token.as_deref(), &d, |_, _| {}))
+        let (name, id, key, d) = (req.model.clone(), info.id.clone(), engine.share_key.clone(), dest.clone());
+        tokio::task::spawn_blocking(move || crate::share::fetch_slice(&src, &name, &id, 0..0, false, key.as_ref(), &d, |_, _| {}))
             .await?
             .with_context(|| format!("fetching {}'s metadata from {}", req.model, holders[0]))?;
+        crate::cache::used(&engine.cache_dir, &dest, engine.swarm_id.as_deref());
+        crate::cache::enforce_cap(&engine.cache_dir, engine.cache_max, &dest);
         dest
     };
     // The header is a C handle (not Send), so it lives only in this block, never across an await.
@@ -334,8 +336,8 @@ pub async fn start(shared: &Shared, req: PipelineRequest) -> Result<()> {
                 let sw = shared.lock().unwrap();
                 share_url(&sw, &holders[0], &coordinator).ok_or_else(|| anyhow!("cannot reach {}", holders[0]))?
             };
-            let (name, token) = (req.model.clone(), engine.share_token.clone());
-            tokio::task::spawn_blocking(move || crate::share::fetch_tensor_table(&src, &name, token.as_deref())).await??
+            let (name, key) = (req.model.clone(), engine.share_key.clone());
+            tokio::task::spawn_blocking(move || crate::share::fetch_tensor_table(&src, &name, key.as_ref())).await??
         };
         let sizes: HashMap<String, u64> = table.into_iter().collect();
         let plans: Vec<(NodeId, StageMemory, u64)> = {

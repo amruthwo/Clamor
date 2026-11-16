@@ -10,7 +10,9 @@ use std::fmt;
 use std::io::{self, Read, Write};
 
 /// v2: `ShardAssign` gained `n_ctx`, `embed` and `sampling`; added `ShardFailed`.
-pub const PROTOCOL_VERSION: u16 = 2;
+/// v3: joining by passphrase (SPAKE2) and device keys: `AuthChallenge`, `AuthProve`,
+/// `Welcome.auth`, `Approved`; the plain join token is gone.
+pub const PROTOCOL_VERSION: u16 = 3;
 /// Model sharing: every node serves layer slices of the models it holds on this HTTP port.
 pub const DEFAULT_SHARE_PORT: u16 = 7423;
 /// First data-plane port: stage `i` listens on `DEFAULT_DATA_PORT + i`.
@@ -275,6 +277,16 @@ pub struct BuildInfo {
     pub commit: String,
 }
 
+/// The coordinator's side of the join handshake, sent in Welcome.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WelcomeAuth {
+    pub signature: String,
+    #[serde(default)]
+    pub confirm: Option<String>,
+    /// Keys of every device approved in this swarm (who may fetch model slices).
+    pub approved_keys: Vec<String>,
+}
+
 /// A model file a node holds and can share.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelInfo {
@@ -305,10 +317,15 @@ pub enum Message {
         info: NodeInfo,
         /// Port where this node runs the raw network-benchmark server.
         bench_port: u16,
-        join_token: Option<String>,
         /// Optional so older nodes still parse.
         #[serde(default)]
         build: Option<BuildInfo>,
+        /// The device's challenge to the coordinator (a fresh random value).
+        #[serde(default)]
+        auth_nonce: Option<String>,
+        /// The device joins with a one-time code from "Add device", not the passphrase.
+        #[serde(default)]
+        invite: bool,
         /// Models this node holds.
         #[serde(default)]
         models: Vec<ModelInfo>,
@@ -324,10 +341,37 @@ pub enum Message {
     Inventory {
         models: Vec<ModelInfo>,
     },
+    /// The coordinator's challenge, right after Hello.
+    AuthChallenge {
+        swarm_id: String,
+        swarm_name: String,
+        /// The coordinator's key in this swarm (hex).
+        coordinator_key: String,
+        nonce: String,
+        /// SPAKE2 message (used on a first join).
+        spake: String,
+    },
+    /// The device's answer: its key in this swarm and a signature over the exchange; on a
+    /// first join also its SPAKE2 message and key confirmation.
+    AuthProve {
+        device_key: String,
+        signature: String,
+        #[serde(default)]
+        spake: Option<String>,
+        #[serde(default)]
+        confirm: Option<String>,
+    },
     Welcome {
         swarm: String,
         coordinator: NodeId,
         heartbeat_secs: u32,
+        /// The coordinator's proof, and the device keys approved in this swarm.
+        #[serde(default)]
+        auth: Option<WelcomeAuth>,
+    },
+    /// The approved device keys changed (a device joined or was removed).
+    Approved {
+        keys: Vec<String>,
     },
     Reject {
         reason: String,
@@ -536,7 +580,7 @@ mod tests {
 
     #[test]
     fn hello_roundtrip() {
-        let msg = Message::Hello { proto: PROTOCOL_VERSION, info: sample_info(), bench_port: 7422, join_token: None, build: None, models: vec![ModelInfo { name: "m.gguf".into(), size: 9, id: "ab".into() }], share_port: Some(7423), policy: None };
+        let msg = Message::Hello { proto: PROTOCOL_VERSION, info: sample_info(), bench_port: 7422, build: None, auth_nonce: None, invite: false, models: vec![ModelInfo { name: "m.gguf".into(), size: 9, id: "ab".into() }], share_port: Some(7423), policy: None };
         let mut buf = Vec::new();
         write_frame(&mut buf, &msg).unwrap();
         let back = read_frame(&mut buf.as_slice()).unwrap();
@@ -573,8 +617,8 @@ mod tests {
     fn older_hello_and_heartbeat_still_parse() {
         let hb = r#"{"type":"heartbeat","cpu_load":0.5,"ram_available_bytes":1,"power":null,"running_tasks":0}"#;
         assert!(matches!(decode(hb.as_bytes()).unwrap(), Message::Heartbeat { update_available: None, .. }));
-        let mut hello = serde_json::to_value(Message::Hello { proto: PROTOCOL_VERSION, info: sample_info(), bench_port: 1, join_token: None, build: None, models: vec![], share_port: None, policy: None }).unwrap();
-        for k in ["build", "models", "share_port", "policy"] {
+        let mut hello = serde_json::to_value(Message::Hello { proto: PROTOCOL_VERSION, info: sample_info(), bench_port: 1, build: None, auth_nonce: None, invite: false, models: vec![], share_port: None, policy: None }).unwrap();
+        for k in ["build", "models", "share_port", "policy", "auth_nonce"] {
             hello.as_object_mut().unwrap().remove(k);
         }
         assert!(matches!(decode(hello.to_string().as_bytes()).unwrap(), Message::Hello { build: None, .. }));

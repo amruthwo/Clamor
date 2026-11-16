@@ -193,8 +193,13 @@ pub fn set_config_dir(dir: Option<std::path::PathBuf>) {
     let _ = CONFIG_DIR.set(d);
 }
 
+/// This device's config folder.
+pub fn config_dir() -> std::path::PathBuf {
+    CONFIG_DIR.get_or_init(|| dirs::config_dir().unwrap_or_else(std::env::temp_dir).join("clamor")).clone()
+}
+
 fn settings_path() -> std::path::PathBuf {
-    CONFIG_DIR.get_or_init(|| dirs::config_dir().unwrap_or_else(std::env::temp_dir).join("clamor")).join("device-settings.json")
+    config_dir().join("device-settings.json")
 }
 
 /// The settings this device last received (from the dashboard), if any. Read at startup, before

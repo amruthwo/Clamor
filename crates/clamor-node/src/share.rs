@@ -6,12 +6,13 @@
 //! it in its cache, and loads it like any model file. A 12-layer share of an 80-layer model
 //! downloads roughly 12/80 of the file.
 //!
-//! When the swarm has a join token, the server requires it (`x-clamor-token`), so other
+//! Every request is signed by the requesting device's swarm key (`x-clamor-auth`, see
+//! `auth::sign_share_request`), and a server answers only keys its swarm approved, so other
 //! machines on the network cannot download your models.
 use anyhow::{anyhow, bail, Context, Result};
 use axum::body::Body;
 use axum::extract::{Path as UrlPath, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
@@ -23,10 +24,9 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime};
 
-pub const TOKEN_HEADER: &str = "x-clamor-token";
 pub const MODEL_ID_HEADER: &str = "x-clamor-model-id";
 
 /// SHA-256 of the GGUF header (everything before the tensor data) plus the file size.
@@ -79,10 +79,14 @@ pub fn scan(dir: &Path) -> Vec<ModelInfo> {
     out
 }
 
+/// Device keys (hex) allowed to fetch from this node: the swarm's approved devices and its
+/// coordinator. Updated as devices are approved.
+pub type AllowedKeys = Arc<RwLock<std::collections::HashSet<String>>>;
+
 #[derive(Clone)]
 struct Shared {
     models_dir: PathBuf,
-    token: Option<String>,
+    allowed: AllowedKeys,
 }
 
 #[derive(Deserialize)]
@@ -93,16 +97,28 @@ struct SliceQuery {
     embed: bool,
 }
 
-fn authorized(s: &Shared, headers: &HeaderMap) -> bool {
-    match &s.token {
-        None => true,
-        Some(t) => headers.get(TOKEN_HEADER).and_then(|v| v.to_str().ok()) == Some(t.as_str()),
+/// Why a request may not be served, if it may not.
+fn refused(s: &Shared, uri: &Uri, headers: &HeaderMap) -> Option<Response> {
+    let path = uri.path_and_query().map(|p| p.as_str()).unwrap_or("");
+    let Some(h) = headers.get(crate::auth::SHARE_AUTH_HEADER).and_then(|v| v.to_str().ok()) else {
+        return Some((StatusCode::UNAUTHORIZED, "only devices of this swarm may fetch models (signed request required)").into_response());
+    };
+    let allowed = s.allowed.read().unwrap();
+    match crate::auth::verify_share_request(h, path, |k| allowed.contains(k)) {
+        Ok(_) => None,
+        Err(e) => Some((StatusCode::FORBIDDEN, format!("{e}")).into_response()),
     }
 }
 
-async fn list(State(s): State<Shared>, headers: HeaderMap) -> Response {
-    if !authorized(&s, &headers) {
-        return (StatusCode::UNAUTHORIZED, "swarm token required").into_response();
+/// `x-clamor-auth` for a request to `url`, signed over its path and query.
+fn sign(key: Option<&ed25519_dalek::SigningKey>, url: &str) -> Option<String> {
+    let path = url.find("://").and_then(|i| url[i + 3..].find('/').map(|j| &url[i + 3 + j..])).unwrap_or("/");
+    key.map(|k| crate::auth::sign_share_request(k, path))
+}
+
+async fn list(State(s): State<Shared>, uri: Uri, headers: HeaderMap) -> Response {
+    if let Some(r) = refused(&s, &uri, &headers) {
+        return r;
     }
     let dir = s.models_dir.clone();
     match tokio::task::spawn_blocking(move || scan(&dir)).await {
@@ -123,9 +139,9 @@ impl Write for ChannelWriter {
     }
 }
 
-async fn slice(State(s): State<Shared>, UrlPath(name): UrlPath<String>, Query(q): Query<SliceQuery>, headers: HeaderMap) -> Response {
-    if !authorized(&s, &headers) {
-        return (StatusCode::UNAUTHORIZED, "swarm token required").into_response();
+async fn slice(State(s): State<Shared>, UrlPath(name): UrlPath<String>, Query(q): Query<SliceQuery>, uri: Uri, headers: HeaderMap) -> Response {
+    if let Some(r) = refused(&s, &uri, &headers) {
+        return r;
     }
     let path = match crate::stage::resolve_model(&s.models_dir, &name) {
         Ok(p) => p,
@@ -164,9 +180,9 @@ async fn slice(State(s): State<Shared>, UrlPath(name): UrlPath<String>, Query(q)
 }
 
 /// Every tensor's name and size in bytes: enough to estimate a stage's memory without the file.
-async fn tensors(State(s): State<Shared>, UrlPath(name): UrlPath<String>, headers: HeaderMap) -> Response {
-    if !authorized(&s, &headers) {
-        return (StatusCode::UNAUTHORIZED, "swarm token required").into_response();
+async fn tensors(State(s): State<Shared>, UrlPath(name): UrlPath<String>, uri: Uri, headers: HeaderMap) -> Response {
+    if let Some(r) = refused(&s, &uri, &headers) {
+        return r;
     }
     let path = match crate::stage::resolve_model(&s.models_dir, &name) {
         Ok(p) => p,
@@ -186,12 +202,12 @@ pub fn tensor_table(path: &Path) -> Result<Vec<(String, u64)>> {
 }
 
 /// Fetch another node's tensor table for `name` (checking it is model `model_id`).
-pub fn fetch_tensor_table(source: &str, name: &str, token: Option<&str>) -> Result<Vec<(String, u64)>> {
+pub fn fetch_tensor_table(source: &str, name: &str, key: Option<&ed25519_dalek::SigningKey>) -> Result<Vec<(String, u64)>> {
     let url = format!("{}/models/{}/tensors", source.trim_end_matches('/'), url_escape(name));
     let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(30))).http_status_as_error(false).build().into();
     let mut req = agent.get(&url);
-    if let Some(t) = token {
-        req = req.header(TOKEN_HEADER, t);
+    if let Some(h) = sign(key, &url) {
+        req = req.header(crate::auth::SHARE_AUTH_HEADER, h);
     }
     let mut resp = req.call().with_context(|| format!("GET {url}"))?;
     if !resp.status().is_success() {
@@ -202,7 +218,7 @@ pub fn fetch_tensor_table(source: &str, name: &str, token: Option<&str>) -> Resu
 }
 
 /// Serve the models in `models_dir`, on `port` if free, else on any free port. Returns the port.
-pub async fn serve(port: u16, models_dir: PathBuf, token: Option<String>) -> Result<u16> {
+pub async fn serve(port: u16, models_dir: PathBuf, allowed: AllowedKeys) -> Result<u16> {
     let listener = match tokio::net::TcpListener::bind(("0.0.0.0", port)).await {
         Ok(l) => l,
         Err(_) => tokio::net::TcpListener::bind(("0.0.0.0", 0)).await?,
@@ -212,7 +228,7 @@ pub async fn serve(port: u16, models_dir: PathBuf, token: Option<String>) -> Res
         .route("/models", get(list))
         .route("/models/{name}/slice", get(slice))
         .route("/models/{name}/tensors", get(tensors))
-        .with_state(Shared { models_dir, token });
+        .with_state(Shared { models_dir, allowed });
     tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
             eprintln!("model sharing stopped: {e}");
@@ -236,15 +252,15 @@ fn url_escape(s: &str) -> String {
 /// Checks that the server's copy is the model `model_id` and that every byte arrived.
 /// `progress(done, total)` is called as it goes.
 #[allow(clippy::too_many_arguments)]
-pub fn fetch_slice(source: &str, name: &str, model_id: &str, layers: std::ops::Range<u32>, embed: bool, token: Option<&str>, dest: &Path, mut progress: impl FnMut(u64, u64)) -> Result<()> {
+pub fn fetch_slice(source: &str, name: &str, model_id: &str, layers: std::ops::Range<u32>, embed: bool, key: Option<&ed25519_dalek::SigningKey>, dest: &Path, mut progress: impl FnMut(u64, u64)) -> Result<()> {
     if dest.is_file() {
         return Ok(());
     }
     let url = format!("{}/models/{}/slice?start={}&end={}&embed={}", source.trim_end_matches('/'), url_escape(name), layers.start, layers.end, embed);
     let agent: ureq::Agent = ureq::Agent::config_builder().timeout_connect(Some(Duration::from_secs(10))).http_status_as_error(false).build().into();
     let mut req = agent.get(&url);
-    if let Some(t) = token {
-        req = req.header(TOKEN_HEADER, t);
+    if let Some(h) = sign(key, &url) {
+        req = req.header(crate::auth::SHARE_AUTH_HEADER, h);
     }
     let mut resp = req.call().with_context(|| format!("GET {url}"))?;
     let status = resp.status();
@@ -298,6 +314,15 @@ mod tests {
         assert_eq!(p("abcdef0123456789ffff", 0..16, false), Path::new("/c/abcdef0123456789/m.layers-0-16.gguf"));
         assert_ne!(p("aaaa", 0..16, false), p("bbbb", 0..16, false), "different models");
         assert_ne!(p("aaaa", 0..16, false), p("aaaa", 0..16, true), "embedding or not");
+    }
+
+    #[test]
+    fn requests_are_signed_over_path_and_query() {
+        let k = crate::auth::Device::for_tests([5; 32]).swarm_key("s");
+        let h = sign(Some(&k), "http://10.0.0.2:7423/models/m%20x.gguf/slice?start=0&end=2&embed=false").unwrap();
+        let kh = crate::auth::key_hex(&k.verifying_key());
+        assert!(crate::auth::verify_share_request(&h, "/models/m%20x.gguf/slice?start=0&end=2&embed=false", |x| x == kh).is_ok());
+        assert!(sign(None, "http://h/x").is_none());
     }
 
     #[test]

@@ -57,4 +57,4 @@ joined are remembered, so rejoining needs no passphrase).
 - The Flatpak cannot start Clamor at login yet.
 - On a desktop without a tray (or without the tray library), the app runs without a tray icon,
   and closing the window quits Clamor.
-- The dashboard has no sign-in yet: run Clamor only on a network you trust.
+- On a member device the app is signed in as you automatically (see [people and signing in](people.md)).

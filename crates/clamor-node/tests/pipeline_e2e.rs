@@ -114,6 +114,21 @@ fn http(port: u16, method: &str, path: &str, body: Option<Value>) -> (u16, Value
 
 /// Timeouts are generous: hosted CI runners (macOS especially) run these tests in parallel with
 /// others that compile GPU shaders, and a coordinator once took over 30 s to open its portal.
+/// HTTP with an optional cookie; returns (status, Set-Cookie value if any, JSON body).
+fn http_c(port: u16, method: &str, path: &str, body: Option<Value>, cookie: Option<&str>) -> (u16, Option<String>, Value) {
+    let body = body.map(|b| b.to_string()).unwrap_or_default();
+    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(120))).unwrap();
+    let cookie = cookie.map(|c| format!("Cookie: {c}\r\n")).unwrap_or_default();
+    write!(s, "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{cookie}Connection: close\r\n\r\n{body}", body.len()).unwrap();
+    let mut out = String::new();
+    s.read_to_string(&mut out).unwrap();
+    let status: u16 = out.split(' ').nth(1).and_then(|c| c.parse().ok()).unwrap_or(0);
+    let (head, payload) = out.split_once("\r\n\r\n").unwrap_or((&out, ""));
+    let set_cookie = head.lines().find_map(|l| l.strip_prefix("set-cookie: ").or_else(|| l.strip_prefix("Set-Cookie: "))).and_then(|v| v.split(';').next()).map(str::to_string);
+    (status, set_cookie, serde_json::from_str(payload).unwrap_or_else(|_| json!({ "text": payload })))
+}
+
 fn wait_for(what: &str, timeout: Duration, procs: &[&Proc], mut f: impl FnMut() -> bool) {
     let t0 = Instant::now();
     while t0.elapsed() < timeout {
@@ -676,5 +691,101 @@ fn a_long_benchmark_does_not_stop_heartbeats() {
         r["nodes"].as_array().is_some_and(|ns| ns.iter().any(|n| n["id"] == "m" && n["state"] == "ready"))
     });
     assert!(!coord.log().contains("heartbeat timeout"), "{}", coord.log());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// People, roles and signing in. A member's app reaches the dashboard through its device's
+/// local proxy (signed as the device, over TLS): it is that person, with that person's rights.
+/// A browser signs in with a code approved by a signed-in person, or a PIN. The owner appoints
+/// admins and removes people. Without any of this, the dashboard says "sign in".
+#[test]
+fn people_roles_and_signing_in() {
+    let dir = std::env::temp_dir().join(format!("clamor-node-people-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("models")).unwrap();
+    let models = dir.join("models").display().to_string();
+    let (ctrl, portal, tls_port, data, dash) = (free_port(), free_port(), free_port(), free_port_run(1), free_port());
+    let (ctrl_s, portal_s, tls_s, data_s, dash_s) = (format!("127.0.0.1:{ctrl}"), format!("127.0.0.1:{portal}"), format!("127.0.0.1:{tls_port}"), data.to_string(), format!("127.0.0.1:{dash}"));
+    let coord = spawn(&dir, "coordinator", &["coordinator", "--swarm", "home", "--passphrase", "people-test", "--id", "coord", "--bind", &ctrl_s, "--portal", &portal_s, "--portal-tls", &tls_s, "--models", &models, "--data-port", &data_s, "--quick-bench", "--no-update-check", "--config-dir", &cfg_dir(&dir, "coordinator"), "--participation", "full", "--allow-battery"]);
+    wait_for("the portal", Duration::from_secs(120), &[&coord], || TcpStream::connect(("127.0.0.1", portal)).is_ok());
+    let mut m = spawn(&dir, "member", &["join", &ctrl_s, "--passphrase", "people-test", "--name", "Bea", "--dashboard", &dash_s, "--id", "m", "--models", &models, "--no-update-check", "--config-dir", &cfg_dir(&dir, "member"), "--participation", "full", "--allow-battery"]);
+    wait_for("the member to join", Duration::from_secs(60), &[&coord, &m], || {
+        let (_, r) = http(portal, "GET", "/api/roster", None);
+        r["nodes"].as_array().is_some_and(|ns| ns.iter().any(|n| n["id"] == "m" && n["state"] == "ready"))
+    });
+
+    // The member's own dashboard: it is Bea, a member.
+    let (st, me) = http(dash, "GET", "/api/me", None);
+    assert_eq!((st, me["name"].as_str(), me["role"].as_str(), me["how"].as_str()), (200, Some("Bea"), Some("member"), Some("device")), "{me}");
+    let bea = me["id"].as_str().unwrap().to_string();
+    let (st, _) = http(dash, "GET", "/api/roster", None);
+    assert_eq!(st, 200, "members see the swarm");
+    let (st, r) = http(dash, "POST", "/api/muster", None);
+    assert_eq!(st, 403, "members cannot run the muster: {r}");
+    let own = json!({ "participation": "full", "max_ram_fraction": 0.4, "max_cpu_fraction": 0.5, "require_plugged_in": false });
+    assert_eq!(http(dash, "POST", "/api/nodes/m/policy", Some(own.clone())).0, 200, "their own device's settings");
+    assert_eq!(http(dash, "POST", "/api/nodes/coord/policy", Some(own)).0, 403, "not someone else's");
+    assert_eq!(http(dash, "POST", "/api/invite", Some(json!({ "kind": "person" }))).0, 403, "members cannot invite people");
+    let (st, inv) = http(dash, "POST", "/api/invite", Some(json!({ "kind": "device" })));
+    assert_eq!(st, 200, "but can add their own devices: {inv}");
+
+    // The owner (the coordinator machine) sees both, and makes Bea an admin.
+    let (_, ppl) = http(portal, "GET", "/api/people", None);
+    let roles: Vec<(String, String)> = ppl["people"].as_array().unwrap().iter().map(|p| (p["name"].as_str().unwrap().to_string(), p["role"].as_str().unwrap().to_string())).collect();
+    assert!(roles.contains(&("Bea".into(), "member".into())) && roles.iter().any(|r| r.1 == "owner"), "{ppl}");
+    assert_eq!(http(dash, "POST", &format!("/api/people/{bea}/role"), Some(json!({ "role": "admin" }))).0, 403, "only the owner appoints admins");
+    assert_eq!(http(portal, "POST", &format!("/api/people/{bea}/role"), Some(json!({ "role": "admin" }))).0, 200);
+    assert_eq!(http(dash, "POST", "/api/muster", None).0, 200, "admins can run the muster");
+
+    // A browser signs in with a code that Bea approves.
+    let (_, _, start) = http_c(portal, "POST", "/api/login/start", None, None);
+    let (id, code) = (start["id"].as_str().unwrap().to_string(), start["code"].as_str().unwrap().to_string());
+    let (_, _, waiting) = http_c(portal, "GET", &format!("/api/login/poll?id={id}"), None, None);
+    assert_eq!(waiting["approved"], false);
+    assert_eq!(http(dash, "POST", "/api/login/approve", Some(json!({ "code": "000-000" }))).0, 404, "a code nobody shows");
+    assert_eq!(http(dash, "POST", "/api/login/approve", Some(json!({ "code": code }))).0, 200);
+    let (_, cookie, ok) = http_c(portal, "GET", &format!("/api/login/poll?id={id}"), None, None);
+    assert_eq!(ok["approved"], true);
+    let cookie = cookie.expect("a session cookie");
+    let (_, _, me) = http_c(portal, "GET", "/api/me", None, Some(&cookie));
+    assert_eq!((me["name"].as_str(), me["how"].as_str()), (Some("Bea"), Some("session")), "{me}");
+    assert_eq!(http_c(portal, "GET", &format!("/api/login/poll?id={id}"), None, None).0, 410, "the code works once");
+
+    // PIN: Bea sets one, signs in with it; wrong PINs lock it.
+    assert_eq!(http(dash, "POST", "/api/me/pin", Some(json!({ "pin": "12" }))).0, 400);
+    assert_eq!(http(dash, "POST", "/api/me/pin", Some(json!({ "pin": "4821" }))).0, 200);
+    let (st, pin_cookie, _) = http_c(portal, "POST", "/api/login/pin", Some(json!({ "name": "bea", "pin": "4821" })), None);
+    assert_eq!((st, pin_cookie.is_some()), (200, true));
+    for _ in 0..5 {
+        assert_eq!(http_c(portal, "POST", "/api/login/pin", Some(json!({ "name": "Bea", "pin": "0000" })), None).0, 401);
+    }
+    assert_eq!(http_c(portal, "POST", "/api/login/pin", Some(json!({ "name": "Bea", "pin": "4821" })), None).0, 429, "locked after 5 wrong PINs");
+
+    // The owner removes Bea: her device leaves, her sessions end.
+    assert_eq!(http(portal, "POST", &format!("/api/people/{bea}/remove"), None).0, 200);
+    assert!(exits(&mut m, Duration::from_secs(30)), "the removed person's device leaves\n{}", m.log());
+    let (_, _, me) = http_c(portal, "GET", "/api/me", None, Some(&cookie));
+    assert_ne!(me["name"].as_str(), Some("Bea"), "her session ended: {me}");
+    let (_, ppl) = http(portal, "GET", "/api/people", None);
+    assert!(!ppl.to_string().contains("Bea"), "{ppl}");
+    drop(coord);
+
+    // From anywhere but the coordinator machine, nobody signed in gets nothing but the page.
+    let (ctrl2, portal2, tls2, data2) = (free_port(), free_port(), free_port(), free_port_run(1));
+    let log = dir.join("anon.log");
+    let f = std::fs::File::create(&log).unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_clamor-node"))
+        .args(["coordinator", "--passphrase", "x-y-z", "--bind", &format!("127.0.0.1:{ctrl2}"), "--portal", &format!("127.0.0.1:{portal2}"), "--portal-tls", &format!("127.0.0.1:{tls2}"), "--models", &models, "--data-port", &data2.to_string(), "--quick-bench", "--no-update-check", "--config-dir", &cfg_dir(&dir, "anon")])
+        .env("CLAMOR_TEST_NO_LOOPBACK_OWNER", "1")
+        .stdout(Stdio::from(f.try_clone().unwrap()))
+        .stderr(Stdio::from(f))
+        .spawn()
+        .unwrap();
+    let anon = Proc(child, "anon", log);
+    wait_for("the portal", Duration::from_secs(120), &[&anon], || TcpStream::connect(("127.0.0.1", portal2)).is_ok());
+    assert_eq!(http(portal2, "GET", "/", None).0, 200);
+    for (method, path) in [("GET", "/api/roster"), ("POST", "/api/chat"), ("POST", "/api/invite"), ("GET", "/api/people")] {
+        assert_eq!(http(portal2, method, path, None).0, 401, "{method} {path}");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }

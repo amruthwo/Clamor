@@ -78,5 +78,5 @@ somewhere else.
 
 ## Who can change them
 
-For now the dashboard has no login: anyone who can open it on your network can change any
-device's settings. Run Clamor only on a network you trust. Dashboard sign-in is planned.
+A device's settings can be changed by the person it belongs to, and by the swarm's admins and
+owner (see [people and signing in](people.md)).

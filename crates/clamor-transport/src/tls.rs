@@ -65,6 +65,20 @@ impl Identity {
         fingerprint_hex(&self.fingerprint)
     }
 
+    /// (certificate DER, PKCS#8 key DER), to keep an identity across restarts.
+    pub fn to_parts(&self) -> (Vec<u8>, Vec<u8>) {
+        (self.cert.to_vec(), self.key.clone())
+    }
+
+    pub fn from_parts(cert: Vec<u8>, key: Vec<u8>) -> io::Result<Arc<Identity>> {
+        let cert = CertificateDer::from(cert);
+        let fingerprint = fingerprint(&cert);
+        let id = Identity { cert, key, fingerprint };
+        // Check the pair is usable.
+        server_config(&id, None)?;
+        Ok(Arc::new(id))
+    }
+
     fn chain(&self) -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) {
         (vec![self.cert.clone()], PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(self.key.clone())))
     }

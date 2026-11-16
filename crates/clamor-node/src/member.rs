@@ -84,6 +84,10 @@ pub struct Credentials {
     pub passphrase: Option<String>,
     /// A one-time code from "Add device" (instead of the passphrase).
     pub code: Option<String>,
+    /// Your name, on a first join (`--name`).
+    pub person_name: Option<String>,
+    /// Where to serve the swarm's dashboard on this device (normally 127.0.0.1:7421).
+    pub dashboard: Option<String>,
     pub config_dir: std::path::PathBuf,
 }
 
@@ -105,13 +109,22 @@ pub async fn join(mut addr: String, creds: Credentials, id: Option<String>, mut 
     });
     // Serve our models to the rest of the swarm (layer slices), to the swarm's devices only.
     let allowed: share::AllowedKeys = Default::default();
+    // The swarm's dashboard on this device, signed as this device (see dashproxy.rs).
+    let dash: crate::dashproxy::Shared = Default::default();
+    if let Some(bind) = &creds.dashboard {
+        if crate::dashproxy::serve(bind, dash.clone()).await? {
+            println!("the swarm's dashboard is at http://{bind}/ on this device");
+        } else {
+            println!("{bind} is taken: not serving the swarm's dashboard on this device");
+        }
+    }
     let share_port = share::serve(DEFAULT_SHARE_PORT, engine.models_dir.clone(), allowed.clone()).await?;
 
     let id = NodeId(id.unwrap_or_else(|| probe::default_node_id().0));
     let mut backoff = 2u64;
     let mut swarm_id: Option<String> = None;
     loop {
-        match session(&addr, &creds, &allowed, &mut swarm_id, &id, bench_port, share_port, &mut backoff, &engine, &update_flag, updates.auto, overrides).await {
+        match session(&addr, &creds, &allowed, &dash, &mut swarm_id, &id, bench_port, share_port, &mut backoff, &engine, &update_flag, updates.auto, overrides).await {
             Ok(Exit::Update) => {
                 // Returns only if the update failed; then carry on with this version.
                 if let Err(e) = update::update_and_restart().await {
@@ -161,7 +174,7 @@ pub async fn join(mut addr: String, creds: Credentials, id: Option<String>, mut 
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn session(addr: &str, creds: &Credentials, allowed: &share::AllowedKeys, swarm_id: &mut Option<String>, id: &NodeId, bench_port: u16, share_port: u16, backoff: &mut u64, engine: &EngineConfig, update_flag: &update::UpdateFlag, auto_update: bool, overrides: crate::neighbour::Overrides) -> Result<Exit> {
+async fn session(addr: &str, creds: &Credentials, allowed: &share::AllowedKeys, dash: &crate::dashproxy::Shared, swarm_id: &mut Option<String>, id: &NodeId, bench_port: u16, share_port: u16, backoff: &mut u64, engine: &EngineConfig, update_flag: &update::UpdateFlag, auto_update: bool, overrides: crate::neighbour::Overrides) -> Result<Exit> {
     let scan = |dir: std::path::PathBuf| async move { tokio::task::spawn_blocking(move || share::scan(&dir)).await.unwrap_or_default() };
     let mut models = scan(engine.models_dir.clone()).await;
     let id2 = id.clone();
@@ -180,7 +193,7 @@ async fn session(addr: &str, creds: &Credentials, allowed: &share::AllowedKeys, 
     let nonce_m = hex::encode(crate::auth::random_bytes::<16>());
     // A one-time code is good for the first join only; reconnects use this device's key.
     let code = creds.code.as_deref().filter(|_| swarm_id.is_none());
-    write_msg(&mut wr, &Message::Hello { proto: PROTOCOL_VERSION, info, bench_port, build: Some(crate::build_info::current()), auth_nonce: Some(nonce_m.clone()), invite: code.is_some(), tls_fp: engine.tls.as_ref().map(|t| t.fingerprint_hex()), models: models.clone(), share_port: Some(share_port) }).await?;
+    write_msg(&mut wr, &Message::Hello { proto: PROTOCOL_VERSION, info, bench_port, build: Some(crate::build_info::current()), auth_nonce: Some(nonce_m.clone()), invite: code.is_some(), person_name: creds.person_name.clone(), tls_fp: engine.tls.as_ref().map(|t| t.fingerprint_hex()), models: models.clone(), share_port: Some(share_port) }).await?;
 
     // The coordinator's challenge: prove we are approved (or know the passphrase), and check
     // that it is the coordinator we joined before (or knows the passphrase).
@@ -207,6 +220,10 @@ async fn session(addr: &str, creds: &Credentials, allowed: &share::AllowedKeys, 
                 return Ok(Exit::Rejected(format!("{e:#}")));
             }
             set_allowed(allowed, &auth.approved_keys, &ch.coordinator_key);
+            if let (Some(port), Some(fp)) = (auth.portal_tls_port, auth.portal_tls_fp.as_deref().and_then(|f| clamor_transport::tls::parse_fingerprint(f).ok())) {
+                let host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(addr).trim_matches(['[', ']']).to_string();
+                *dash.write().unwrap() = Some(crate::dashproxy::Target { host, port, fingerprint: fp, key: key.clone() });
+            }
             *swarm_id = Some(ch.swarm_id.clone());
             // Remember the swarm: its coordinator's key, and where it was reached.
             let mut p = profile.unwrap_or_else(|| crate::auth::MemberProfile { swarm_id: ch.swarm_id.clone(), name: ch.swarm_name.clone(), coordinator_key: String::new(), addresses: Vec::new(), last_joined_unix: 0 });

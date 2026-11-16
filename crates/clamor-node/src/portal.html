@@ -12,6 +12,7 @@
   header { display:flex; align-items:center; gap:12px; flex-wrap:wrap; padding:14px 18px; border-bottom:1px solid var(--line); background:var(--card); position:sticky; top:0; }
   header h1 { margin:0; font-size:20px; letter-spacing:.5px; }
   header .sub { color:var(--mute); flex:1; }
+  [hidden] { display:none !important; }
   main { max-width:1100px; margin:0 auto; padding:16px; display:grid; gap:16px; }
   section { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px; overflow-x:auto; }
   h2 { margin:0 0 10px; font-size:13px; text-transform:uppercase; letter-spacing:.08em; color:var(--mute); }
@@ -58,6 +59,10 @@
   dialog { max-height:calc(100dvh - 24px); }
   dialog form { display:flex; flex-direction:column; max-height:calc(100dvh - 26px); }
   .dlg-body { overflow-y:auto; }
+  .signin { max-width:520px; margin:40px auto; background:var(--card); border:1px solid var(--line); border-radius:12px; padding:20px; }
+  .approve { background:var(--card); border:1px solid var(--accent); border-radius:12px; padding:12px 16px; display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+  .err { color:var(--bad); }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
   .code { font:600 34px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing:.08em; text-align:center; padding:8px 0; }
   .cmd { margin:0; padding:10px 12px; border:1px solid var(--line); border-radius:8px; white-space:pre-wrap; word-break:break-all; font-size:13px; }
   @media (max-width: 520px) {
@@ -71,10 +76,27 @@
 <header>
   <h1>Clamor</h1>
   <div class="sub" id="sub">connecting…</div>
+  <span class="mute" id="whoami"></span>
+  <button id="signout" hidden>Sign out</button>
   <button id="add-device">Add device</button>
   <button class="primary" id="muster">Re-muster</button>
 </header>
-<main>
+<section id="signin" class="signin" hidden>
+  <h2 style="text-transform:none;letter-spacing:0;font-size:22px;color:var(--ink)">Sign in</h2>
+  <p>Ask someone already in the swarm to approve this code in their Clamor app or dashboard (or approve it yourself on one of your devices):</p>
+  <div class="code" id="si-code">…</div>
+  <p class="mute" id="si-status">Waiting for approval…</p>
+  <details><summary>Sign in with your PIN instead</summary>
+    <form id="si-pin" class="row" style="margin-top:10px">
+      <input id="si-name" placeholder="Your name" autocomplete="username">
+      <input id="si-pinval" placeholder="PIN" inputmode="numeric" type="password" autocomplete="current-password">
+      <button class="primary">Sign in</button>
+    </form>
+    <p class="err" id="si-err"></p>
+  </details>
+</section>
+<main id="main">
+  <div id="approvals"></div>
   <section><h2>Group</h2><div class="stats" id="stats"></div><div id="warnings"></div></section>
 
   <section><h2>Devices</h2>
@@ -101,11 +123,18 @@
   <section><h2>Chat and tasks</h2>
     <div class="chat"><input disabled placeholder="Chat and task console arrive in v0.2"><button disabled>Send</button></div>
   </section>
+  <section><h2>People</h2>
+    <table><thead><tr><th>Name</th><th>Role</th><th>Devices</th><th></th></tr></thead><tbody id="people"></tbody></table>
+    <p class="mute" id="pin-row"></p>
+  </section>
 </main>
 <dialog id="invite" aria-labelledby="inv-title">
   <form method="dialog">
     <div class="dlg-head"><h3 id="inv-title">Add a device</h3><div class="mute">Run this on the new device, with Clamor installed:</div></div>
     <div class="dlg-body">
+      <div class="seg" role="group" aria-label="Whose device" id="inv-kind">
+        <button type="button" data-v="device">One of my devices</button><button type="button" data-v="person">Someone new</button>
+      </div>
       <div class="code" id="inv-code" aria-live="polite"></div>
       <pre class="cmd" id="inv-cmd"></pre>
       <div class="help" id="inv-help"></div>
@@ -241,8 +270,11 @@ $('set-drain').onclick = () => {
 };
 $('muster').onclick = () => post('/api/muster');
 let inviteTimer;
+let inviteKind = 'device';
+document.querySelectorAll('#inv-kind button').forEach(b => b.onclick = () => { inviteKind = b.dataset.v; $('add-device').click(); });
 $('add-device').onclick = async () => {
-  const r = await fetch('/api/invite', { method:'POST' });
+  document.querySelectorAll('#inv-kind button').forEach(b => { b.setAttribute('aria-pressed', b.dataset.v === inviteKind); b.hidden = b.dataset.v === 'person' && !(me && me.role !== 'member'); });
+  const r = await fetch('/api/invite', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ kind: inviteKind }) });
   const text = await r.text();
   clearInterval(inviteTimer);
   if (!r.ok) {
@@ -255,7 +287,7 @@ $('add-device').onclick = async () => {
     $('inv-cmd').textContent = j.command;
     const tick = () => {
       const s = Math.max(0, Math.round((until - Date.now()) / 1000));
-      $('inv-help').textContent = s ? `The code works once, for the next ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}. After joining, the device is remembered: “clamor-node join” is enough from then on.` : 'This code has expired. Close and press Add device again for a new one.';
+      $('inv-help').textContent = s ? `The code works once, for the next ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}. ${inviteKind === 'device' ? 'The device joins as you.' : 'They join as a new person (add --name to give their name).'} After joining, the device is remembered.` : 'This code has expired. Close and press Add device again for a new one.';
     };
     tick(); inviteTimer = setInterval(tick, 1000);
   }
@@ -270,12 +302,13 @@ function renderRoster(data) {
   $('roster').innerHTML = data.nodes.map(n => {
     const r = n.report, b = r.bench, l = r.link, p = r.policy;
     const paused = p.participation === 'paused';
-    const settings = `<button onclick='openSettings(${JSON.stringify(n.id)})'>Settings</button>`;
+    const mine = me && (me.role !== 'member' || (n.person && n.person[0] === me.id));
+    const settings = mine ? `<button onclick='openSettings(${JSON.stringify(n.id)})'>Settings</button>` : '';
     const actions = n.state === 'away' ? `<span class="mute">${esc(n.note || 'away')}</span> ${settings}`
-      : `${n.is_coordinator ? '' : `<button onclick='togglePause(${JSON.stringify(n.id)}, ${paused}, ${JSON.stringify(p)})'>${paused ? 'Resume' : 'Pause'}</button> `}${settings}`;
+      : `${n.is_coordinator || !mine ? '' : `<button onclick='togglePause(${JSON.stringify(n.id)}, ${paused}, ${JSON.stringify(p)})'>${paused ? 'Resume' : 'Pause'}</button> `}${settings}`;
     const state = n.paused ? `<span class="paused-chip" title="${esc(n.paused)}">paused · ${esc(n.paused)}</span>` : esc(n.state);
     return `<tr class="${esc(n.state)}">
-      <td><span class="dot"></span>${esc(n.id)}${n.is_coordinator ? ' <small>(coordinator)</small>' : ''}</td><td>${state}</td>
+      <td><span class="dot"></span>${esc(n.id)}${n.is_coordinator ? ' <small>(coordinator)</small>' : ''}${n.person ? ` <small>· ${esc(n.person[1])}</small>` : ''}</td><td>${state}</td>
       <td>${esc(r.info.class)} · ${esc(r.info.os)}/${esc(r.info.arch)}</td>
       <td>${n.build ? esc(n.build.version) + (n.build.variant !== 'cpu' ? ' · ' + esc(n.build.variant) : '') : '<span class="mute">older</span>'}${n.update_available ? ` <span class="mute" title="clamor-node update">→ ${esc(n.update_available)} available</span>` : ''}</td>
       <td class="num">${gib(r.info.ram_available_bytes)} / ${gib(r.info.ram_total_bytes)} GiB</td>
@@ -304,9 +337,62 @@ function renderPlan(data) {
   $('assume').textContent = `Estimates assume ${(data.assumptions.mem_efficiency*100).toFixed(0)}% memory-bandwidth and ${(data.assumptions.compute_efficiency*100).toFixed(0)}% compute efficiency. Treat them as planning numbers, not promises.`;
 }
 
+let me = null, signin = null;
+async function checkMe() {
+  const r = await fetch('/api/me');
+  if (r.status === 401) {
+    me = null;
+    $('main').hidden = true; $('signin').hidden = false;
+    for (const id of ['muster', 'add-device', 'signout']) $(id).hidden = true;
+    $('whoami').textContent = '';
+    $('sub').textContent = 'sign in to see the swarm';
+    if (!signin) {
+      signin = await (await fetch('/api/login/start', { method:'POST' })).json();
+      $('si-code').textContent = signin.code;
+    }
+    const p = await fetch('/api/login/poll?id=' + signin.id);
+    if (p.status === 410) { signin = null; $('si-status').textContent = 'That code expired; here is a new one.'; }
+    else if ((await p.json()).approved) { signin = null; location.reload(); }
+    return false;
+  }
+  me = await r.json();
+  $('main').hidden = false; $('signin').hidden = true;
+  $('whoami').textContent = `${me.name} · ${me.role}`;
+  $('signout').hidden = me.how !== 'session';
+  $('muster').hidden = me.role === 'member';
+  $('add-device').hidden = false;
+  $('set-drain').hidden = me.role === 'member';
+  return true;
+}
+async function refreshPeople() {
+  const [ppl, pend] = await Promise.all([fetch('/api/people').then(r => r.json()), fetch('/api/login/pending').then(r => r.json())]);
+  $('people').innerHTML = ppl.people.map(p => {
+    let actions = '';
+    if (me.role === 'owner' && p.role !== 'owner') actions += `<button onclick='setRole(${JSON.stringify(p.id)}, ${JSON.stringify(p.role === 'admin' ? 'member' : 'admin')})'>${p.role === 'admin' ? 'Make member' : 'Make admin'}</button> `;
+    if (me.role !== 'member' && p.role !== 'owner' && (p.role !== 'admin' || me.role === 'owner')) actions += `<button class="danger" onclick='removePerson(${JSON.stringify(p.id)}, ${JSON.stringify(p.name)})'>Remove…</button>`;
+    return `<tr><td>${esc(p.name)}${p.id === me.id ? ' <small>(you)</small>' : ''}</td><td>${esc(p.role)}</td><td>${p.devices.map(esc).join(', ') || '<span class="mute">none</span>'}</td><td>${actions}</td></tr>`;
+  }).join('');
+  $('pin-row').innerHTML = `To sign in from a browser without approving a code, set a PIN: <button onclick='setPin()'>${me.has_pin ? 'Change my PIN' : 'Set my PIN'}</button>`;
+  $('approvals').innerHTML = pend.pending.map(s => `<div class="approve"><b>A browser (${esc(s.from)}) wants to sign in.</b> <span>If it shows <b>${esc(s.code)}</b> and it is you, approve it: it signs in as you.</span> <button class="primary" onclick='approveSignin(${JSON.stringify(s.code)})'>Approve as me</button></div>`).join('');
+}
+window.setRole = (id, role) => post('/api/people/' + encodeURIComponent(id) + '/role', { role });
+window.removePerson = (id, name) => confirm(`Remove ${name} from the swarm? Their devices leave and need a new invitation to come back.`) && post('/api/people/' + encodeURIComponent(id) + '/remove');
+window.approveSignin = code => post('/api/login/approve', { code });
+window.setPin = async () => {
+  const pin = prompt('New PIN (4 to 12 digits):');
+  if (pin) post('/api/me/pin', { pin });
+};
+$('signout').onclick = async () => { await fetch('/api/logout', { method:'POST' }); location.reload(); };
+$('si-pin').onsubmit = async e => {
+  e.preventDefault();
+  const r = await fetch('/api/login/pin', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ name: $('si-name').value, pin: $('si-pinval').value }) });
+  if (r.ok) location.reload(); else $('si-err').textContent = await r.text();
+};
 async function refresh() {
   if (busy) return; busy = true;
   try {
+    if (!await checkMe()) { busy = false; return; }
+    refreshPeople().catch(() => {});
     const q = new URLSearchParams({ quant: $('quant').value, ctx: $('ctx').value, target: $('target').value, topology: $('topology').value });
     const [roster, plan] = await Promise.all([fetch('/api/roster').then(r => r.json()), fetch('/api/plan?' + q).then(r => r.json())]);
     renderRoster(roster); renderPlan(plan);
@@ -321,6 +407,7 @@ refresh().then(() => {
   if (location.hash === '#add-device') $('add-device').click();
 });
 setInterval(refresh, 3000);
+// (checkMe also drives the sign-in screen's polling.)
 </script>
 </body>
 </html>

@@ -85,7 +85,7 @@ pub fn hkdf32(ikm: &[u8], salt: &[u8], info: &[u8]) -> [u8; 32] {
     hmac(&prk, &m)
 }
 
-fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
@@ -158,6 +158,9 @@ pub struct CoordinatorProfile {
     pub name: String,
     pub passphrase: String,
     pub approved: Vec<ApprovedDevice>,
+    /// The people in this swarm (each approved device belongs to one).
+    #[serde(default)]
+    pub people: Vec<crate::people::Person>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -166,6 +169,9 @@ pub struct ApprovedDevice {
     pub key: String,
     pub name: String,
     pub approved_unix: u64,
+    /// The person it belongs to (`Person::id`).
+    #[serde(default)]
+    pub person: String,
 }
 
 /// What a device keeps about a swarm it joined.
@@ -195,7 +201,8 @@ impl CoordinatorProfile {
     /// The swarm this device coordinates under `name`, or a new one (new id, passphrase).
     pub fn load_or_create(config_dir: &Path, name: &str, passphrase: Option<&str>) -> Result<Self> {
         let existing = Self::all(config_dir).into_iter().find(|p| p.name == name);
-        let mut p = existing.unwrap_or_else(|| CoordinatorProfile { swarm_id: hex::encode(random_bytes::<16>()), name: name.into(), passphrase: generate_passphrase(), approved: Vec::new() });
+        let mut p = existing.unwrap_or_else(|| CoordinatorProfile { swarm_id: hex::encode(random_bytes::<16>()), name: name.into(), passphrase: generate_passphrase(), approved: Vec::new(), people: Vec::new() });
+        p.normalize();
         if let Some(pp) = passphrase {
             let pp = normalize_passphrase(pp);
             if pp.is_empty() {
@@ -209,6 +216,33 @@ impl CoordinatorProfile {
     pub fn save(&self, config_dir: &Path) -> Result<()> {
         write_private(&Self::path(config_dir, &self.swarm_id), &serde_json::to_vec_pretty(self)?)
     }
+
+    /// There is always an owner (the person at the coordinator), and every device belongs to a
+    /// person (devices approved before people existed each become one).
+    pub fn normalize(&mut self) {
+        use crate::people::{Person, Role, OWNER_ID};
+        if !self.people.iter().any(|p| p.role == Role::Owner) {
+            let name = std::env::var("USER").or_else(|_| std::env::var("USERNAME")).ok().filter(|n| !n.is_empty()).unwrap_or_else(|| "Owner".into());
+            self.people.insert(0, Person { id: OWNER_ID.into(), name, role: Role::Owner, pin: None, created_unix: clamor_proto::unix_now() });
+        }
+        for i in 0..self.approved.len() {
+            if self.approved[i].person.is_empty() || !self.people.iter().any(|p| p.id == self.approved[i].person) {
+                let id = crate::people::new_person_id();
+                self.people.push(Person { id: id.clone(), name: self.approved[i].name.clone(), role: Role::Member, pin: None, created_unix: self.approved[i].approved_unix });
+                self.approved[i].person = id;
+            }
+        }
+    }
+
+    pub fn person(&self, id: &str) -> Option<&crate::people::Person> {
+        self.people.iter().find(|p| p.id == id)
+    }
+
+    /// The person a device key belongs to.
+    pub fn person_of_key(&self, key: &str) -> Option<&crate::people::Person> {
+        self.approved.iter().find(|d| d.key == key).and_then(|d| self.person(&d.person))
+    }
+
     pub fn delete(config_dir: &Path, swarm_id: &str) -> Result<()> {
         Ok(std::fs::remove_file(Self::path(config_dir, swarm_id))?)
     }

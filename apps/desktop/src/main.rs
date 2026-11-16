@@ -228,20 +228,11 @@ fn swarms_json(scan: bool) -> Result<Value, String> {
     serde_json::from_slice(&out.stdout).map_err(|e| format!("{e}: {}", String::from_utf8_lossy(&out.stderr)))
 }
 
-/// The dashboard to show: our own on the coordinator; the coordinator's on a member.
+/// The dashboard to show: on the coordinator its own; on a member the swarm's dashboard as
+/// clamor-node serves it on this device (signed in as this device's person, encrypted to the
+/// coordinator). Both are on this machine.
 fn portal_url(s: &Setup) -> Option<String> {
-    match s.mode.as_deref() {
-        Some("coordinator") => Some(format!("http://127.0.0.1:{PORTAL_PORT}/")),
-        Some("member") => {
-            let v = swarms_json(false).ok()?;
-            let joined = v["joined"].as_array()?;
-            let p = joined.iter().find(|p| s.swarm.as_deref().is_none_or(|w| p["name"] == w))?;
-            let addr = p["address"].as_str()?;
-            let host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(addr);
-            Some(format!("http://{host}:{PORTAL_PORT}/"))
-        }
-        _ => None,
-    }
+    s.mode.as_ref().map(|_| format!("http://127.0.0.1:{PORTAL_PORT}/"))
 }
 
 // ---------------------------------------------------------------- commands for the UI
@@ -313,9 +304,12 @@ async fn start_swarm(shared: State<'_, Shared>, name: String, passphrase: Option
 }
 
 #[tauri::command]
-async fn join_swarm(shared: State<'_, Shared>, swarm: Option<String>, address: Option<String>, secret: String) -> Result<(), String> {
+async fn join_swarm(shared: State<'_, Shared>, swarm: Option<String>, address: Option<String>, secret: String, name: Option<String>) -> Result<(), String> {
     let secret = secret.trim().to_string();
     let mut args = vec!["join".to_string()];
+    if let Some(n) = name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()) {
+        args.extend(["--name".into(), n]);
+    }
     if let Some(a) = address.filter(|a| !a.trim().is_empty()) {
         let a = a.trim();
         args.push(if a.contains(':') { a.to_string() } else { format!("{a}:{CONTROL_PORT}") });

@@ -40,6 +40,9 @@ clamor-node join --passphrase harbor-velvet-crab-lantern-ninety
 
 If there is more than one swarm on the network, name the one you want with `--swarm home`.
 
+Add `--name "Your name"` on a first join: it is how the others see you in the swarm (see
+[people and signing in](people.md)).
+
 ### With a one-time code instead
 
 Rather than handing out the passphrase, you can give a new device a code that works once:
@@ -54,9 +57,8 @@ The code works for one device, for ten minutes; three wrong tries cancel it. Lik
 passphrase, it is never sent over the network. After that first join the device is remembered
 exactly as if it had used the passphrase.
 
-Until the dashboard has sign-in, codes can be made only on the coordinator itself (the dashboard
-opened there, or `clamor-node invite`): anyone on your network can open the dashboard, and a
-code lets a device in.
+Anyone in the swarm can make a code for **one of their own devices** (it joins as them); only
+admins can make one for **someone new**.
 
 Capitals, spaces and dashes in the passphrase do not matter: `Harbor Velvet Crab Lantern Ninety`
 works too. If you would rather not type it on the command line (where other users of the same
@@ -137,15 +139,13 @@ you: `device.key` is the device's secret, and `swarms/` holds one file per swarm
 
 ### Not yet
 
-- The dashboard (port 7421) and model downloads between devices are not encrypted yet. Model
-  downloads only go to approved devices (signed requests), but someone on your network could
-  see the dashboard, and chat text sent through it.
-- The dashboard has no login: anyone on your network can open it.
+- The plain dashboard (port 7421) is not encrypted: use `https://<coordinator>:7424/` in a
+  browser, or the app (see [people and signing in](people.md)). Model downloads between devices
+  are not encrypted either, but only approved devices get them (signed requests).
 - A QR code for adding phones comes with the phone app.
 - Finding the swarm on the network is tested on Linux. Some networks (guest Wi-Fi, some
   corporate networks) block it; give the address instead.
 
-Only run Clamor on a network you trust until the dashboard is protected too.
 
 ## If something goes wrong
 

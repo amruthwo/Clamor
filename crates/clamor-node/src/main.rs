@@ -1,12 +1,15 @@
 //! `clamor-node`: run a coordinator (roster + web portal) or join one as a member.
 
+mod access;
 mod auth;
 mod build_info;
 mod cache;
 mod coordinator;
+mod dashproxy;
 mod discovery;
 mod member;
 mod neighbour;
+mod people;
 mod pipeline;
 mod portal;
 mod share;
@@ -70,6 +73,9 @@ enum Cmd {
         bind: String,
         #[arg(long, default_value_t = format!("0.0.0.0:{DEFAULT_PORTAL_PORT}"))]
         portal: String,
+        /// The encrypted (HTTPS) dashboard; members' apps use it. Another free port if taken.
+        #[arg(long, default_value = "0.0.0.0:7424")]
+        portal_tls: String,
         /// The swarm's passphrase. Default: the one this swarm already has, or five random
         /// words for a new swarm (printed at start). Devices need it only for their first join.
         #[arg(long, alias = "token", env = "CLAMOR_PASSPHRASE", hide_env_values = true)]
@@ -101,6 +107,12 @@ enum Cmd {
         /// of the passphrase.
         #[arg(long, conflicts_with = "passphrase")]
         code: Option<String>,
+        /// Your name, shown to the others in the swarm (first join; default: this device's name).
+        #[arg(long)]
+        name: Option<String>,
+        /// Serve the swarm's dashboard on this device, signed in as you ("off" to not).
+        #[arg(long, default_value_t = format!("127.0.0.1:{DEFAULT_PORTAL_PORT}"))]
+        dashboard: String,
         /// Without an address: join the swarm with this name.
         #[arg(long)]
         swarm: Option<String>,
@@ -308,7 +320,7 @@ async fn run(cmd: Cmd, priority: Option<Priority>) -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Coordinator { swarm, bind, portal, passphrase, id, engine, data_port, quick_bench, updates, policy, no_mdns } => {
+        Cmd::Coordinator { swarm, bind, portal, portal_tls, passphrase, id, engine, data_port, quick_bench, updates, policy, no_mdns } => {
             let id = NodeId(id.unwrap_or_else(|| probe::default_node_id().0));
             let config_dir = neighbour::config_dir();
             let profile = auth::CoordinatorProfile::load_or_create(&config_dir, &swarm, passphrase.as_deref())?;
@@ -341,13 +353,13 @@ async fn run(cmd: Cmd, priority: Option<Priority>) -> Result<()> {
             tokio::spawn(coordinator::updates(shared.clone(), updates.policy()));
             let portal_shared = shared.clone();
             tokio::spawn(async move {
-                if let Err(e) = portal::serve(portal, portal_shared).await {
+                if let Err(e) = portal::serve(portal, portal_tls, portal_shared).await {
                     eprintln!("portal stopped: {e}");
                 }
             });
             coordinator::run_listener(&bind, shared).await
         }
-        Cmd::Join { addr, swarm, no_mdns, passphrase, code, id, engine, updates, policy } => {
+        Cmd::Join { addr, swarm, no_mdns, passphrase, code, name, dashboard, id, engine, updates, policy } => {
             let config_dir = neighbour::config_dir();
             let addr = match addr {
                 Some(a) if a.contains(':') => a,
@@ -356,7 +368,7 @@ async fn run(cmd: Cmd, priority: Option<Priority>) -> Result<()> {
             };
             let engine = engine.config(None, None); // the key is per swarm: set once joined
             engine.validate()?;
-            let creds = member::Credentials { device: auth::Device::load_or_create(&config_dir)?, passphrase, code, config_dir };
+            let creds = member::Credentials { device: auth::Device::load_or_create(&config_dir)?, passphrase, code, person_name: name, dashboard: (dashboard != "off").then_some(dashboard), config_dir };
             member::join(addr, creds, id, engine, updates.policy(), policy.overrides(priority), !no_mdns).await
         }
         Cmd::Leave { swarm, purge, delete_swarm, cache_dir } => {

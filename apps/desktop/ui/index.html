@@ -59,6 +59,7 @@
       <h2>Join a swarm</h2>
       <div class="found" id="found"><span class="mute">Looking on your network…</span></div>
       <label>Or its address <input id="join-addr" placeholder="e.g. 192.168.1.20" autocomplete="off"></label>
+      <label>Your name <input id="join-name" placeholder="shown to the others in the swarm" autocomplete="name"></label>
       <label>Code or passphrase <input id="join-secret" placeholder="six-digit code from “Add device”, or the five words" autocomplete="off"></label>
       <button class="primary" id="join-go">Join</button>
     </form>
@@ -143,7 +144,7 @@ $('join').onsubmit = e => {
   e.preventDefault();
   const addr = $('join-addr').value.trim();
   const target = addr ? { swarm: null, address: addr } : { swarm: chosen ? chosen.name : null, address: chosen ? chosen.addresses[0] : null };
-  busy($('join-go'), 'Joining…', () => invoke('join_swarm', { ...target, secret: $('join-secret').value }));
+  busy($('join-go'), 'Joining…', () => invoke('join_swarm', { ...target, secret: $('join-secret').value, name: $('join-name').value || null }));
 };
 $('show-log').onclick = () => { showLog = !showLog; $('show-log').textContent = showLog ? 'Dashboard' : 'Log'; refresh(); };
 $('retry').onclick = async () => { try { await invoke('restart'); } catch (e) { $('run-err').textContent = String(e); } refresh(); };

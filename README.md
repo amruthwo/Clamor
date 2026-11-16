@@ -140,9 +140,10 @@ whether it steps aside while you use it. Change these from the **Settings** butt
 in the dashboard; see the [device settings guide](docs/device-settings.md).
 
 > [!WARNING]
-> The passphrase is never sent over the network, only approved devices can join or download models, and the
-> connections between devices are encrypted. But the dashboard has no login and is not encrypted yet: only run
-> Clamor on a network you trust.
+> The passphrase is never sent over the network, only approved devices can join or download models, the
+> connections between devices are encrypted, and the dashboard needs a sign-in with owner, admin and member roles
+> (see [people and signing in](docs/people.md)). The plain browser dashboard on port 7421 is not encrypted; use the
+> app, or `https://<coordinator>:7424/`.
 
 ## For developers
 

@@ -41,7 +41,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf \
-            libvulkan-dev glslc spirv-headers flatpak flatpak-builder
+            libvulkan-dev glslc spirv-headers flatpak
       - name: Tauri CLI
         run: cargo install tauri-cli --version "^2" --locked
       - name: clamor-node
@@ -54,7 +54,11 @@ jobs:
         run: cargo tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
       - name: Flatpak
         if: matrix.flatpak
-        run: apps/desktop/flatpak/build.sh "apps/desktop/target/${{ matrix.target }}/release/bundle/deb"
+        env: { FLATPAK_BUILDER: "flatpak run org.flatpak.Builder" }
+        run: |
+          flatpak --user remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak --user install -y --noninteractive flathub org.flatpak.Builder
+          apps/desktop/flatpak/build.sh "apps/desktop/target/${{ matrix.target }}/release/bundle/deb"
       - name: Collect
         shell: bash
         run: |

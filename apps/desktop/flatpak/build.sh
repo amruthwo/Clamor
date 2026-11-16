@@ -15,7 +15,9 @@ if [ "$(git -C "$here/shared-modules" rev-parse HEAD 2>/dev/null)" != "$modules_
   git -C "$here/shared-modules" checkout -q "$modules_commit"
 fi
 flatpak --user remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-flatpak-builder --user --install-deps-from=flathub --force-clean --repo="$here/repo" "$here/build" "$here/io.github.amruthwo.Clamor.yml"
+# FLATPAK_BUILDER: e.g. "flatpak run org.flatpak.Builder" (CI uses Flathub's current builder:
+# older distribution builds install CMake libraries into /app/lib64, where nothing finds them).
+${FLATPAK_BUILDER:-flatpak-builder} --user --install-deps-from=flathub --force-clean --repo="$here/repo" "$here/build" "$here/io.github.amruthwo.Clamor.yml"
 arch=$(flatpak --default-arch)
 version=$(sed -n 's/.*"version": "\(.*\)".*/\1/p' "$here/../tauri.conf.json" | head -1)
 flatpak build-bundle "$here/repo" "$here/Clamor-$version-$arch.flatpak" io.github.amruthwo.Clamor

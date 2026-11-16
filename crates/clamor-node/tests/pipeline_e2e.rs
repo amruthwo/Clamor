@@ -395,16 +395,17 @@ fn only_compute_threads_run_at_low_priority() {
     assert_eq!(st, 200, "{r}");
 
     // (thread name, nice) for every thread of the coordinator.
+    // Threads come and go (tokio's blocking pool): skip one that exits while we look.
     let threads: Vec<(String, i64)> = std::fs::read_dir(format!("/proc/{}/task", coord.0.id()))
         .unwrap()
         .flatten()
-        .map(|t| {
-            let name = std::fs::read_to_string(t.path().join("comm")).unwrap().trim().to_string();
-            let stat = std::fs::read_to_string(t.path().join("stat")).unwrap();
+        .filter_map(|t| {
+            let name = std::fs::read_to_string(t.path().join("comm")).ok()?.trim().to_string();
+            let stat = std::fs::read_to_string(t.path().join("stat")).ok()?;
             // Fields after the ")" that closes the name; nice is field 19 overall.
             let after = &stat[stat.rfind(')').unwrap() + 2..];
-            let nice = after.split(' ').nth(16).unwrap().parse().unwrap();
-            (name, nice)
+            let nice = after.split(' ').nth(16)?.parse().ok()?;
+            Some((name, nice))
         })
         .collect();
     let compute: Vec<i64> = threads.iter().filter(|(n, _)| n == "clamor-compute").map(|t| t.1).collect();
@@ -564,7 +565,7 @@ fn devices_find_the_swarm_on_the_local_network() {
     let swarm = format!("e2e-{}", std::process::id());
     let coord = spawn(&dir, "coordinator", &["coordinator", "--swarm", &swarm, "--passphrase", "find-me-on-the-lan", "--id", "coord", "--bind", &ctrl_s, "--portal", &portal_s, "--models", &models, "--data-port", &data_s, "--quick-bench", "--no-update-check", "--config-dir", &cfg_dir(&dir, "coordinator"), "--participation", "full", "--allow-battery"]);
     wait_for("the portal", Duration::from_secs(120), &[&coord], || TcpStream::connect(("127.0.0.1", portal)).is_ok());
-    assert!(coord.log().contains("advertising"), "{}", coord.log());
+    wait_for("the coordinator to advertise the swarm", Duration::from_secs(10), &[&coord], || coord.log().contains("advertising"));
     let member_cfg = cfg_dir(&dir, "member");
     let member = |name: &'static str, extra: &[&str]| {
         let mut args = vec!["join"];

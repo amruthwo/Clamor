@@ -403,7 +403,9 @@ async fn session(addr: &str, creds: &Credentials, allowed: &share::AllowedKeys, 
                     Message::Drain { grace_secs } => {
                         slot.stop();
                         println!("drain requested (grace {grace_secs}s); no work in flight, leaving");
-                        write_msg(&mut wr, &Message::Drained).await?;
+                        // Leave even if the coordinator already closed the connection (a
+                        // removed device's acknowledgement can arrive after it is gone).
+                        let _ = write_msg(&mut wr, &Message::Drained).await;
                         return Ok(Exit::Drained);
                     }
                     Message::TaskAssign { task } => {

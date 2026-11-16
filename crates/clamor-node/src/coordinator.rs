@@ -544,7 +544,7 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
         set_state(&shared, &id, generation, NodeState::Benchmarking);
         let _ = tx.send(Message::BenchRequest { quick });
     }
-    let writer = tokio::spawn(async move {
+    let mut writer = tokio::spawn(async move {
         while let Some(m) = rx.recv().await {
             if write_msg(&mut wr, &m).await.is_err() {
                 break;
@@ -663,7 +663,13 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
             sw.node_lost(&id, &leave_note);
         }
     }
-    writer.abort();
+    // Let the writer send what is queued (a Drain to a device that was just removed) before the
+    // connection closes: aborting it could drop that message, and the device would reconnect
+    // instead of leaving. It ends once every sender is gone (ours, and the roster's).
+    drop(tx);
+    if timeout(Duration::from_secs(2), &mut writer).await.is_err() {
+        writer.abort();
+    }
     println!("{id}: {leave_note}");
     Ok(())
 }

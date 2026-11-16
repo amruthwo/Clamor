@@ -12,7 +12,12 @@ use std::io::{self, Read, Write};
 /// v2: `ShardAssign` gained `n_ctx`, `embed` and `sampling`; added `ShardFailed`.
 /// v3: joining by passphrase (SPAKE2) and device keys: `AuthChallenge`, `AuthProve`,
 /// `Welcome.auth`, `Approved`; the plain join token is gone.
-pub const PROTOCOL_VERSION: u16 = 3;
+/// v4: settings per swarm: the device sends its owner's settings for this swarm after Welcome
+/// (`OwnerPolicy`), no longer in `Hello`.
+/// v5: encrypted connections: the control connection is TLS (the join handshake signs the TLS
+/// exporter), and data links are TLS with certificates pinned by fingerprint (`Hello.tls_fp`,
+/// `ShardAssign.upstream_tls/downstream_tls`).
+pub const PROTOCOL_VERSION: u16 = 5;
 /// Model sharing: every node serves layer slices of the models it holds on this HTTP port.
 pub const DEFAULT_SHARE_PORT: u16 = 7423;
 /// First data-plane port: stage `i` listens on `DEFAULT_DATA_PORT + i`.
@@ -285,6 +290,12 @@ pub struct WelcomeAuth {
     pub confirm: Option<String>,
     /// Keys of every device approved in this swarm (who may fetch model slices).
     pub approved_keys: Vec<String>,
+    /// The encrypted dashboard (HTTPS port, certificate fingerprint), for the device's local
+    /// dashboard proxy.
+    #[serde(default)]
+    pub portal_tls_port: Option<u16>,
+    #[serde(default)]
+    pub portal_tls_fp: Option<String>,
 }
 
 /// A model file a node holds and can share.
@@ -326,16 +337,22 @@ pub enum Message {
         /// The device joins with a one-time code from "Add device", not the passphrase.
         #[serde(default)]
         invite: bool,
+        /// SHA-256 of this node's TLS certificate (hex): its neighbours pin it on data links.
+        #[serde(default)]
+        tls_fp: Option<String>,
+        /// On a first join: the name of the person joining (shown in the dashboard).
+        #[serde(default)]
+        person_name: Option<String>,
+        /// Asking to join without a secret: an admin approves it in the dashboard after
+        /// comparing the check code both screens show.
+        #[serde(default)]
+        ask: bool,
         /// Models this node holds.
         #[serde(default)]
         models: Vec<ModelInfo>,
         /// Port serving layer slices of those models (see `DEFAULT_SHARE_PORT`).
         #[serde(default)]
         share_port: Option<u16>,
-        /// The device owner's own policy settings, if they gave any (they win over the
-        /// coordinator's defaults for this kind of device).
-        #[serde(default)]
-        policy: Option<Policy>,
     },
     /// The node's models changed (a file was added or removed).
     Inventory {
@@ -413,6 +430,12 @@ pub enum Message {
     SetPolicy {
         policy: Policy,
     },
+    /// Device -> coordinator, right after Welcome: the owner's settings for this swarm (flags and
+    /// what the device remembers), which win over what the coordinator holds; None if the owner
+    /// set nothing. The coordinator answers with `SetPolicy` (the settings in force).
+    OwnerPolicy {
+        policy: Option<Policy>,
+    },
 
     // --- leaving and rejoining ---
     /// Coordinator asks the node to finish up; node replies `Drained` when idle.
@@ -470,6 +493,12 @@ pub enum Message {
         /// The model's `ModelInfo::id`, so a node never mixes up two files with one name.
         #[serde(default)]
         model_id: Option<String>,
+        /// TLS certificate fingerprints (hex) of the upstream and downstream neighbours: the
+        /// data links accept only them.
+        #[serde(default)]
+        upstream_tls: Option<String>,
+        #[serde(default)]
+        downstream_tls: Option<String>,
         /// Most requests in flight at once, sized so every stage's KV caches fit in memory.
         #[serde(default)]
         max_requests: Option<u32>,
@@ -580,7 +609,7 @@ mod tests {
 
     #[test]
     fn hello_roundtrip() {
-        let msg = Message::Hello { proto: PROTOCOL_VERSION, info: sample_info(), bench_port: 7422, build: None, auth_nonce: None, invite: false, models: vec![ModelInfo { name: "m.gguf".into(), size: 9, id: "ab".into() }], share_port: Some(7423), policy: None };
+        let msg = Message::Hello { proto: PROTOCOL_VERSION, info: sample_info(), bench_port: 7422, build: None, auth_nonce: None, invite: false, tls_fp: None, person_name: None, ask: false, models: vec![ModelInfo { name: "m.gguf".into(), size: 9, id: "ab".into() }], share_port: Some(7423) };
         let mut buf = Vec::new();
         write_frame(&mut buf, &msg).unwrap();
         let back = read_frame(&mut buf.as_slice()).unwrap();
@@ -617,8 +646,8 @@ mod tests {
     fn older_hello_and_heartbeat_still_parse() {
         let hb = r#"{"type":"heartbeat","cpu_load":0.5,"ram_available_bytes":1,"power":null,"running_tasks":0}"#;
         assert!(matches!(decode(hb.as_bytes()).unwrap(), Message::Heartbeat { update_available: None, .. }));
-        let mut hello = serde_json::to_value(Message::Hello { proto: PROTOCOL_VERSION, info: sample_info(), bench_port: 1, build: None, auth_nonce: None, invite: false, models: vec![], share_port: None, policy: None }).unwrap();
-        for k in ["build", "models", "share_port", "policy", "auth_nonce"] {
+        let mut hello = serde_json::to_value(Message::Hello { proto: PROTOCOL_VERSION, info: sample_info(), bench_port: 1, build: None, auth_nonce: None, invite: false, tls_fp: None, person_name: None, ask: false, models: vec![], share_port: None }).unwrap();
+        for k in ["build", "models", "share_port", "auth_nonce"] {
             hello.as_object_mut().unwrap().remove(k);
         }
         assert!(matches!(decode(hello.to_string().as_bytes()).unwrap(), Message::Hello { build: None, .. }));
@@ -642,6 +671,8 @@ mod tests {
             sampling: SamplingParams { temperature: 0.7, top_k: 40, seed: 5 },
             source: Some("http://192.168.1.20:7423".into()),
             model_id: Some("ab12".into()),
+            upstream_tls: None,
+            downstream_tls: Some("ff".repeat(32)),
             max_requests: Some(4),
             need_bytes: Some(1 << 30),
         };

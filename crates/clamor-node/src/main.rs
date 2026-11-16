@@ -1,12 +1,15 @@
 //! `clamor-node`: run a coordinator (roster + web portal) or join one as a member.
 
+mod access;
 mod auth;
 mod build_info;
 mod cache;
 mod coordinator;
+mod dashproxy;
 mod discovery;
 mod member;
 mod neighbour;
+mod people;
 mod pipeline;
 mod portal;
 mod share;
@@ -70,6 +73,9 @@ enum Cmd {
         bind: String,
         #[arg(long, default_value_t = format!("0.0.0.0:{DEFAULT_PORTAL_PORT}"))]
         portal: String,
+        /// The encrypted (HTTPS) dashboard; members' apps use it. Another free port if taken.
+        #[arg(long, default_value = "0.0.0.0:7424")]
+        portal_tls: String,
         /// The swarm's passphrase. Default: the one this swarm already has, or five random
         /// words for a new swarm (printed at start). Devices need it only for their first join.
         #[arg(long, alias = "token", env = "CLAMOR_PASSPHRASE", hide_env_values = true)]
@@ -101,6 +107,16 @@ enum Cmd {
         /// of the passphrase.
         #[arg(long, conflicts_with = "passphrase")]
         code: Option<String>,
+        /// Ask to join without a code or passphrase: an admin approves this device in the
+        /// dashboard, after checking that both screens show the same check code.
+        #[arg(long, conflicts_with_all = ["passphrase", "code"])]
+        ask: bool,
+        /// Your name, shown to the others in the swarm (first join; default: this device's name).
+        #[arg(long)]
+        name: Option<String>,
+        /// Serve the swarm's dashboard on this device, signed in as you ("off" to not).
+        #[arg(long, default_value_t = format!("127.0.0.1:{DEFAULT_PORTAL_PORT}"))]
+        dashboard: String,
         /// Without an address: join the swarm with this name.
         #[arg(long)]
         swarm: Option<String>,
@@ -148,6 +164,9 @@ enum Cmd {
         /// Also list the swarms advertised on the local network now.
         #[arg(long)]
         scan: bool,
+        /// Machine-readable output (used by the desktop app). Passphrases are left out.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -177,35 +196,19 @@ enum ParticipationArg {
 }
 
 impl PolicyArgs {
-    /// The owner's settings on top of the defaults for this kind of device, or None if the
-    /// owner set nothing (the coordinator then applies its defaults).
-    /// Command-line flags, on top of the settings saved from the dashboard, on top of the
-    /// defaults for this kind of device. None if there are neither flags nor saved settings.
-    fn policy(&self, priority: Option<Priority>) -> Option<Policy> {
-        let saved = neighbour::saved_settings();
-        if saved.is_none() && self.participation.is_none() && !self.allow_battery && self.ram_share.is_none() && self.cpu_share.is_none() && priority.is_none() {
-            return None;
-        }
-        let mut p = saved.unwrap_or_else(|| Policy::default_for(clamor_muster::probe::probe_node(NodeId("local".into())).class));
-        if let Some(x) = self.participation {
-            p.participation = match x {
+    /// The owner's command-line settings; they win in every swarm, over what the device
+    /// remembers for that swarm, over the defaults.
+    fn overrides(&self, priority: Option<Priority>) -> neighbour::Overrides {
+        neighbour::Overrides {
+            participation: self.participation.map(|x| match x {
                 ParticipationArg::Full => Participation::Full,
                 ParticipationArg::IdleOnly => Participation::IdleOnly,
-            };
+            }),
+            allow_battery: self.allow_battery,
+            ram_share: self.ram_share,
+            cpu_share: self.cpu_share,
+            low_priority: priority.map(|p| p == Priority::Low),
         }
-        if self.allow_battery {
-            p.require_plugged_in = false;
-        }
-        if let Some(r) = self.ram_share {
-            p.max_ram_fraction = r.clamp(0.05, 0.95);
-        }
-        if let Some(c) = self.cpu_share {
-            p.max_cpu_fraction = c.clamp(0.05, 1.0);
-        }
-        if let Some(pr) = priority {
-            p.low_priority = pr == Priority::Low;
-        }
-        Some(p)
     }
 }
 
@@ -257,7 +260,7 @@ impl EngineArgs {
     fn config(self, share_key: Option<ed25519_dalek::SigningKey>, swarm_id: Option<String>) -> stage::EngineConfig {
         let cache_dir = self.cache_dir.unwrap_or_else(default_cache_dir);
         let cache_max = (self.cache_max_gb.max(0.0) * 1e9) as u64;
-        stage::EngineConfig { models_dir: self.models, device: self.device, threads: self.threads, cache_dir, share_key, swarm_id, cache_max }
+        stage::EngineConfig { models_dir: self.models, device: self.device, threads: self.threads, cache_dir, share_key, swarm_id, cache_max, tls: None }
     }
 }
 
@@ -321,7 +324,7 @@ async fn run(cmd: Cmd, priority: Option<Priority>) -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Coordinator { swarm, bind, portal, passphrase, id, engine, data_port, quick_bench, updates, policy, no_mdns } => {
+        Cmd::Coordinator { swarm, bind, portal, portal_tls, passphrase, id, engine, data_port, quick_bench, updates, policy, no_mdns } => {
             let id = NodeId(id.unwrap_or_else(|| probe::default_node_id().0));
             let config_dir = neighbour::config_dir();
             let profile = auth::CoordinatorProfile::load_or_create(&config_dir, &swarm, passphrase.as_deref())?;
@@ -347,20 +350,20 @@ async fn run(cmd: Cmd, priority: Option<Priority>) -> Result<()> {
             let share_port = share::serve(DEFAULT_SHARE_PORT, engine.models_dir.clone(), swarm_auth.allowed.clone()).await?;
             let shared = Arc::new(Mutex::new(coordinator::Swarm::new(swarm, swarm_auth, id.clone(), engine, data_port, quick_bench, Some(share_port))));
             shared.lock().unwrap().join_hint = join_hint(&bind);
-            coordinator::register_self(shared.clone(), id, policy.policy(priority)).await;
+            coordinator::register_self(shared.clone(), id, policy.overrides(priority)).await;
             tokio::spawn(coordinator::bench_self(shared.clone()));
             tokio::spawn(coordinator::reaper(shared.clone()));
             tokio::spawn(coordinator::monitor_self(shared.clone()));
             tokio::spawn(coordinator::updates(shared.clone(), updates.policy()));
             let portal_shared = shared.clone();
             tokio::spawn(async move {
-                if let Err(e) = portal::serve(portal, portal_shared).await {
+                if let Err(e) = portal::serve(portal, portal_tls, portal_shared).await {
                     eprintln!("portal stopped: {e}");
                 }
             });
             coordinator::run_listener(&bind, shared).await
         }
-        Cmd::Join { addr, swarm, no_mdns, passphrase, code, id, engine, updates, policy } => {
+        Cmd::Join { addr, swarm, no_mdns, passphrase, code, ask, name, dashboard, id, engine, updates, policy } => {
             let config_dir = neighbour::config_dir();
             let addr = match addr {
                 Some(a) if a.contains(':') => a,
@@ -369,8 +372,8 @@ async fn run(cmd: Cmd, priority: Option<Priority>) -> Result<()> {
             };
             let engine = engine.config(None, None); // the key is per swarm: set once joined
             engine.validate()?;
-            let creds = member::Credentials { device: auth::Device::load_or_create(&config_dir)?, passphrase, code, config_dir };
-            member::join(addr, creds, id, engine, updates.policy(), policy.policy(priority), !no_mdns).await
+            let creds = member::Credentials { device: auth::Device::load_or_create(&config_dir)?, passphrase, code, person_name: name, ask, dashboard: (dashboard != "off").then_some(dashboard), config_dir };
+            member::join(addr, creds, id, engine, updates.policy(), policy.overrides(priority), !no_mdns).await
         }
         Cmd::Leave { swarm, purge, delete_swarm, cache_dir } => {
             let config_dir = neighbour::config_dir();
@@ -410,10 +413,22 @@ async fn run(cmd: Cmd, priority: Option<Priority>) -> Result<()> {
             println!("on the new device: {}", r["command"].as_str().unwrap_or(""));
             Ok(())
         }
-        Cmd::Swarms { scan } => {
+        Cmd::Swarms { scan, json } => {
             let config_dir = neighbour::config_dir();
             let coordinated = auth::CoordinatorProfile::all(&config_dir);
             let joined = auth::MemberProfile::all(&config_dir);
+            if json {
+                let found = if scan { tokio::task::spawn_blocking(|| discovery::browse(std::time::Duration::from_secs(3))).await?? } else { Vec::new() };
+                let remembered: Vec<&str> = joined.iter().map(|p| p.swarm_id.as_str()).chain(coordinated.iter().map(|p| p.swarm_id.as_str())).collect();
+                let out = serde_json::json!({
+                    "coordinating": coordinated.iter().map(|p| serde_json::json!({ "id": p.swarm_id, "name": p.name, "approved_devices": p.approved.len() })).collect::<Vec<_>>(),
+                    "joined": joined.iter().map(|p| serde_json::json!({ "id": p.swarm_id, "name": p.name, "address": p.addresses.first(), "last_joined_unix": p.last_joined_unix })).collect::<Vec<_>>(),
+                    "on_network": found.iter().map(|f| serde_json::json!({ "id": f.swarm_id, "name": f.name, "addresses": f.addrs.iter().map(|a| a.to_string()).collect::<Vec<_>>(), "known": remembered.contains(&f.swarm_id.as_str()) })).collect::<Vec<_>>(),
+                    "cache_bytes": cache::size(&default_cache_dir()),
+                });
+                println!("{}", serde_json::to_string_pretty(&out)?);
+                return Ok(());
+            }
             if coordinated.is_empty() && joined.is_empty() {
                 println!("no swarms yet. Start one with `clamor-node coordinator`, or join one with `clamor-node join <coordinator> --passphrase <words>`.");
             }

@@ -361,6 +361,7 @@ pub async fn start(shared: &Shared, req: PipelineRequest) -> Result<()> {
     let (epoch, assigns, senders) = {
         let mut sw = shared.lock().unwrap();
         let mut hosts = Vec::new();
+        let mut fps = Vec::new();
         let mut senders = Vec::new();
         for (i, (node, _, _)) in layout.iter().enumerate() {
             if i == 0 {
@@ -370,6 +371,7 @@ pub async fn start(shared: &Shared, req: PipelineRequest) -> Result<()> {
                     _ => std::net::IpAddr::from([127, 0, 0, 1]),
                 };
                 hosts.push(host);
+                fps.push(sw.tls.fingerprint_hex());
                 senders.push(None);
                 continue;
             }
@@ -382,9 +384,11 @@ pub async fn start(shared: &Shared, req: PipelineRequest) -> Result<()> {
                 bail!("{node} is not taking work right now: {why}");
             }
             hosts.push(e.peer_ip.ok_or_else(|| anyhow!("{node} has no address"))?);
+            fps.push(e.tls_fp.clone().ok_or_else(|| anyhow!("{node} runs a Clamor without encryption: update it"))?);
             senders.push(Some(tx));
         }
         let addr = |i: usize| format!("{}:{}", hosts[i], data_port + i as u16);
+        let fp_of = |i: usize| fps[i].clone();
         let epoch = sw.next_epoch;
         sw.next_epoch += 1;
         let session = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1);
@@ -416,6 +420,8 @@ pub async fn start(shared: &Shared, req: PipelineRequest) -> Result<()> {
                 model_id: Some(info.id.clone()),
                 max_requests: Some(max_requests),
                 need_bytes: needs[i],
+                upstream_tls: Some(fp_of((i + n as usize - 1) % n as usize)),
+                downstream_tls: Some(fp_of((i + 1) % n as usize)),
                 policy: sw.nodes.get(node).map(|e| e.report.policy).unwrap_or_else(|| Policy::default_for(DeviceClass::Desktop)),
             })
             .collect();
@@ -463,6 +469,8 @@ pub async fn start(shared: &Shared, req: PipelineRequest) -> Result<()> {
                 model_id: a.model_id.clone(),
                 max_requests: a.max_requests,
                 need_bytes: a.need_bytes,
+                upstream_tls: a.upstream_tls.clone(),
+                downstream_tls: a.downstream_tls.clone(),
             });
         }
     }

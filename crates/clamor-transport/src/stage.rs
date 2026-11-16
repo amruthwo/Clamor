@@ -53,6 +53,8 @@ pub struct StageConfig {
     /// The head fails a request that makes no progress for this long (a stage froze, or a
     /// link half-died). Generous: a slow device can take minutes over a long prompt.
     pub stall_timeout: Duration,
+    /// Encrypt both links (pinned neighbour certificates). None: plain TCP (tests only).
+    pub tls: Option<Arc<crate::link::LinkTls>>,
 }
 
 /// Default for `StageConfig::stall_timeout`.
@@ -164,7 +166,8 @@ async fn stage_main<E: StageExecutor>(cfg: StageConfig, listener: TcpListener, e
         let params = LinkParams { epoch: cfg.epoch, session: cfg.session, stage: cfg.stage_index, window: cfg.window };
         let addr = cfg.downstream.ok_or_else(|| anyhow!("stage {} has no downstream address", cfg.stage_index))?;
         // Accept and connect concurrently: every stage does both, so a sequential order would deadlock.
-        let (up, down) = tokio::try_join!(Link::accept(&listener, params), Link::connect(addr, params, cfg.connect_timeout))?;
+        let tls = cfg.tls.as_deref();
+        let (up, down) = tokio::try_join!(Link::accept(&listener, params, tls), Link::connect(addr, params, cfg.connect_timeout, tls))?;
         (Some(up), Some(down))
     };
     match role {

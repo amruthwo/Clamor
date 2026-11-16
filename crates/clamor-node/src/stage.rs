@@ -29,6 +29,8 @@ pub struct EngineConfig {
     pub swarm_id: Option<String>,
     /// Size cap of the slice cache, bytes.
     pub cache_max: u64,
+    /// This process's TLS certificate, for encrypted data links.
+    pub tls: Option<std::sync::Arc<clamor_transport::tls::Identity>>,
 }
 
 impl EngineConfig {
@@ -106,6 +108,9 @@ pub struct Assignment {
     pub max_requests: Option<u32>,
     /// Expected memory use; refused if it does not fit this device's budget.
     pub need_bytes: Option<u64>,
+    /// Neighbours' TLS certificate fingerprints (hex).
+    pub upstream_tls: Option<String>,
+    pub downstream_tls: Option<String>,
     /// This device's policy (RAM and CPU shares). Not sent: each node knows its own.
     pub policy: clamor_proto::Policy,
 }
@@ -198,6 +203,7 @@ pub async fn start(cfg: &EngineConfig, a: &Assignment, progress: impl FnMut(u64,
         // Neighbours may still be loading their layers.
         connect_timeout: Duration::from_secs(300),
         stall_timeout: clamor_transport::stage::DEFAULT_STALL_TIMEOUT,
+        tls: link_tls(cfg, a)?,
     };
     let h = run_stage(stage_cfg, listener, exec);
     Ok(Started { head: h.head, abort: h.task.abort_handle(), task: h.task, load_ms })
@@ -293,4 +299,17 @@ mod tests {
         }
         assert!(resolve_model(&dir, "missing.gguf").is_err());
     }
+}
+
+/// TLS for a stage's links. Every multi-stage pipeline is encrypted: a stage without its
+/// neighbours' fingerprints (or a certificate of its own) refuses to start.
+fn link_tls(cfg: &EngineConfig, a: &Assignment) -> Result<Option<std::sync::Arc<clamor_transport::link::LinkTls>>> {
+    if a.stage_count == 1 {
+        return Ok(None);
+    }
+    let (Some(id), Some(up), Some(down)) = (&cfg.tls, &a.upstream_tls, &a.downstream_tls) else {
+        bail!("this pipeline's links would not be encrypted (a device runs an older Clamor?)");
+    };
+    use clamor_transport::tls::parse_fingerprint;
+    Ok(Some(std::sync::Arc::new(clamor_transport::link::LinkTls { identity: id.clone(), upstream: parse_fingerprint(up)?, downstream: parse_fingerprint(down)? })))
 }

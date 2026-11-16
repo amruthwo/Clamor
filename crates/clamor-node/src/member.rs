@@ -84,13 +84,21 @@ pub struct Credentials {
     pub passphrase: Option<String>,
     /// A one-time code from "Add device" (instead of the passphrase).
     pub code: Option<String>,
+    /// Your name, on a first join (`--name`).
+    pub person_name: Option<String>,
+    /// Where to serve the swarm's dashboard on this device (normally 127.0.0.1:7421).
+    pub dashboard: Option<String>,
+    /// Ask to join without a secret: an admin approves it (`--ask`).
+    pub ask: bool,
     pub config_dir: std::path::PathBuf,
 }
 
 /// `rediscover`: when the coordinator cannot be reached, look for the same swarm on the local
 /// network (it may have a new address).
 #[allow(clippy::too_many_arguments)]
-pub async fn join(mut addr: String, creds: Credentials, id: Option<String>, engine: EngineConfig, updates: update::Policy, owner_policy: Option<Policy>, rediscover: bool) -> Result<()> {
+pub async fn join(mut addr: String, creds: Credentials, id: Option<String>, mut engine: EngineConfig, updates: update::Policy, overrides: crate::neighbour::Overrides, rediscover: bool) -> Result<()> {
+    // This process's TLS certificate: neighbours pin it on data links.
+    engine.tls = Some(clamor_transport::tls::Identity::generate()?);
     let update_flag: update::UpdateFlag = Default::default();
     if updates.check || updates.auto {
         update::spawn_checker(update_flag.clone());
@@ -103,13 +111,22 @@ pub async fn join(mut addr: String, creds: Credentials, id: Option<String>, engi
     });
     // Serve our models to the rest of the swarm (layer slices), to the swarm's devices only.
     let allowed: share::AllowedKeys = Default::default();
+    // The swarm's dashboard on this device, signed as this device (see dashproxy.rs).
+    let dash: crate::dashproxy::Shared = Default::default();
+    if let Some(bind) = &creds.dashboard {
+        if crate::dashproxy::serve(bind, dash.clone()).await? {
+            println!("the swarm's dashboard is at http://{bind}/ on this device");
+        } else {
+            println!("{bind} is taken: not serving the swarm's dashboard on this device");
+        }
+    }
     let share_port = share::serve(DEFAULT_SHARE_PORT, engine.models_dir.clone(), allowed.clone()).await?;
 
     let id = NodeId(id.unwrap_or_else(|| probe::default_node_id().0));
     let mut backoff = 2u64;
     let mut swarm_id: Option<String> = None;
     loop {
-        match session(&addr, &creds, &allowed, &mut swarm_id, &id, bench_port, share_port, &mut backoff, &engine, &update_flag, updates.auto, owner_policy).await {
+        match session(&addr, &creds, &allowed, &dash, &mut swarm_id, &id, bench_port, share_port, &mut backoff, &engine, &update_flag, updates.auto, overrides).await {
             Ok(Exit::Update) => {
                 // Returns only if the update failed; then carry on with this version.
                 if let Err(e) = update::update_and_restart().await {
@@ -159,7 +176,7 @@ pub async fn join(mut addr: String, creds: Credentials, id: Option<String>, engi
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn session(addr: &str, creds: &Credentials, allowed: &share::AllowedKeys, swarm_id: &mut Option<String>, id: &NodeId, bench_port: u16, share_port: u16, backoff: &mut u64, engine: &EngineConfig, update_flag: &update::UpdateFlag, auto_update: bool, owner_policy: Option<Policy>) -> Result<Exit> {
+async fn session(addr: &str, creds: &Credentials, allowed: &share::AllowedKeys, dash: &crate::dashproxy::Shared, swarm_id: &mut Option<String>, id: &NodeId, bench_port: u16, share_port: u16, backoff: &mut u64, engine: &EngineConfig, update_flag: &update::UpdateFlag, auto_update: bool, overrides: crate::neighbour::Overrides) -> Result<Exit> {
     let scan = |dir: std::path::PathBuf| async move { tokio::task::spawn_blocking(move || share::scan(&dir)).await.unwrap_or_default() };
     let mut models = scan(engine.models_dir.clone()).await;
     let id2 = id.clone();
@@ -169,11 +186,17 @@ async fn session(addr: &str, creds: &Credentials, allowed: &share::AllowedKeys, 
 
     let stream = TcpStream::connect(addr).await?;
     stream.set_nodelay(true)?;
-    let (mut rd, mut wr) = stream.into_split();
+    // Encrypted. Any certificate is accepted here: the join handshake below signs this TLS
+    // session's exporter, which is what proves who is on the other end.
+    let connector = tokio_rustls::TlsConnector::from(clamor_transport::tls::client_config(None, None)?);
+    let tls = timeout(Duration::from_secs(10), connector.connect(clamor_transport::tls::server_name(), stream)).await??;
+    let binding = clamor_transport::tls::exporter_client(tls.get_ref().1)?;
+    let (mut rd, mut wr) = tokio::io::split(tls);
     let nonce_m = hex::encode(crate::auth::random_bytes::<16>());
     // A one-time code is good for the first join only; reconnects use this device's key.
     let code = creds.code.as_deref().filter(|_| swarm_id.is_none());
-    write_msg(&mut wr, &Message::Hello { proto: PROTOCOL_VERSION, info, bench_port, build: Some(crate::build_info::current()), auth_nonce: Some(nonce_m.clone()), invite: code.is_some(), models: models.clone(), share_port: Some(share_port), policy: owner_policy }).await?;
+    let asking = creds.ask && swarm_id.is_none() && code.is_none() && creds.passphrase.is_none();
+    write_msg(&mut wr, &Message::Hello { proto: PROTOCOL_VERSION, info, bench_port, build: Some(crate::build_info::current()), auth_nonce: Some(nonce_m.clone()), invite: code.is_some(), person_name: creds.person_name.clone(), ask: asking, tls_fp: engine.tls.as_ref().map(|t| t.fingerprint_hex()), models: models.clone(), share_port: Some(share_port) }).await?;
 
     // The coordinator's challenge: prove we are approved (or know the passphrase), and check
     // that it is the coordinator we joined before (or knows the passphrase).
@@ -184,22 +207,33 @@ async fn session(addr: &str, creds: &Credentials, allowed: &share::AllowedKeys, 
     };
     let profile = crate::auth::MemberProfile::load(&creds.config_dir, &ch.swarm_id);
     let key = creds.device.swarm_key(&ch.swarm_id);
-    let (hs, proof) = match crate::auth::MemberHandshake::answer(&ch, &nonce_m, &key, profile.as_ref().map(|p| p.coordinator_key.as_str()), code.or(creds.passphrase.as_deref())) {
+    let (hs, proof) = match crate::auth::MemberHandshake::answer(&binding, &ch, &nonce_m, &key, profile.as_ref().map(|p| p.coordinator_key.as_str()), code.or(creds.passphrase.as_deref()), asking) {
         Ok(v) => v,
         Err(e) => {
             let _ = write_msg(&mut wr, &Message::Leave).await;
             return Ok(Exit::Rejected(format!("{e:#}")));
         }
     };
+    if asking && profile.is_none() {
+        let code = crate::auth::check_code(&binding, &ch.coordinator_key, &proof.device_key);
+        println!("asking to join swarm '{}'. Check code: {code}", ch.swarm_name);
+        println!("an admin approves this in the swarm's dashboard; make sure it shows the same code.");
+    }
     write_msg(&mut wr, &Message::AuthProve { device_key: proof.device_key, signature: proof.signature, spake: proof.spake, confirm: proof.confirm }).await?;
 
-    let heartbeat_secs = match timeout(Duration::from_secs(30), read_msg(&mut rd)).await?? {
+    // Asking to join can take a while: someone has to approve it.
+    let wait = if asking { crate::coordinator::ASK_SECS + 30 } else { 30 };
+    let heartbeat_secs = match timeout(Duration::from_secs(wait), read_msg(&mut rd)).await?? {
         Message::Welcome { swarm, coordinator, heartbeat_secs, auth } => {
             let Some(auth) = auth else { bail!("the coordinator did not prove who it is") };
             if let Err(e) = hs.finish(&crate::auth::CoordinatorProof { signature: auth.signature, confirm: auth.confirm }) {
                 return Ok(Exit::Rejected(format!("{e:#}")));
             }
             set_allowed(allowed, &auth.approved_keys, &ch.coordinator_key);
+            if let (Some(port), Some(fp)) = (auth.portal_tls_port, auth.portal_tls_fp.as_deref().and_then(|f| clamor_transport::tls::parse_fingerprint(f).ok())) {
+                let host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(addr).trim_matches(['[', ']']).to_string();
+                *dash.write().unwrap() = Some(crate::dashproxy::Target { host, port, fingerprint: fp, key: key.clone() });
+            }
             *swarm_id = Some(ch.swarm_id.clone());
             // Remember the swarm: its coordinator's key, and where it was reached.
             let mut p = profile.unwrap_or_else(|| crate::auth::MemberProfile { swarm_id: ch.swarm_id.clone(), name: ch.swarm_name.clone(), coordinator_key: String::new(), addresses: Vec::new(), last_joined_unix: 0 });
@@ -244,12 +278,17 @@ async fn session(addr: &str, creds: &Credentials, allowed: &share::AllowedKeys, 
     rescan.tick().await;
     let mut sampler = probe::LoadSampler::new();
     // Until the coordinator sends this device's stored policy (right after Welcome).
+    // This swarm's settings, as the owner wants them; the coordinator answers with SetPolicy.
+    let sid = ch.swarm_id.clone();
+    let owner_policy = overrides.for_swarm(&sid, class);
+    write_msg(&mut wr, &Message::OwnerPolicy { policy: owner_policy }).await?;
     let mut policy = owner_policy.unwrap_or_else(|| Policy::default_for(class));
     let mut pause = crate::neighbour::PauseState::default();
     let mut paused_reason: Option<String> = None;
     // Something the owner should know about the last settings change (e.g. needs a restart).
     let settings_note: Option<String> = None;
     let (stx, mut srx) = unbounded_channel::<StageEvent>();
+    let (btx, mut brx) = unbounded_channel::<BenchReport>();
     let mut slot = Slot::default();
 
     loop {
@@ -260,6 +299,9 @@ async fn session(addr: &str, creds: &Credentials, allowed: &share::AllowedKeys, 
                     models = now;
                     write_msg(&mut wr, &Message::Inventory { models: models.clone() }).await?;
                 }
+            }
+            Some(report) = brx.recv() => {
+                write_msg(&mut wr, &Message::BenchResult { report }).await?;
             }
             Some(ev) = srx.recv() => match ev {
                 StageEvent::Progress { epoch, stage_index, done, total } => {
@@ -318,28 +360,37 @@ async fn session(addr: &str, creds: &Credentials, allowed: &share::AllowedKeys, 
                 };
                 match msg {
                     Message::BenchRequest { quick } => {
+                        // Off this loop: the standard benchmark takes about a minute, and
+                        // heartbeats must keep going meanwhile (the coordinator gives up on a
+                        // device after 30 s of silence).
                         println!("benchmarking at the coordinator's request...");
                         let (_, ram) = sampler.sample();
                         let opts = if quick { bench::BenchOptions::quick() } else { bench::BenchOptions::standard() };
-                        let report = tokio::task::spawn_blocking(move || bench::run(&opts, ram)).await?;
-                        write_msg(&mut wr, &Message::BenchResult { report }).await?;
+                        let btx = btx.clone();
+                        tokio::task::spawn_blocking(move || {
+                            // Test hook: make the benchmark outlast the heartbeat timeout.
+                            if let Some(s) = std::env::var("CLAMOR_TEST_BENCH_DELAY_SECS").ok().and_then(|s| s.parse().ok()) {
+                                std::thread::sleep(Duration::from_secs(s));
+                            }
+                            let _ = btx.send(bench::run(&opts, ram));
+                        });
                     }
                     Message::SetPolicy { policy: p } => {
                         println!("settings updated: {}", describe_policy(&p));
-                        crate::neighbour::save_settings(&p);
+                        crate::neighbour::save_settings(&sid, &p);
                         policy = p;
                     }
                     Message::Approved { keys } => set_allowed(allowed, &keys, &ch.coordinator_key),
                     Message::Ping { seq, sent_unix_ms } => {
                         write_msg(&mut wr, &Message::Pong { seq, sent_unix_ms }).await?;
                     }
-                    Message::ShardAssign { model, epoch, session, stage_index, stage_count, layer_start, layer_end, listen_port, downstream, act_dtype, n_ctx, embed, sampling, source, model_id, max_requests, need_bytes } => {
+                    Message::ShardAssign { model, epoch, session, stage_index, stage_count, layer_start, layer_end, listen_port, downstream, act_dtype, n_ctx, embed, sampling, source, model_id, max_requests, need_bytes, upstream_tls, downstream_tls } => {
                         println!("assigned stage {stage_index}/{stage_count}: layers {layer_start}..{layer_end} of {model} (epoch {epoch})");
                         slot.stop(); // a new epoch supersedes whatever ran before
                         if let Some(src) = &source {
                             println!("  fetching the slice from {src}");
                         }
-                        let a = Assignment { model, epoch, session, stage_index, stage_count, layer_start, layer_end, listen_port, downstream, act_dtype, n_ctx, embed, sampling, source, model_id, max_requests, need_bytes, policy };
+                        let a = Assignment { model, epoch, session, stage_index, stage_count, layer_start, layer_end, listen_port, downstream, act_dtype, n_ctx, embed, sampling, source, model_id, max_requests, need_bytes, upstream_tls, downstream_tls, policy };
                         slot.epoch = Some(epoch);
                         slot.loading = Some(spawn_stage(engine.clone(), a, stx.clone()));
                     }

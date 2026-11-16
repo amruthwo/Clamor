@@ -11,7 +11,9 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::Html;
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::{Extension, Json, Router};
+use crate::access::Caller;
+use crate::people::Role;
 use clamor_muster::{bench, plan, probe};
 use clamor_proto::*;
 use serde::{Deserialize, Serialize};
@@ -19,7 +21,9 @@ use serde_json::{json, Value};
 
 type ApiResult = Result<Json<Value>, (StatusCode, String)>;
 
-pub async fn serve(bind: String, shared: Shared) -> anyhow::Result<()> {
+/// Serve the dashboard on `bind` (plain HTTP) and on `tls_bind` (HTTPS with the coordinator's
+/// certificate; any free port if that one is taken). Members' apps use the HTTPS one.
+pub async fn serve(bind: String, tls_bind: String, shared: Shared) -> anyhow::Result<()> {
     let app = Router::new()
         .route("/", get(index))
         .route("/api/roster", get(roster))
@@ -32,11 +36,82 @@ pub async fn serve(bind: String, shared: Shared) -> anyhow::Result<()> {
         .route("/api/pipeline", get(pipeline_status).post(pipeline_start).delete(pipeline_stop))
         .route("/api/generate", post(generate))
         .route("/api/chat", post(chat))
-        .with_state(shared);
+        .route("/api/me", get(me))
+        .route("/api/me/pin", post(set_pin))
+        .route("/api/logout", post(logout))
+        .route("/api/login/start", post(login_start))
+        .route("/api/login/poll", get(login_poll))
+        .route("/api/login/pin", post(login_pin))
+        .route("/api/login/pending", get(login_pending))
+        .route("/api/login/approve", post(login_approve))
+        .route("/api/people", get(people))
+        .route("/api/people/{id}/role", post(person_role))
+        .route("/api/people/{id}/remove", post(person_remove))
+        .route("/api/nodes/{id}/person", post(node_person))
+        .route("/api/joins", get(joins))
+        .route("/api/joins/{id}/{decision}", post(decide_join))
+        .layer(axum::middleware::from_fn_with_state(shared.clone(), crate::access::layer))
+        .with_state(shared.clone());
+
+    // HTTPS, with the coordinator's own certificate.
+    let tls_listener = match tokio::net::TcpListener::bind(&tls_bind).await {
+        Ok(l) => l,
+        Err(_) => tokio::net::TcpListener::bind((tls_bind.rsplit_once(':').map(|(h, _)| h).unwrap_or("0.0.0.0"), 0)).await?,
+    };
+    let tls_port = tls_listener.local_addr()?.port();
+    let server_cfg = {
+        let mut sw = shared.lock().unwrap();
+        sw.portal_tls_port = Some(tls_port);
+        clamor_transport::tls::server_config(&sw.tls, None)?
+    };
+    let tls_app = app.clone().layer(axum::Extension(crate::access::Via::Tls));
+    tokio::spawn(async move {
+        let l = TlsListener { tcp: tls_listener, acceptor: tokio_rustls::TlsAcceptor::from(server_cfg) };
+        if let Err(e) = axum::serve(l, tls_app.into_make_service_with_connect_info::<TlsPeer>()).await {
+            eprintln!("encrypted dashboard stopped: {e}");
+        }
+    });
+
     let listener = tokio::net::TcpListener::bind(&bind).await?;
-    println!("web portal on http://{bind}/");
-    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await?;
+    println!("web portal on http://{bind}/ (encrypted: https, port {tls_port})");
+    axum::serve(listener, app.layer(axum::Extension(crate::access::Via::Plain)).into_make_service_with_connect_info::<std::net::SocketAddr>()).await?;
     Ok(())
+}
+
+/// The client's address on the HTTPS dashboard (axum's own covers only plain TCP listeners).
+#[derive(Clone, Copy, Debug)]
+pub struct TlsPeer(pub std::net::SocketAddr);
+
+impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, TlsListener>> for TlsPeer {
+    fn connect_info(s: axum::serve::IncomingStream<'_, TlsListener>) -> Self {
+        TlsPeer(*s.remote_addr())
+    }
+}
+
+/// The dashboard's HTTPS listener: TCP accept, then TLS. A client that never finishes the TLS
+/// handshake is dropped after 10 s without holding up the others for longer.
+pub struct TlsListener {
+    tcp: tokio::net::TcpListener,
+    acceptor: tokio_rustls::TlsAcceptor,
+}
+
+impl axum::serve::Listener for TlsListener {
+    type Io = tokio_rustls::server::TlsStream<tokio::net::TcpStream>;
+    type Addr = std::net::SocketAddr;
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        loop {
+            let Ok((s, addr)) = self.tcp.accept().await else {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                continue;
+            };
+            if let Ok(Ok(t)) = tokio::time::timeout(Duration::from_secs(10), self.acceptor.accept(s)).await {
+                return (t, addr);
+            }
+        }
+    }
+    fn local_addr(&self) -> std::io::Result<Self::Addr> {
+        self.tcp.local_addr()
+    }
 }
 
 async fn index() -> Html<&'static str> {
@@ -59,9 +134,12 @@ struct RosterRow {
     paused: Option<String>,
     settings_note: Option<String>,
     report: NodeReport,
+    /// The person the device belongs to (id, name).
+    person: Option<(String, String)>,
 }
 
-fn row(entry: &NodeEntry, id: &NodeId, coordinator: &NodeId) -> RosterRow {
+fn row(entry: &NodeEntry, id: &NodeId, coordinator: &NodeId, sw: &crate::coordinator::Swarm) -> RosterRow {
+    let person = device_person(sw, id, entry).and_then(|p| sw.auth.profile.person(&p)).map(|p| (p.id.clone(), p.name.clone()));
     RosterRow {
         id: id.to_string(),
         state: entry.state,
@@ -77,12 +155,21 @@ fn row(entry: &NodeEntry, id: &NodeId, coordinator: &NodeId) -> RosterRow {
         paused: entry.paused.clone(),
         settings_note: entry.settings_note.clone(),
         report: entry.report.clone(),
+        person,
     }
+}
+
+/// The person a device belongs to: the owner for the coordinator itself, else by its key.
+fn device_person(sw: &crate::coordinator::Swarm, id: &NodeId, entry: &NodeEntry) -> Option<String> {
+    if *id == sw.coordinator {
+        return sw.auth.profile.people.iter().find(|p| p.role == crate::people::Role::Owner).map(|p| p.id.clone());
+    }
+    entry.key.as_deref().and_then(|k| sw.auth.profile.approved.iter().find(|d| d.key == k)).map(|d| d.person.clone())
 }
 
 async fn roster(State(shared): State<Shared>) -> Json<Value> {
     let sw = shared.lock().unwrap();
-    let rows: Vec<RosterRow> = sw.nodes.iter().map(|(id, e)| row(e, id, &sw.coordinator)).collect();
+    let rows: Vec<RosterRow> = sw.nodes.iter().map(|(id, e)| row(e, id, &sw.coordinator, &sw)).collect();
     Json(json!({ "swarm": sw.name, "coordinator": sw.coordinator, "now": unix_now(), "nodes": rows }))
 }
 
@@ -171,15 +258,28 @@ async fn drain(State(shared): State<Shared>, Path(id): Path<String>) -> ApiResul
     Ok(Json(json!({ "draining": id })))
 }
 
-/// A one-time code for adding a device. Until the dashboard has sign-in, only on the
-/// coordinator itself: anyone else on the network can open the dashboard, and a code lets a
-/// device in without the passphrase.
-async fn invite(State(shared): State<Shared>, axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>) -> ApiResult {
-    if !peer.ip().is_loopback() {
-        return Err((StatusCode::FORBIDDEN, "for now, devices can be added only from the coordinator itself: open the dashboard there, or run `clamor-node invite` on it".into()));
-    }
+#[derive(Deserialize, Default)]
+struct InviteReq {
+    /// "device": another device of the caller ("Add my device"); "person": someone new (admins).
+    #[serde(default)]
+    kind: Option<String>,
+}
+
+/// A one-time code for adding a device: one of the caller's own ("Add my device", anyone), or
+/// a new person's (admins).
+async fn invite(State(shared): State<Shared>, Extension(caller): Extension<Caller>, body: axum::body::Bytes) -> ApiResult {
+    // An empty body (`clamor-node invite`) means a new person.
+    let req: InviteReq = if body.iter().all(u8::is_ascii_whitespace) { InviteReq::default() } else { serde_json::from_slice(&body).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))? };
+    let kind = req.kind.unwrap_or_else(|| "person".into());
+    let person = match kind.as_str() {
+        "device" => Some(caller.person.clone()),
+        "person" if caller.role >= Role::Admin => None,
+        "person" => return Err((StatusCode::FORBIDDEN, "only an admin can invite a new person; you can add your own devices".into())),
+        _ => return Err((StatusCode::BAD_REQUEST, "kind is device or person".into())),
+    };
     let mut sw = shared.lock().unwrap();
-    let inv = crate::coordinator::Invite::new();
+    let mut inv = crate::coordinator::Invite::new();
+    inv.person = person;
     let code = inv.code.clone();
     sw.invite = Some(inv);
     let hint = if sw.join_hint.is_empty() { String::new() } else { format!("{} ", sw.join_hint) };
@@ -210,17 +310,25 @@ async fn remove(State(shared): State<Shared>, Path(id): Path<String>) -> ApiResu
 
 /// Change a device's settings. Pausing, battery and priority take effect within a heartbeat;
 /// RAM and CPU shares apply from the next pipeline.
-async fn set_policy(State(shared): State<Shared>, Path(id): Path<String>, Json(policy): Json<Policy>) -> ApiResult {
+async fn set_policy(State(shared): State<Shared>, Extension(caller): Extension<Caller>, Path(id): Path<String>, Json(policy): Json<Policy>) -> ApiResult {
     crate::neighbour::validate(&policy).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let id = NodeId(id);
     let mut sw = shared.lock().unwrap();
+    // A device's settings are its owner's to change (or an admin's).
+    if caller.role < Role::Admin {
+        let entry = sw.nodes.get(&id).ok_or((StatusCode::NOT_FOUND, format!("unknown node {id}")))?;
+        if device_person(&sw, &id, entry).as_deref() != Some(caller.person.as_str()) {
+            return Err((StatusCode::FORBIDDEN, "only the device's owner (or an admin) can change its settings".into()));
+        }
+    }
     let is_coordinator = id == sw.coordinator;
+    let swarm_id = sw.auth.profile.swarm_id.clone();
     let entry = sw.nodes.get_mut(&id).ok_or((StatusCode::NOT_FOUND, format!("unknown node {id}")))?;
     entry.report.policy = policy;
     if is_coordinator {
         // This device: remember here (pausing is picked up by monitor_self; priority and shares
         // apply to the next pipeline).
-        crate::neighbour::save_settings(&policy);
+        crate::neighbour::save_settings(&swarm_id, &policy);
         return Ok(Json(json!({ "ok": true, "note": entry.settings_note })));
     }
     if let Some(tx) = &entry.tx {
@@ -374,4 +482,242 @@ async fn chat(State(shared): State<Shared>, Json(c): Json<ChatRequest>) -> ApiRe
         "prompt_tokens": prompt.len(), "completion_tokens": r.tokens.len(),
         "ms": r.ms, "first_token_ms": r.first_token_ms, "decode_tok_s": r.decode_tok_s,
     })))
+}
+
+// ---------------------------------------------------------------- signing in, and people
+
+fn person_json(sw: &crate::coordinator::Swarm, p: &crate::people::Person) -> Value {
+    let devices: Vec<String> = sw.auth.profile.approved.iter().filter(|d| d.person == p.id).map(|d| d.name.clone()).collect();
+    let devices = if p.role == Role::Owner { std::iter::once(sw.coordinator.0.clone()).chain(devices).collect() } else { devices };
+    json!({ "id": p.id, "name": p.name, "role": p.role, "has_pin": p.pin.is_some(), "devices": devices })
+}
+
+async fn me(State(shared): State<Shared>, Extension(caller): Extension<Caller>) -> Json<Value> {
+    let sw = shared.lock().unwrap();
+    let pending = if caller.how != "session" || true { sw.auth.signins.iter().filter(|s| s.approved_by.is_none() && s.created_unix + crate::people::SIGNIN_SECS > unix_now()).count() } else { 0 };
+    let has_pin = sw.auth.profile.person(&caller.person).is_some_and(|p| p.pin.is_some());
+    Json(json!({ "id": caller.person, "name": caller.name, "role": caller.role, "how": caller.how, "has_pin": has_pin, "pending_signins": pending, "swarm": sw.name }))
+}
+
+#[derive(Deserialize)]
+struct PinReq {
+    pin: String,
+}
+
+async fn set_pin(State(shared): State<Shared>, Extension(caller): Extension<Caller>, Json(req): Json<PinReq>) -> ApiResult {
+    crate::people::valid_pin(&req.pin).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let hashed = tokio::task::spawn_blocking(move || crate::people::hash_pin(&req.pin)).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let mut sw = shared.lock().unwrap();
+    let auth = &mut sw.auth;
+    let p = auth.profile.people.iter_mut().find(|p| p.id == caller.person).ok_or((StatusCode::NOT_FOUND, "no such person".to_string()))?;
+    p.pin = Some(hashed);
+    auth.save();
+    Ok(Json(json!({ "ok": true })))
+}
+
+fn cookie_header(token: &str, via: crate::access::Via) -> String {
+    let secure = if via == crate::access::Via::Tls { "; Secure" } else { "" };
+    format!("{}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}{secure}", crate::access::SESSION_COOKIE, crate::people::SESSION_DAYS * 86_400)
+}
+
+async fn logout(State(shared): State<Shared>, headers: axum::http::HeaderMap) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if let Some(t) = crate::access::session_token(&headers) {
+        let mut sw = shared.lock().unwrap();
+        let (dir, id) = (sw.auth.config_dir.clone(), sw.auth.profile.swarm_id.clone());
+        sw.auth.sessions.end(&t, &dir, &id);
+    }
+    ([(axum::http::header::SET_COOKIE, format!("{}=; Path=/; Max-Age=0", crate::access::SESSION_COOKIE))], Json(json!({ "ok": true }))).into_response()
+}
+
+/// A browser asks to sign in: it gets a code to show, which someone signed in approves.
+async fn login_start(State(shared): State<Shared>, Extension(peer): Extension<std::net::SocketAddr>) -> Json<Value> {
+    let mut sw = shared.lock().unwrap();
+    let now = unix_now();
+    sw.auth.signins.retain(|s| s.created_unix + crate::people::SIGNIN_SECS > now);
+    sw.auth.signins.truncate(20);
+    let s = crate::people::PendingSignIn { id: hex::encode(crate::auth::random_bytes::<16>()), code: crate::people::six_digits(), created_unix: now, approved_by: None, from: peer.ip().to_string() };
+    let out = json!({ "id": s.id, "code": s.code, "expires_in": crate::people::SIGNIN_SECS });
+    sw.auth.signins.push(s);
+    Json(out)
+}
+
+#[derive(Deserialize)]
+struct PollQuery {
+    id: String,
+}
+
+/// The browser waits for approval; once approved it gets its session cookie (once).
+async fn login_poll(State(shared): State<Shared>, Extension(via): Extension<crate::access::Via>, Query(q): Query<PollQuery>) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let mut sw = shared.lock().unwrap();
+    let now = unix_now();
+    let Some(i) = sw.auth.signins.iter().position(|s| s.id == q.id && s.created_unix + crate::people::SIGNIN_SECS > now) else {
+        return (StatusCode::GONE, "this sign-in code has expired: start again").into_response();
+    };
+    let Some(person) = sw.auth.signins[i].approved_by.clone() else {
+        return Json(json!({ "approved": false })).into_response();
+    };
+    sw.auth.signins.remove(i);
+    let (dir, sid) = (sw.auth.config_dir.clone(), sw.auth.profile.swarm_id.clone());
+    let token = sw.auth.sessions.create(&person, now, &dir, &sid);
+    ([(axum::http::header::SET_COOKIE, cookie_header(&token, via))], Json(json!({ "approved": true }))).into_response()
+}
+
+#[derive(Deserialize)]
+struct PinLogin {
+    name: String,
+    pin: String,
+}
+
+async fn login_pin(State(shared): State<Shared>, Extension(via): Extension<crate::access::Via>, Json(req): Json<PinLogin>) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let now = unix_now();
+    let found = {
+        let sw = shared.lock().unwrap();
+        sw.auth.profile.people.iter().find(|p| p.name.eq_ignore_ascii_case(req.name.trim())).map(|p| (p.id.clone(), p.pin.clone(), sw.auth.pins.locked(&p.id, now)))
+    };
+    let Some((person, Some(stored), locked)) = found else {
+        return (StatusCode::UNAUTHORIZED, "no one by that name has a PIN: sign in with a code instead").into_response();
+    };
+    if locked {
+        return (StatusCode::TOO_MANY_REQUESTS, "too many wrong PINs: wait 15 minutes, or sign in with a code").into_response();
+    }
+    let pin = req.pin.clone();
+    let ok = tokio::task::spawn_blocking(move || crate::people::check_pin(&stored, &pin)).await.unwrap_or(false);
+    let mut sw = shared.lock().unwrap();
+    if !ok {
+        sw.auth.pins.failed(&person, now);
+        return (StatusCode::UNAUTHORIZED, "wrong PIN").into_response();
+    }
+    sw.auth.pins.succeeded(&person);
+    let (dir, sid) = (sw.auth.config_dir.clone(), sw.auth.profile.swarm_id.clone());
+    let token = sw.auth.sessions.create(&person, now, &dir, &sid);
+    ([(axum::http::header::SET_COOKIE, cookie_header(&token, via))], Json(json!({ "ok": true }))).into_response()
+}
+
+/// Sign-in codes waiting for approval (for the "Approve sign-in" prompt).
+async fn login_pending(State(shared): State<Shared>) -> Json<Value> {
+    let sw = shared.lock().unwrap();
+    let now = unix_now();
+    let list: Vec<Value> = sw.auth.signins.iter().filter(|s| s.approved_by.is_none() && s.created_unix + crate::people::SIGNIN_SECS > now).map(|s| json!({ "id": s.id, "code": s.code, "from": s.from, "age_secs": now - s.created_unix })).collect();
+    Json(json!({ "pending": list }))
+}
+
+#[derive(Deserialize)]
+struct ApproveReq {
+    /// The code the browser shows (what the person compares).
+    code: String,
+}
+
+/// Approve a browser's sign-in: it signs in as the person approving.
+async fn login_approve(State(shared): State<Shared>, Extension(caller): Extension<Caller>, Json(req): Json<ApproveReq>) -> ApiResult {
+    let mut sw = shared.lock().unwrap();
+    let now = unix_now();
+    let want: String = req.code.chars().filter(|c| c.is_ascii_digit()).collect();
+    let s = sw
+        .auth
+        .signins
+        .iter_mut()
+        .find(|s| s.approved_by.is_none() && s.created_unix + crate::people::SIGNIN_SECS > now && s.code.chars().filter(|c| c.is_ascii_digit()).collect::<String>() == want)
+        .ok_or((StatusCode::NOT_FOUND, "no browser is waiting with that code".to_string()))?;
+    s.approved_by = Some(caller.person.clone());
+    println!("{} approved a sign-in from {}", caller.name, s.from);
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn people(State(shared): State<Shared>) -> Json<Value> {
+    let sw = shared.lock().unwrap();
+    let list: Vec<Value> = sw.auth.profile.people.iter().map(|p| person_json(&sw, p)).collect();
+    Json(json!({ "people": list }))
+}
+
+#[derive(Deserialize)]
+struct RoleReq {
+    role: Role,
+}
+
+/// The owner makes someone an admin, or a member again. There is one owner.
+async fn person_role(State(shared): State<Shared>, Path(id): Path<String>, Json(req): Json<RoleReq>) -> ApiResult {
+    if req.role == Role::Owner {
+        return Err((StatusCode::BAD_REQUEST, "a swarm has one owner: whoever runs its coordinator".into()));
+    }
+    let mut sw = shared.lock().unwrap();
+    let p = sw.auth.profile.people.iter_mut().find(|p| p.id == id).ok_or((StatusCode::NOT_FOUND, "no such person".to_string()))?;
+    if p.role == Role::Owner {
+        return Err((StatusCode::BAD_REQUEST, "the owner's role cannot change".into()));
+    }
+    p.role = req.role;
+    let name = p.name.clone();
+    sw.auth.save();
+    println!("{name} is now {:?}", req.role);
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// Remove a person: all their devices lose their approval and leave; their sessions end.
+async fn person_remove(State(shared): State<Shared>, Extension(caller): Extension<Caller>, Path(id): Path<String>) -> ApiResult {
+    let mut sw = shared.lock().unwrap();
+    let target = sw.auth.profile.person(&id).cloned().ok_or((StatusCode::NOT_FOUND, "no such person".to_string()))?;
+    if target.role == Role::Owner {
+        return Err((StatusCode::BAD_REQUEST, "the owner cannot be removed".into()));
+    }
+    if target.role == Role::Admin && caller.role < Role::Owner {
+        return Err((StatusCode::FORBIDDEN, "only the owner can remove an admin".into()));
+    }
+    let keys = sw.auth.remove_person(&id);
+    let gone: Vec<NodeId> = sw.nodes.iter().filter(|(_, e)| e.key.as_ref().is_some_and(|k| keys.contains(k))).map(|(n, _)| n.clone()).collect();
+    for n in &gone {
+        if let Some(tx) = sw.nodes.get(n).and_then(|e| e.tx.clone()) {
+            let _ = tx.send(Message::Drain { grace_secs: 30 });
+        }
+        sw.node_lost(n, "its owner was removed from the swarm");
+        sw.nodes.remove(n);
+    }
+    sw.broadcast_approved();
+    println!("{} removed from the swarm ({} device(s))", target.name, keys.len());
+    Ok(Json(json!({ "removed": id, "devices": gone })))
+}
+
+#[derive(Deserialize)]
+struct NodePersonReq {
+    person: String,
+}
+
+/// Move a device to another person (e.g. it joined with the passphrase as a "new person").
+async fn node_person(State(shared): State<Shared>, Path(id): Path<String>, Json(req): Json<NodePersonReq>) -> ApiResult {
+    let mut sw = shared.lock().unwrap();
+    if sw.auth.profile.person(&req.person).is_none() {
+        return Err((StatusCode::NOT_FOUND, "no such person".into()));
+    }
+    let key = sw.nodes.get(&NodeId(id.clone())).and_then(|e| e.key.clone()).ok_or((StatusCode::BAD_REQUEST, "only a member device can be moved".to_string()))?;
+    let auth = &mut sw.auth;
+    let d = auth.profile.approved.iter_mut().find(|d| d.key == key).ok_or((StatusCode::NOT_FOUND, "device not approved".to_string()))?;
+    let old = std::mem::replace(&mut d.person, req.person.clone());
+    // A person left with no devices (and no PIN) disappears.
+    if !auth.profile.approved.iter().any(|d| d.person == old) && auth.profile.person(&old).is_some_and(|p| p.role == Role::Member && p.pin.is_none()) {
+        auth.profile.people.retain(|p| p.id != old);
+    }
+    auth.save();
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// Devices asking to join (admins approve them after comparing the check code).
+async fn joins(State(shared): State<Shared>) -> Json<Value> {
+    let sw = shared.lock().unwrap();
+    let now = unix_now();
+    let list: Vec<&crate::coordinator::PendingJoin> = sw.joins.iter().filter(|j| j.decision.is_none() && j.created_unix + crate::coordinator::ASK_SECS > now).collect();
+    Json(json!({ "joins": list }))
+}
+
+async fn decide_join(State(shared): State<Shared>, Extension(caller): Extension<Caller>, Path((id, decision)): Path<(String, String)>) -> ApiResult {
+    let yes = match decision.as_str() {
+        "approve" => true,
+        "decline" => false,
+        _ => return Err((StatusCode::NOT_FOUND, "approve or decline".into())),
+    };
+    let mut sw = shared.lock().unwrap();
+    let j = sw.joins.iter_mut().find(|j| j.id == id && j.decision.is_none()).ok_or((StatusCode::NOT_FOUND, "no such request (it may have timed out)".to_string()))?;
+    j.decision = Some(yes);
+    println!("{} {} {}'s request to join", caller.name, if yes { "approved" } else { "declined" }, j.device);
+    Ok(Json(json!({ "ok": true })))
 }

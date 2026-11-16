@@ -15,7 +15,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncWriteExt, BufReader, BufWriter};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Semaphore};
 
@@ -50,18 +50,48 @@ fn tune(stream: &TcpStream) -> io::Result<()> {
     socket2::SockRef::from(stream).set_tcp_keepalive(&ka)
 }
 
+/// TLS for a stage's two links: this process's certificate, and the certificates (by
+/// fingerprint) its upstream and downstream neighbours must present. Handed out by the
+/// coordinator, which learns every node's fingerprint over its authenticated control link.
+pub struct LinkTls {
+    pub identity: Arc<crate::tls::Identity>,
+    pub upstream: crate::tls::Fingerprint,
+    pub downstream: crate::tls::Fingerprint,
+}
+
 impl Link {
-    /// Connect to `addr`, retrying until `timeout` (neighbours start in any order).
-    pub async fn connect(addr: SocketAddr, p: LinkParams, timeout: Duration) -> io::Result<Link> {
+    /// Connect to `addr`, retrying until `timeout` (neighbours start in any order). The whole
+    /// handshake is retried, not just the TCP connect: when a pipeline restarts, the port can
+    /// still belong to the previous pipeline's listener for a moment, which then resets the
+    /// connection or refuses our epoch before the new listener takes over.
+    /// With `tls`, the link is encrypted and the listener must present the downstream
+    /// neighbour's certificate (and we present ours).
+    pub async fn connect(addr: SocketAddr, p: LinkParams, timeout: Duration, tls: Option<&LinkTls>) -> io::Result<Link> {
         let deadline = Instant::now() + timeout;
-        let mut stream = loop {
-            match TcpStream::connect(addr).await {
-                Ok(s) => break s,
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now()).max(Duration::from_millis(100));
+            match Self::try_connect(addr, p, left, tls).await {
+                Ok(link) => return Ok(link),
                 Err(e) if Instant::now() >= deadline => return Err(e),
                 Err(_) => tokio::time::sleep(Duration::from_millis(40)).await,
             }
-        };
+        }
+    }
+
+    async fn try_connect(addr: SocketAddr, p: LinkParams, timeout: Duration, tls: Option<&LinkTls>) -> io::Result<Link> {
+        let stream = TcpStream::connect(addr).await?;
         tune(&stream)?;
+        match tls {
+            None => Self::handshake_out(stream, p, timeout).await,
+            Some(t) => {
+                let cfg = crate::tls::client_config(Some(&t.identity), Some(t.downstream))?;
+                let s = tokio::time::timeout(timeout, tokio_rustls::TlsConnector::from(cfg).connect(crate::tls::server_name(), stream)).await.map_err(|_| err(io::ErrorKind::TimedOut, "TLS handshake timed out"))??;
+                Self::handshake_out(s, p, timeout).await
+            }
+        }
+    }
+
+    async fn handshake_out<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(mut stream: S, p: LinkParams, timeout: Duration) -> io::Result<Link> {
         write_frame(&mut stream, &Frame::ctrl(Kind::Hello, p.epoch, p.session, p.stage).with_window(p.window)).await?;
         stream.flush().await?;
         let ack = tokio::time::timeout(timeout, read_frame(&mut stream)).await.map_err(|_| err(io::ErrorKind::TimedOut, "no hello ack"))??;
@@ -71,14 +101,37 @@ impl Link {
         Ok(spawn_io(stream, p.window, ack.header.n_tokens, ack.header.aux))
     }
 
-    /// Accept one upstream connection and verify its epoch and session.
-    pub async fn accept(listener: &TcpListener, p: LinkParams) -> io::Result<Link> {
+    /// Accept one upstream connection and verify its epoch and session. With `tls`, the
+    /// upstream neighbour must present its certificate; anything else is a stray connection.
+    pub async fn accept(listener: &TcpListener, p: LinkParams, tls: Option<&LinkTls>) -> io::Result<Link> {
+        let acceptor = match tls {
+            Some(t) => Some(tokio_rustls::TlsAcceptor::from(crate::tls::server_config(&t.identity, Some(t.upstream))?)),
+            None => None,
+        };
         loop {
-            let (mut stream, _) = listener.accept().await?;
+            let (stream, _) = listener.accept().await?;
             tune(&stream)?;
+            let r = match &acceptor {
+                None => Self::handshake_in(stream, p).await,
+                Some(a) => match tokio::time::timeout(Duration::from_secs(10), a.accept(stream)).await {
+                    Ok(Ok(s)) => Self::handshake_in(s, p).await,
+                    _ => continue, // not our neighbour (wrong certificate, or not TLS)
+                },
+            };
+            match r {
+                Ok(Some(link)) => return Ok(link),
+                Ok(None) => continue,
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// The accepting side's hello. Ok(None): a stray connection, keep waiting.
+    async fn handshake_in<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(mut stream: S, p: LinkParams) -> io::Result<Option<Link>> {
+        {
             let hello = match tokio::time::timeout(Duration::from_secs(10), read_frame(&mut stream)).await {
                 Ok(Ok(f)) if f.header.kind == Kind::Hello => f,
-                _ => continue, // stray connection; keep waiting for the real neighbour
+                _ => return Ok(None), // stray connection; keep waiting for the real neighbour
             };
             if hello.header.epoch != p.epoch || hello.header.request != p.session {
                 let _ = write_frame(&mut stream, &Frame::ctrl(Kind::Close, p.epoch, p.session, p.stage)).await;
@@ -87,7 +140,7 @@ impl Link {
             }
             write_frame(&mut stream, &Frame::ctrl(Kind::Hello, p.epoch, p.session, p.stage).with_window(p.window)).await?;
             stream.flush().await?;
-            return Ok(spawn_io(stream, p.window, hello.header.n_tokens, hello.header.aux));
+            Ok(Some(spawn_io(stream, p.window, hello.header.n_tokens, hello.header.aux)))
         }
     }
 
@@ -122,8 +175,8 @@ impl Frame {
     }
 }
 
-fn spawn_io(stream: TcpStream, my_window: u32, peer_window: u32, peer_stage: u32) -> Link {
-    let (rd, wr) = stream.into_split();
+fn spawn_io<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(stream: S, my_window: u32, peer_window: u32, peer_stage: u32) -> Link {
+    let (rd, wr) = tokio::io::split(stream);
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Frame>();
     let credits = Arc::new(Semaphore::new(peer_window as usize));
     let (in_tx, in_rx) = mpsc::channel::<Frame>(my_window as usize + 16);
@@ -132,6 +185,7 @@ fn spawn_io(stream: TcpStream, my_window: u32, peer_window: u32, peer_stage: u32
         let mut w = BufWriter::new(wr);
         while let Some(f) = out_rx.recv().await {
             if write_frame(&mut w, &f).await.is_err() {
+                let _ = w.shutdown().await;
                 return;
             }
             // Coalesce whatever is already queued into one flush.
@@ -144,7 +198,10 @@ fn spawn_io(stream: TcpStream, my_window: u32, peer_window: u32, peer_stage: u32
                 return;
             }
         }
+        // The link was dropped: close our direction, so the neighbour notices at once (a
+        // generic split, unlike TcpStream's own, does not do this when the half is dropped).
         let _ = w.flush().await;
+        let _ = w.shutdown().await;
     });
 
     let c2 = credits.clone();
@@ -182,7 +239,7 @@ mod tests {
         let addr = l.local_addr().unwrap();
         let p = LinkParams { epoch: 1, session: 42, stage: 0, window };
         let q = LinkParams { stage: 1, ..p };
-        let (a, b) = tokio::join!(Link::connect(addr, p, Duration::from_secs(2)), Link::accept(&l, q));
+        let (a, b) = tokio::join!(Link::connect(addr, p, Duration::from_secs(2), None), Link::accept(&l, q, None));
         (a.unwrap(), b.unwrap())
     }
 
@@ -225,9 +282,59 @@ mod tests {
         let addr = l.local_addr().unwrap();
         let mine = LinkParams { epoch: 2, session: 42, stage: 1, window: 4 };
         let stale = LinkParams { epoch: 1, session: 42, stage: 0, window: 4 };
-        let (c, a) = tokio::join!(Link::connect(addr, stale, Duration::from_secs(2)), Link::accept(&l, mine));
+        let (c, a) = tokio::join!(Link::connect(addr, stale, Duration::from_secs(2), None), Link::accept(&l, mine, None));
         assert!(c.is_err());
         assert!(a.is_err());
+    }
+
+    /// Regression (seen on CI): a restarted pipeline's head reached the member's port while the
+    /// previous pipeline's listener was closing; the reset failed the whole pipeline. A link
+    /// now retries until the real listener answers.
+    #[tokio::test]
+    async fn connect_retries_when_the_first_listener_hangs_up() {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let p = LinkParams { epoch: 2, session: 42, stage: 0, window: 4 };
+        let q = LinkParams { stage: 1, ..p };
+        let server = async {
+            // The old stage: accepts and hangs up without a word.
+            let (s, _) = l.accept().await.unwrap();
+            drop(s);
+            Link::accept(&l, q, None).await
+        };
+        let (c, a) = tokio::join!(Link::connect(addr, p, Duration::from_secs(5), None), server);
+        assert_eq!(c.expect("connect should retry").peer_stage, 1);
+        assert!(a.is_ok());
+    }
+
+    /// An encrypted link only forms with the expected neighbour: a connection presenting
+    /// another certificate is ignored by the listener and fails on the connecting side.
+    #[tokio::test]
+    async fn encrypted_links_accept_only_the_pinned_neighbour() {
+        use crate::tls::Identity;
+        let (up, me, stranger) = (Identity::generate().unwrap(), Identity::generate().unwrap(), Identity::generate().unwrap());
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let p = LinkParams { epoch: 1, session: 42, stage: 0, window: 4 };
+        let q = LinkParams { stage: 1, ..p };
+        // The listener (stage 1) expects `up` upstream; the connector (stage 0) expects `me`.
+        let mine = LinkTls { identity: me.clone(), upstream: up.fingerprint, downstream: up.fingerprint };
+        let theirs = LinkTls { identity: up.clone(), upstream: me.fingerprint, downstream: me.fingerprint };
+        let impostor = LinkTls { identity: stranger.clone(), upstream: me.fingerprint, downstream: me.fingerprint };
+        let accept = Link::accept(&l, q, Some(&mine));
+        let connects = async {
+            let bad = Link::connect(addr, p, Duration::from_millis(300), Some(&impostor)).await;
+            let good = Link::connect(addr, p, Duration::from_secs(5), Some(&theirs)).await;
+            (bad, good)
+        };
+        let (a, (bad, good)) = tokio::join!(accept, connects);
+        assert!(bad.is_err(), "a stranger's certificate must not link");
+        let (a, mut good) = (a.unwrap(), good.unwrap());
+        assert_eq!((a.peer_stage, good.peer_stage), (0, 1));
+        a.send_data(acts(9)).await.unwrap();
+        // a is the accepting side; send the other way too.
+        good.send_data(acts(3)).await.unwrap();
+        let _ = good.recv();
     }
 
     #[tokio::test]

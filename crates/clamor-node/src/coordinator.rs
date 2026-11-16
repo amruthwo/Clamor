@@ -28,6 +28,8 @@ pub struct NodeEntry {
     pub note: Option<String>,
     /// Bumped on every (re)join so a stale connection cannot overwrite a newer one.
     pub generation: u64,
+    /// The node's TLS certificate fingerprint (hex): its neighbours pin it on data links.
+    pub tls_fp: Option<String>,
     /// The node's address, as seen on its control connection.
     pub peer_ip: Option<IpAddr>,
     /// The coordinator's own address on that connection: how this node reaches us.
@@ -55,12 +57,18 @@ pub struct SwarmAuth {
     pub config_dir: std::path::PathBuf,
     /// Keys the share servers accept (approved devices and the coordinator).
     pub allowed: crate::share::AllowedKeys,
+    /// Browser sessions for the dashboard.
+    pub sessions: crate::people::Sessions,
+    pub pins: crate::people::PinGuard,
+    /// Browsers waiting for a signed-in person to approve their sign-in code.
+    pub signins: Vec<crate::people::PendingSignIn>,
 }
 
 impl SwarmAuth {
     pub fn new(profile: crate::auth::CoordinatorProfile, key: ed25519_dalek::SigningKey, config_dir: std::path::PathBuf) -> Self {
         let allowed: crate::share::AllowedKeys = Default::default();
-        let me = SwarmAuth { profile, key, config_dir, allowed };
+        let sessions = crate::people::Sessions::load(&config_dir, &profile.swarm_id);
+        let me = SwarmAuth { profile, key, config_dir, allowed, sessions, pins: Default::default(), signins: Vec::new() };
         me.refresh_allowed();
         me
     }
@@ -88,15 +96,42 @@ impl SwarmAuth {
         removed
     }
 
-    /// Approve a device that proved it knows the passphrase.
-    fn approve(&mut self, key: &str, name: &str) {
-        if !self.profile.approved.iter().any(|d| d.key == key) {
-            self.profile.approved.push(crate::auth::ApprovedDevice { key: key.into(), name: name.into(), approved_unix: unix_now() });
-            if let Err(e) = self.profile.save(&self.config_dir) {
-                eprintln!("could not save the swarm profile: {e:#}");
-            }
-            self.refresh_allowed();
+    /// Approve a device that proved it knows the passphrase (or a code). It belongs to
+    /// `person` ("Add my device"), or else to a new member called `person_name`.
+    fn approve(&mut self, key: &str, name: &str, person: Option<&str>, person_name: Option<&str>) {
+        if self.profile.approved.iter().any(|d| d.key == key) {
+            return;
         }
+        let person = match person.filter(|p| self.profile.person(p).is_some()) {
+            Some(p) => p.to_string(),
+            None => {
+                let id = crate::people::new_person_id();
+                let pname = person_name.map(str::trim).filter(|n| !n.is_empty()).unwrap_or(name);
+                self.profile.people.push(crate::people::Person { id: id.clone(), name: pname.chars().take(40).collect(), role: crate::people::Role::Member, pin: None, created_unix: unix_now() });
+                id
+            }
+        };
+        self.profile.approved.push(crate::auth::ApprovedDevice { key: key.into(), name: name.into(), approved_unix: unix_now(), person });
+        self.save();
+        self.refresh_allowed();
+    }
+
+    pub fn save(&self) {
+        if let Err(e) = self.profile.save(&self.config_dir) {
+            eprintln!("could not save the swarm profile: {e:#}");
+        }
+    }
+
+    /// Remove a person: their devices lose their approval, their sessions end. Returns the
+    /// device keys revoked.
+    pub fn remove_person(&mut self, id: &str) -> Vec<String> {
+        let keys: Vec<String> = self.profile.approved.iter().filter(|d| d.person == id).map(|d| d.key.clone()).collect();
+        self.profile.approved.retain(|d| d.person != id);
+        self.profile.people.retain(|p| p.id != id);
+        self.sessions.end_all(id, &self.config_dir, &self.profile.swarm_id);
+        self.save();
+        self.refresh_allowed();
+        keys
     }
 }
 
@@ -105,7 +140,26 @@ pub struct Invite {
     pub code: String,
     pub expires_unix: u64,
     pub failures: u32,
+    /// "Add my device": the device joins as this person. None: a new person.
+    pub person: Option<String>,
 }
+
+/// A device asking to join, waiting for an admin.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct PendingJoin {
+    pub id: String,
+    pub device: String,
+    pub person_name: String,
+    pub from: String,
+    /// The check code both screens show.
+    pub code: String,
+    pub created_unix: u64,
+    /// None: waiting; Some(true): approved; Some(false): declined.
+    pub decision: Option<bool>,
+}
+
+/// How long a device asking to join waits for approval.
+pub const ASK_SECS: u64 = 600;
 
 /// How long a one-time code works, and how many wrong tries it survives.
 pub const INVITE_SECS: u64 = 600;
@@ -114,17 +168,24 @@ pub const INVITE_TRIES: u32 = 3;
 impl Invite {
     pub fn new() -> Self {
         let n = u32::from_le_bytes(crate::auth::random_bytes::<4>()) % 1_000_000;
-        Invite { code: format!("{:03}-{:03}", n / 1000, n % 1000), expires_unix: unix_now() + INVITE_SECS, failures: 0 }
+        Invite { code: format!("{:03}-{:03}", n / 1000, n % 1000), expires_unix: unix_now() + INVITE_SECS, failures: 0, person: None }
     }
 }
 
 pub struct Swarm {
+    /// This process's TLS certificate (control connections, and stage 0's data links).
+    pub tls: Arc<clamor_transport::tls::Identity>,
+    tls_server: Arc<tokio_rustls::rustls::ServerConfig>,
     pub name: String,
     pub auth: SwarmAuth,
     /// The one-time code in force, if any.
     pub invite: Option<Invite>,
     /// How devices reach the coordinator (`host` or `host:port`), for join commands.
     pub join_hint: String,
+    /// Port of the encrypted (HTTPS) dashboard, once listening.
+    pub portal_tls_port: Option<u16>,
+    /// Devices asking to join.
+    pub joins: Vec<PendingJoin>,
     pub coordinator: NodeId,
     pub nodes: BTreeMap<NodeId, NodeEntry>,
     next_generation: u64,
@@ -140,8 +201,13 @@ pub struct Swarm {
 }
 
 impl Swarm {
-    pub fn new(name: String, auth: SwarmAuth, coordinator: NodeId, engine: EngineConfig, data_port: u16, quick_bench: bool, share_port: Option<u16>) -> Self {
-        Swarm { name, auth, invite: None, join_hint: String::new(), coordinator, nodes: BTreeMap::new(), next_generation: 1, engine, data_port, quick_bench, pipeline: None, next_epoch: 1, share_port }
+    pub fn new(name: String, auth: SwarmAuth, coordinator: NodeId, mut engine: EngineConfig, data_port: u16, quick_bench: bool, share_port: Option<u16>) -> Self {
+        let tls = coordinator_identity(&auth.config_dir, &auth.profile.swarm_id);
+        let tls_server = clamor_transport::tls::server_config(&tls, None).expect("TLS config");
+        engine.tls = Some(tls.clone());
+        Swarm {
+            tls,
+            tls_server, name, auth, invite: None, join_hint: String::new(), portal_tls_port: None, joins: Vec::new(), coordinator, nodes: BTreeMap::new(), next_generation: 1, engine, data_port, quick_bench, pipeline: None, next_epoch: 1, share_port }
     }
 
     /// A node that held a pipeline stage is gone: that pipeline cannot run any more.
@@ -174,7 +240,7 @@ impl Swarm {
 /// take well under a second), so a pipeline can use it at once; the benchmark follows in the
 /// background (`bench_self`). Registering only after the benchmark left a window in which the
 /// coordinator's own models were unknown.
-pub async fn register_self(shared: Shared, id: NodeId, owner_policy: Option<Policy>) {
+pub async fn register_self(shared: Shared, id: NodeId, overrides: crate::neighbour::Overrides) {
     let models_dir = shared.lock().unwrap().engine.models_dir.clone();
     let result = tokio::task::spawn_blocking(move || {
         let mut info = probe::probe_node(id);
@@ -185,9 +251,10 @@ pub async fn register_self(shared: Shared, id: NodeId, owner_policy: Option<Poli
     let Ok((info, models)) = result else { return };
     let mut sw = shared.lock().unwrap();
     let share_port = sw.share_port;
-    let policy = owner_policy.unwrap_or_else(|| Policy::default_for(info.class));
+    let policy = overrides.for_swarm(&sw.auth.profile.swarm_id, info.class).unwrap_or_else(|| Policy::default_for(info.class));
     let generation = sw.next_generation;
     sw.next_generation += 1;
+    let my_fp = sw.tls.fingerprint_hex();
     let id = info.id.clone();
     sw.nodes.insert(
         id,
@@ -200,6 +267,7 @@ pub async fn register_self(shared: Shared, id: NodeId, owner_policy: Option<Poli
             running_tasks: 0,
             note: Some("coordinator".into()),
             generation,
+            tls_fp: Some(my_fp),
             peer_ip: None,
             coord_ip: None,
             build: Some(crate::build_info::current()),
@@ -277,7 +345,14 @@ enum Admission {
 async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Result<()> {
     stream.set_nodelay(true)?;
     let coord_ip = stream.local_addr().ok().map(|a| a.ip());
-    let (mut rd, mut wr) = stream.into_split();
+    // Everything on the control connection is encrypted. A connection that does not complete
+    // TLS is a reachability check (or something that is not Clamor 0.5+): drop it quietly.
+    let acceptor = tokio_rustls::TlsAcceptor::from(shared.lock().unwrap().tls_server.clone());
+    let Ok(Ok(tls)) = timeout(Duration::from_secs(10), acceptor.accept(stream)).await else {
+        return Ok(());
+    };
+    let binding = clamor_transport::tls::exporter_server(tls.get_ref().1)?;
+    let (mut rd, mut wr) = tokio::io::split(tls);
 
     let hello = match timeout(Duration::from_secs(10), read_msg(&mut rd)).await? {
         Ok(m) => m,
@@ -285,7 +360,7 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
         Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
         Err(e) => return Err(e.into()),
     };
-    let Message::Hello { proto, info, bench_port, build, models, share_port, policy: owner_policy, auth_nonce, invite } = hello else {
+    let Message::Hello { proto, info, bench_port, build, models, share_port, auth_nonce, invite, tls_fp, person_name, ask } = hello else {
         write_msg(&mut wr, &Message::Reject { reason: "expected hello".into() }).await?;
         return Ok(());
     };
@@ -307,18 +382,18 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
             sw.invite = None;
         }
         match (invite, &sw.invite) {
-            (false, _) => Some(sw.auth.profile.passphrase.clone()),
-            (true, Some(i)) => Some(i.code.clone()),
+            (false, _) => Some((sw.auth.profile.passphrase.clone(), None)),
+            (true, Some(i)) => Some((i.code.clone(), i.person.clone())),
             (true, None) => None,
         }
     };
-    let Some(secret) = secret else {
+    let Some((secret, invite_person)) = secret else {
         write_msg(&mut wr, &Message::Reject { reason: "that code has expired or was already used: ask for a new one (Add device in the dashboard)".into() }).await?;
         return Ok(());
     };
     let (hs, ch) = {
         let sw = shared.lock().unwrap();
-        crate::auth::CoordinatorHandshake::start(&sw.auth.profile.swarm_id, &sw.name, &sw.auth.key, &secret)
+        crate::auth::CoordinatorHandshake::start(&binding, &sw.auth.profile.swarm_id, &sw.name, &sw.auth.key, &secret)
     };
     write_msg(&mut wr, &Message::AuthChallenge { swarm_id: ch.swarm_id, swarm_name: ch.swarm_name, coordinator_key: ch.coordinator_key, nonce: ch.nonce, spake: ch.spake }).await?;
     let proof = match timeout(Duration::from_secs(30), read_msg(&mut rd)).await?? {
@@ -332,7 +407,7 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
     let verified = {
         let mut sw = shared.lock().unwrap();
         let key = sw.auth.key.clone();
-        let r = hs.verify(&key, &nonce_m, &proof, |k| sw.auth.profile.approved.iter().any(|d| d.key == k));
+        let r = hs.verify(&key, &nonce_m, &proof, |k| sw.auth.profile.approved.iter().any(|d| d.key == k), ask && !invite);
         if invite && proof.spake.is_some() {
             // One-time: used up by a success; a few wrong tries cancel it.
             match &r {
@@ -349,12 +424,48 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
             }
         }
         if let Ok((crate::auth::Verdict::Approve, _)) = &r {
-            sw.auth.approve(&proof.device_key, &info.id.0);
+            sw.auth.approve(&proof.device_key, &info.id.0, invite_person.as_deref(), person_name.as_deref());
             println!("{} approved with the {} (key {}…)", info.id, if invite { "one-time code" } else { "passphrase" }, &proof.device_key[..16]);
             // Everyone's share servers must now accept the new device.
             sw.broadcast_approved();
         }
-        r.map(|(_, cp)| cp)
+        r
+    };
+    // Asking to join: wait for an admin to approve it in the dashboard.
+    let verified = match verified {
+        Ok((crate::auth::Verdict::Ask, cp)) => {
+            let code = crate::auth::check_code(&binding, &crate::auth::key_hex(&shared.lock().unwrap().auth.key.verifying_key()), &proof.device_key);
+            let id = hex::encode(crate::auth::random_bytes::<8>());
+            {
+                let mut sw = shared.lock().unwrap();
+                sw.joins.retain(|j| j.created_unix + ASK_SECS > unix_now());
+                sw.joins.push(PendingJoin { id: id.clone(), device: info.id.0.clone(), person_name: person_name.clone().unwrap_or_else(|| info.id.0.clone()), from: addr.ip().to_string(), code: code.clone(), created_unix: unix_now(), decision: None });
+            }
+            println!("{} ({}) asks to join; check code {code}: approve it in the dashboard", info.id, addr.ip());
+            let t0 = std::time::Instant::now();
+            let decision = loop {
+                let d = shared.lock().unwrap().joins.iter().find(|j| j.id == id).map(|j| j.decision);
+                match d {
+                    Some(Some(d)) => break Some(d),
+                    None => break None, // dropped
+                    Some(None) if t0.elapsed() > Duration::from_secs(ASK_SECS) => break None,
+                    Some(None) => sleep(Duration::from_millis(300)).await,
+                }
+            };
+            shared.lock().unwrap().joins.retain(|j| j.id != id);
+            match decision {
+                Some(true) => {
+                    let mut sw = shared.lock().unwrap();
+                    sw.auth.approve(&proof.device_key, &info.id.0, None, person_name.as_deref());
+                    sw.broadcast_approved();
+                    println!("{} approved in the dashboard", info.id);
+                    Ok(cp)
+                }
+                Some(false) => Err(anyhow::anyhow!("your request to join was declined")),
+                None => Err(anyhow::anyhow!("nobody approved the request to join in time: ask again")),
+            }
+        }
+        other => other.map(|(_, cp)| cp),
     };
     let cproof = match verified {
         Ok(v) => v,
@@ -368,7 +479,7 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
     let device_key = proof.device_key.clone();
     // approved_keys is filled in when the device enters the roster (same lock): from then on it
     // receives every `Approved` broadcast, so no approval can fall between the two.
-    let mut welcome_auth = WelcomeAuth { signature: cproof.signature, confirm: cproof.confirm, approved_keys: Vec::new() };
+    let mut welcome_auth = WelcomeAuth { signature: cproof.signature, confirm: cproof.confirm, approved_keys: Vec::new(), portal_tls_port: None, portal_tls_fp: None };
 
     let (tx, mut rx) = unbounded_channel::<Message>();
     let id = info.id.clone();
@@ -387,8 +498,6 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
                 Some(p) => (p.report.policy, p.report.bench, p.report.link),
                 None => (Policy::default_for(info.class), None, None),
             };
-            // The device owner's own settings win.
-            let policy = owner_policy.unwrap_or(policy);
             let cached = bench.is_some();
             sw.nodes.insert(
                 id.clone(),
@@ -401,6 +510,7 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
                     running_tasks: 0,
                     note: if cached { Some("rejoined with cached benchmark".into()) } else { None },
                     generation,
+                    tls_fp: tls_fp.clone(),
                     peer_ip: Some(addr.ip()),
                     coord_ip,
                     build,
@@ -413,6 +523,8 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
                 },
             );
             welcome_auth.approved_keys = sw.auth.approved_keys();
+            welcome_auth.portal_tls_port = sw.portal_tls_port;
+            welcome_auth.portal_tls_fp = Some(sw.tls.fingerprint_hex());
             Admission::Ok { generation, swarm, coordinator, cached_bench: cached, quick: sw.quick_bench }
         }
     };
@@ -426,11 +538,8 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
     println!("{id} joined from {addr}{}", if cached_bench { " (cached benchmark)" } else { "" });
 
     let _ = tx.send(Message::Welcome { swarm, coordinator, heartbeat_secs: HEARTBEAT_SECS, auth: Some(welcome_auth) });
-    // The node starts from its class defaults; send the policy we hold for it (it may have been
-    // changed in the dashboard, and survives the node reconnecting).
-    if let Some(policy) = shared.lock().unwrap().nodes.get(&id).map(|e| e.report.policy) {
-        let _ = tx.send(Message::SetPolicy { policy });
-    }
+    // The device answers Welcome with its owner's settings for this swarm (OwnerPolicy); until
+    // then it keeps what we hold for it (from before it reconnected) or the defaults.
     if !cached_bench {
         set_state(&shared, &id, generation, NodeState::Benchmarking);
         let _ = tx.send(Message::BenchRequest { quick });
@@ -496,6 +605,17 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
             Message::Leave => {
                 leave_note = "left at the owner's request".into();
                 break;
+            }
+            Message::OwnerPolicy { policy } => {
+                // The owner's settings win; with none, the device takes what we hold (it may have
+                // been changed in the dashboard while the device was away).
+                let mut sw = shared.lock().unwrap();
+                if let Some(e) = sw.nodes.get_mut(&id) {
+                    if let Some(p) = policy.filter(|p| crate::neighbour::validate(p).is_ok()) {
+                        e.report.policy = p;
+                    }
+                    let _ = tx.send(Message::SetPolicy { policy: e.report.policy });
+                }
             }
             Message::Inventory { models } => {
                 if let Some(e) = shared.lock().unwrap().nodes.get_mut(&id) {
@@ -608,4 +728,25 @@ pub async fn reaper(shared: Shared) {
             sw.node_lost(&id, "heartbeat timeout");
         }
     }
+}
+
+/// The coordinator's TLS certificate, kept per swarm so it stays the same across restarts (a
+/// browser told to trust the dashboard's certificate keeps trusting it).
+fn coordinator_identity(config_dir: &std::path::Path, swarm_id: &str) -> std::sync::Arc<clamor_transport::tls::Identity> {
+    use clamor_transport::tls::Identity;
+    let path = config_dir.join("swarms").join(format!("tls-{swarm_id}.json"));
+    let load = || -> Option<std::sync::Arc<Identity>> {
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
+        Identity::from_parts(hex::decode(v["cert"].as_str()?).ok()?, hex::decode(v["key"].as_str()?).ok()?).ok()
+    };
+    if let Some(id) = load() {
+        return id;
+    }
+    let id = Identity::generate().expect("TLS certificate");
+    let (cert, key) = id.to_parts();
+    let doc = serde_json::json!({ "cert": hex::encode(cert), "key": hex::encode(key) });
+    if let Err(e) = crate::auth::write_private(&path, doc.to_string().as_bytes()) {
+        eprintln!("could not save the TLS certificate: {e:#}");
+    }
+    id
 }

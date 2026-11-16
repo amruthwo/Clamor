@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Clamor</title>
+<style>
+  :root { color-scheme: light dark; --bg:#f6f7f9; --card:#fff; --ink:#15181d; --mute:#667085; --line:#e4e7ec; --accent:#2f6fed; --ok:#12805c; --warn:#b54708; --bad:#b42318; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0f1216; --card:#171b21; --ink:#e8ebf0; --mute:#98a2b3; --line:#262c35; --accent:#6b9bff; --ok:#3ccf9a; --warn:#f5a65b; --bad:#ff7a6e; } }
+  * { box-sizing:border-box; }
+  html, body { height:100%; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.45 system-ui,-apple-system,Segoe UI,sans-serif; display:flex; flex-direction:column; }
+  button, input, select { font:inherit; color:inherit; background:var(--card); border:1px solid var(--line); border-radius:8px; padding:7px 12px; }
+  button { cursor:pointer; } button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+  button:disabled { opacity:.6; cursor:default; }
+  input { width:100%; }
+  .mute { color:var(--mute); } .err { color:var(--bad); white-space:pre-wrap; } .ok { color:var(--ok); }
+  [hidden] { display:none !important; }
+
+  /* First run */
+  .setup { max-width:880px; width:100%; margin:0 auto; padding:28px 16px; overflow:auto; }
+  .setup h1 { margin:0 0 4px; font-size:26px; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit, minmax(300px, 1fr)); gap:16px; margin-top:20px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px; display:grid; gap:12px; align-content:start; }
+  .card h2 { margin:0; font-size:18px; }
+  label { display:grid; gap:4px; font-size:14px; }
+  .found { display:grid; gap:6px; }
+  .found button { text-align:left; display:flex; justify-content:space-between; gap:8px; }
+  .found button.sel { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent) inset; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+
+  /* Running */
+  .bar { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:8px 14px; background:var(--card); border-bottom:1px solid var(--line); }
+  .bar .name { font-weight:600; }
+  .bar .spacer { flex:1; }
+  .dot { display:inline-block; width:9px; height:9px; border-radius:50%; background:var(--mute); }
+  .dot.on { background:var(--ok); } .dot.wait { background:var(--warn); } .dot.off { background:var(--bad); }
+  .pass { font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:13px; }
+  iframe { flex:1; border:0; width:100%; background:var(--bg); }
+  .log { flex:1; margin:0; padding:12px 14px; overflow:auto; font:12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space:pre-wrap; }
+  .waiting { flex:1; display:grid; place-items:center; text-align:center; padding:24px; }
+</style>
+</head>
+<body>
+
+<section class="setup" id="setup" hidden>
+  <h1>Welcome to Clamor</h1>
+  <div class="mute">Team up the computers and phones around you to run AI models too big for any one of them.</div>
+  <div class="err" id="setup-err"></div>
+  <div class="cards">
+    <form class="card" id="start">
+      <h2>Start a swarm</h2>
+      <div class="mute">This computer becomes the swarm's coordinator. Other devices join it.</div>
+      <label>Name <input id="start-name" value="home" autocomplete="off" required></label>
+      <label>Passphrase <input id="start-pass" placeholder="leave empty to get five random words" autocomplete="off"></label>
+      <button class="primary" id="start-go">Start</button>
+    </form>
+    <form class="card" id="join">
+      <h2>Join a swarm</h2>
+      <div class="found" id="found"><span class="mute">Looking on your network…</span></div>
+      <label>Or its address <input id="join-addr" placeholder="e.g. 192.168.1.20" autocomplete="off"></label>
+      <label>Your name <input id="join-name" placeholder="shown to the others in the swarm" autocomplete="name"></label>
+      <label>Code or passphrase <input id="join-secret" placeholder="code from “Add device”, the five words, or nothing to ask" autocomplete="off"></label>
+      <div class="mute" id="ask-status"></div>
+      <button class="primary" id="join-go">Join</button>
+    </form>
+  </div>
+  <p class="row mute"><label class="row" style="display:flex"><input type="checkbox" id="autostart" style="width:auto"> Start Clamor when I log in</label></p>
+  <p class="err" id="no-node" hidden>clamor-node was not found next to this app. Reinstall Clamor.</p>
+</section>
+
+<section id="running" hidden style="display:flex; flex-direction:column; flex:1; min-height:0">
+  <div class="bar">
+    <span class="dot" id="dot"></span>
+    <span class="name" id="swarm-name"></span>
+    <span class="mute" id="role"></span>
+    <span class="pass" id="pass" hidden></span>
+    <span class="spacer"></span>
+    <button id="show-log">Log</button>
+    <button id="leave">Change swarm…</button>
+  </div>
+  <iframe id="dash" title="Swarm dashboard" hidden></iframe>
+  <div class="waiting" id="waiting"><div><div id="wait-msg">Connecting…</div><div class="err" id="run-err"></div><p><button id="retry" hidden>Try again</button></p></div></div>
+  <pre class="log" id="log" hidden></pre>
+</section>
+
+<script>
+const { invoke } = window.__TAURI__.core;
+const $ = id => document.getElementById(id);
+let st = null, chosen = null, showLog = false, dashUrl = null;
+
+async function refresh() {
+  st = await invoke('status');
+  const set = !!st.setup.mode;
+  $('setup').hidden = set;
+  $('running').hidden = !set;
+  $('no-node').hidden = st.node_found;
+  $('ask-status').textContent = !set && st.running && !st.joined && st.check_code ? `Asking to join. Check code ${st.check_code}: an admin approves this device in the swarm's dashboard when it shows the same code.` : '';
+  if (!set) return;
+  $('swarm-name').textContent = st.setup.swarm || 'swarm';
+  $('role').textContent = st.setup.mode === 'coordinator' ? 'coordinator (this computer)' : 'member';
+  $('pass').hidden = !st.passphrase;
+  $('pass').textContent = st.passphrase ? 'passphrase: ' + st.passphrase : '';
+  $('dot').className = 'dot ' + (st.running && st.joined ? 'on' : st.running ? 'wait' : 'off');
+  $('log').textContent = st.log.join('\n');
+  const up = st.running && st.joined;
+  if (up && !dashUrl) {
+    dashUrl = await invoke('dashboard_url');
+    if (dashUrl) $('dash').src = dashUrl;
+  }
+  if (!st.running) dashUrl = null;
+  $('dash').hidden = showLog || !up || !dashUrl;
+  $('log').hidden = !showLog;
+  $('waiting').hidden = showLog || (up && !!dashUrl);
+  $('wait-msg').textContent = st.running ? 'Connecting to the swarm…' : 'Clamor is not running.';
+  $('run-err').textContent = st.running ? '' : (st.exited || '');
+  $('retry').hidden = st.running;
+}
+
+async function scan() {
+  try {
+    const v = await invoke('swarms', { scan: true });
+    const list = v.on_network || [];
+    $('found').innerHTML = list.length ? '' : '<span class="mute">No swarms found on this network. Type the coordinator’s address below.</span>';
+    for (const f of list) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.innerHTML = `<span>${esc(f.name)}</span><span class="mute">${f.known ? 'joined before' : esc(f.addresses[0] || '')}</span>`;
+      b.onclick = () => { chosen = f; [...$('found').children].forEach(c => c.classList.toggle('sel', c === b)); $('join-addr').value = ''; };
+      $('found').append(b);
+    }
+    if (list.length === 1) $('found').firstChild.click();
+  } catch (e) { $('found').innerHTML = `<span class="err">${esc(e)}</span>`; }
+}
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+async function busy(btn, label, f) {
+  const old = btn.textContent; btn.disabled = true; btn.textContent = label; $('setup-err').textContent = '';
+  try { await f(); dashUrl = null; await refresh(); }
+  catch (e) { $('setup-err').textContent = String(e); }
+  finally { btn.disabled = false; btn.textContent = old; }
+}
+
+$('start').onsubmit = e => { e.preventDefault(); busy($('start-go'), 'Starting…', () => invoke('start_swarm', { name: $('start-name').value, passphrase: $('start-pass').value || null })); };
+$('join').onsubmit = e => {
+  e.preventDefault();
+  const addr = $('join-addr').value.trim();
+  const target = addr ? { swarm: null, address: addr } : { swarm: chosen ? chosen.name : null, address: chosen ? chosen.addresses[0] : null };
+  busy($('join-go'), 'Joining…', () => invoke('join_swarm', { ...target, secret: $('join-secret').value, name: $('join-name').value || null }));
+};
+$('show-log').onclick = () => { showLog = !showLog; $('show-log').textContent = showLog ? 'Dashboard' : 'Log'; refresh(); };
+$('retry').onclick = async () => { try { await invoke('restart'); } catch (e) { $('run-err').textContent = String(e); } refresh(); };
+$('leave').onclick = async () => {
+  if (!confirm('Stop Clamor on this computer and choose another swarm? This swarm is remembered: you can rejoin it later without the passphrase.')) return;
+  await invoke('reset'); dashUrl = null; $('dash').removeAttribute('src'); await refresh(); scan();
+};
+$('autostart').onchange = e => invoke('set_autostart', { on: e.target.checked }).catch(err => { $('setup-err').textContent = String(err); });
+
+(async () => {
+  await refresh();
+  $('autostart').checked = await invoke('autostart_enabled');
+  if (!st.setup.mode) scan();
+  setInterval(refresh, 1500);
+})();
+</script>
+</body>
+</html>

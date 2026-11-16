@@ -40,6 +40,9 @@ clamor-node join --passphrase harbor-velvet-crab-lantern-ninety
 
 If there is more than one swarm on the network, name the one you want with `--swarm home`.
 
+Add `--name "Your name"` on a first join: it is how the others see you in the swarm (see
+[people and signing in](people.md)).
+
 ### With a one-time code instead
 
 Rather than handing out the passphrase, you can give a new device a code that works once:
@@ -54,13 +57,27 @@ The code works for one device, for ten minutes; three wrong tries cancel it. Lik
 passphrase, it is never sent over the network. After that first join the device is remembered
 exactly as if it had used the passphrase.
 
-Until the dashboard has sign-in, codes can be made only on the coordinator itself (the dashboard
-opened there, or `clamor-node invite`): anyone on your network can open the dashboard, and a
-code lets a device in.
+Anyone in the swarm can make a code for **one of their own devices** (it joins as them); only
+admins can make one for **someone new**.
 
 Capitals, spaces and dashes in the passphrase do not matter: `Harbor Velvet Crab Lantern Ninety`
 works too. If you would rather not type it on the command line (where other users of the same
 computer could see it), put it in the `CLAMOR_PASSPHRASE` environment variable instead.
+
+### By asking, with no code at all
+
+If someone who can add people (an admin, or the owner) is at hand, the new device can simply
+ask:
+
+```bash
+clamor-node join --ask --name "Cal"
+```
+
+(or, in the app, press **Join** with the code left empty). The device shows a **check code**,
+and the dashboard shows "*cal-thinkpad* wants to join as Cal" with a check code too. If the two
+codes match, press **Approve**; otherwise **Decline**. Matching codes prove the dashboard is
+approving *that* device, not something else on the network asking at the same moment. The
+request waits up to ten minutes.
 
 ## Coming back
 
@@ -130,16 +147,20 @@ Keys are kept in Clamor's config folder (`~/.config/clamor` on Linux,
 `~/Library/Application Support/clamor` on macOS, `%APPDATA%\clamor` on Windows), readable only by
 you: `device.key` is the device's secret, and `swarms/` holds one file per swarm.
 
+- **Connections are encrypted.** Each device's connection to the coordinator is TLS, and the
+  join handshake signs that very TLS session, so nothing can sit in the middle and relay it.
+  The links that carry a model's work between devices are TLS too, and each end accepts only
+  the certificate the coordinator told it to expect.
+
 ### Not yet
 
-- The connections are not encrypted yet: someone on your network could read what devices send each
-  other (prompts and replies included), although they cannot join or pretend to be a device.
-- The dashboard has no login: anyone on your network can open it.
+- The plain dashboard (port 7421) is not encrypted: use `https://<coordinator>:7424/` in a
+  browser, or the app (see [people and signing in](people.md)). Model downloads between devices
+  are not encrypted either, but only approved devices get them (signed requests).
 - A QR code for adding phones comes with the phone app.
 - Finding the swarm on the network is tested on Linux. Some networks (guest Wi-Fi, some
   corporate networks) block it; give the address instead.
 
-Only run Clamor on a network you trust until these are done.
 
 ## If something goes wrong
 
@@ -147,6 +168,7 @@ Only run Clamor on a network you trust until these are done.
 |---|---|
 | `first join: this needs the swarm's passphrase` | This device has not joined this swarm before. Add `--passphrase`. |
 | `wrong passphrase` | The words do not match the swarm's. `clamor-node swarms` on the coordinator shows them. |
+| `your request to join was declined` / `nobody approved the request to join in time` | Ask again while someone is at the dashboard, or use a code or the passphrase. |
 | `wrong code` / `that code has expired or was already used` | Make a new one: **Add device** in the dashboard. |
 | `this swarm's coordinator key changed since you joined` | The coordinator was reinstalled, its config folder was deleted, or something else is answering at its address. If you expected this, join again with `--passphrase`. |
 | `several swarms on the network` | Name the one you want: `--swarm home`. |

@@ -75,7 +75,8 @@ drops off can rejoin later without benchmarking again.
 | **Works** | Llama 3.x, Qwen 2.5 and SmolLM2 models, including compressed (quantized) files; checked against a reference implementation |
 | **Works** | One copy of a model is enough: other machines fetch only their share of the layers from the one that has it |
 | **Works** | Downloadable releases for Linux, macOS, Windows and Android (Termux), which can update themselves (signed) |
-| **In progress** | A desktop app with installers (Flatpak, .deb, .rpm, AppImage, .dmg, .exe) |
+| **Works** | A desktop app with installers (Flatpak, .deb, .rpm, AppImage, .dmg, .exe); people with roles (owner, admins, members), sign-in, and encrypted connections between devices |
+| **In progress** | A friendlier main screen, private chats that even the swarm's owner cannot read |
 | **Planned** | Chat in the dashboard, an OpenAI-compatible API for agent tools, a phone app, coordinator hand-over |
 
 CI runs the tests on Linux (x86_64 and arm64), Windows and macOS. The Vulkan, CUDA and Android builds are

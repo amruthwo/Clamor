@@ -12,6 +12,7 @@
   <url type="homepage">https://github.com/amruthwo/Clamor</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.5.0" date="2026-11-16"/>
     <release version="0.4.0" date="2026-11-15"/>
   </releases>
 </component>

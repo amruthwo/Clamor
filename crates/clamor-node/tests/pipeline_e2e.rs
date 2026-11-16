@@ -40,8 +40,11 @@ fn python_fixture(dir: &Path) -> Option<Vec<u32>> {
     Some(std::fs::read_to_string(dir.join("ref/generated.txt")).unwrap().split(',').map(|t| t.parse().unwrap()).collect())
 }
 
+/// A free port for a listener, outside the OS's ephemeral range (see `free_port_run`: ports
+/// from that range get reused as the source ports of other tests' outgoing connections, which
+/// once made a coordinator's dashboard unreachable mid-test on CI).
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    free_port_run(1)
 }
 
 /// A run of `n` consecutive free ports (data ports for the stages). Chosen from 20000-32000,
@@ -73,6 +76,12 @@ impl Drop for Proc {
     fn drop(&mut self) {
         let _ = self.0.kill();
         let _ = self.0.wait();
+        // A failing test shows what every process it started was doing.
+        if std::thread::panicking() {
+            let log = self.log();
+            let tail: Vec<&str> = log.lines().rev().take(40).collect();
+            eprintln!("--- {} (last lines) ---\n{}", self.1, tail.into_iter().rev().collect::<Vec<_>>().join("\n"));
+        }
     }
 }
 impl Proc {

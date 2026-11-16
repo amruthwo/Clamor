@@ -54,10 +54,11 @@ jobs:
         run: cargo tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
       - name: Flatpak
         if: matrix.flatpak
-        env: { FLATPAK_BUILDER: "flatpak run org.flatpak.Builder" }
+        # Flathub's builder runs sandboxed and needs a session bus, which a headless runner lacks.
+        env: { FLATPAK_BUILDER: "dbus-run-session -- flatpak run org.flatpak.Builder" }
         run: |
           flatpak --user remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-          flatpak --user install -y --noninteractive flathub org.flatpak.Builder
+          flatpak --user install -y --noninteractive flathub org.flatpak.Builder org.gnome.Platform//48 org.gnome.Sdk//48
           apps/desktop/flatpak/build.sh "apps/desktop/target/${{ matrix.target }}/release/bundle/deb"
       - name: Collect
         shell: bash

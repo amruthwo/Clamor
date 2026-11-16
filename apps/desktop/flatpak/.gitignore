@@ -3,3 +3,4 @@ build/
 repo/
 .flatpak-builder/
 *.flatpak
+shared-modules/

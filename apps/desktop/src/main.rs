@@ -374,6 +374,24 @@ fn set_autostart(app: AppHandle, on: bool) -> Result<(), String> {
     if on { a.enable() } else { a.disable() }.map_err(|e| e.to_string())
 }
 
+/// Linux tray icons need libayatana-appindicator (or the older libappindicator), loaded at run
+/// time; without it Tauri panics instead of returning an error, so look first. Elsewhere the
+/// tray is part of the system.
+fn tray_library_available() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        ["libayatana-appindicator3.so.1", "libappindicator3.so.1", "libayatana-appindicator3.so", "libappindicator3.so"].iter().any(|name| {
+            let c = std::ffi::CString::new(*name).unwrap();
+            let h = unsafe { libc::dlopen(c.as_ptr(), libc::RTLD_LAZY) };
+            !h.is_null()
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        true
+    }
+}
+
 fn show_main(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
@@ -399,7 +417,10 @@ fn main() {
             let menu = Menu::with_items(app, &[&open, &models, &quit])?;
             // Some desktops (and sandboxes without the tray library) have no tray: carry on
             // without it, with the window as the only way in.
-            let tray = TrayIconBuilder::with_id("clamor")
+            let tray = if !tray_library_available() {
+                Err(tauri::Error::from(std::io::Error::other("no tray library (libayatana-appindicator3) on this system")))
+            } else {
+                TrayIconBuilder::with_id("clamor")
                 .icon(app.default_window_icon().cloned().expect("app icon"))
                 .tooltip("Clamor")
                 .menu(&menu)
@@ -412,7 +433,8 @@ fn main() {
                     "quit" => app.exit(0),
                     _ => {}
                 })
-                .build(app);
+                .build(app)
+            };
             let has_tray = tray.is_ok();
             if let Err(e) = tray {
                 eprintln!("no tray icon: {e}");

@@ -13,6 +13,9 @@ finish-args:
   - --device=dri           # GPU compute (Vulkan)
   - --talk-name=org.kde.StatusNotifierWatcher   # tray icon
 modules:
+  # The tray icon's library (not in the GNOME runtime). From Flathub's shared-modules, which
+  # build.sh fetches at a pinned commit.
+  - shared-modules/libayatana-appindicator/libayatana-appindicator-gtk3.json
   - name: clamor
     buildsystem: simple
     sources:

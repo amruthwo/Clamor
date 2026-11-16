@@ -51,8 +51,10 @@ joined are remembered, so rejoining needs no passphrase).
 
 ## Known limits
 
-- Tested by hand on Linux (Fedora Asahi, Apple M1). The macOS and Windows installers are built
-  by CI but not yet tried on real machines.
-- The Flatpak cannot start Clamor at login yet, and its tray icon may be missing on some
-  desktops (close the window with the tray missing and Clamor quits).
+- Tested by hand on Linux (Fedora Asahi, Apple M1: the .deb/.rpm build and the Flatpak, run as
+  a coordinator). The macOS and Windows installers are built by CI but not yet tried on real
+  machines.
+- The Flatpak cannot start Clamor at login yet.
+- On a desktop without a tray (or without the tray library), the app runs without a tray icon,
+  and closing the window quits Clamor.
 - The dashboard has no sign-in yet: run Clamor only on a network you trust.

@@ -29,6 +29,9 @@ pub struct Person {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pin: Option<String>,
     pub created_unix: u64,
+    /// How the model's replies appear: "stream" (as they are written; the default) or "whole".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_style: Option<String>,
 }
 
 pub const OWNER_ID: &str = "owner";

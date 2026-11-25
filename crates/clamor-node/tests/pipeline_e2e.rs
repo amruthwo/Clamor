@@ -110,6 +110,12 @@ fn spawn(dir: &Path, name: &'static str, args: &[&str]) -> Proc {
 
 /// Minimal HTTP/1.1 client: returns (status, JSON body or {"text": body}).
 fn http(port: u16, method: &str, path: &str, body: Option<Value>) -> (u16, Value) {
+    let (status, payload) = http_raw(port, method, path, body);
+    (status, serde_json::from_str(&payload).unwrap_or_else(|_| json!({ "text": payload })))
+}
+
+/// `http`, returning the body as text (chunked encoding undone).
+fn http_raw(port: u16, method: &str, path: &str, body: Option<Value>) -> (u16, String) {
     let body = body.map(|b| b.to_string()).unwrap_or_default();
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(120))).unwrap();
@@ -117,8 +123,23 @@ fn http(port: u16, method: &str, path: &str, body: Option<Value>) -> (u16, Value
     let mut out = String::new();
     s.read_to_string(&mut out).unwrap();
     let status: u16 = out.split(' ').nth(1).and_then(|c| c.parse().ok()).unwrap_or(0);
-    let payload = out.split_once("\r\n\r\n").map(|x| x.1).unwrap_or("");
-    (status, serde_json::from_str(payload).unwrap_or_else(|_| json!({ "text": payload })))
+    let (head, payload) = out.split_once("\r\n\r\n").unwrap_or((&out, ""));
+    let payload = if head.to_ascii_lowercase().contains("transfer-encoding: chunked") { dechunk(payload) } else { payload.to_string() };
+    (status, payload)
+}
+
+/// Undo HTTP/1.1 chunked transfer encoding (a streamed reply through a member's proxy).
+fn dechunk(mut s: &str) -> String {
+    let mut out = String::new();
+    while let Some((size, rest)) = s.split_once("\r\n") {
+        let n = usize::from_str_radix(size.trim(), 16).unwrap_or(0);
+        if n == 0 {
+            break;
+        }
+        out.push_str(&rest[..n.min(rest.len())]);
+        s = rest.get(n + 2..).unwrap_or("");
+    }
+    out
 }
 
 /// Timeouts are generous: hosted CI runners (macOS especially) run these tests in parallel with
@@ -136,6 +157,15 @@ fn http_c(port: u16, method: &str, path: &str, body: Option<Value>, cookie: Opti
     let (head, payload) = out.split_once("\r\n\r\n").unwrap_or((&out, ""));
     let set_cookie = head.lines().find_map(|l| l.strip_prefix("set-cookie: ").or_else(|| l.strip_prefix("Set-Cookie: "))).and_then(|v| v.split(';').next()).map(str::to_string);
     (status, set_cookie, serde_json::from_str(payload).unwrap_or_else(|_| json!({ "text": payload })))
+}
+
+/// Send a chat message; the reply streams back one JSON object per line. Returns (status,
+/// the progress lines, the finished message).
+fn chat_send(port: u16, chat: &str, content: &str) -> (u16, Vec<Value>, Value) {
+    let (st, text) = http_raw(port, "POST", &format!("/api/chats/{chat}/messages"), Some(json!({ "content": content })));
+    let lines: Vec<Value> = text.lines().filter(|l| !l.trim().is_empty()).map(|l| serde_json::from_str(l).unwrap_or_else(|_| panic!("not JSON: {l}"))).collect();
+    let done = lines.last().map(|l| l["done"].clone()).unwrap_or(Value::Null);
+    (st, lines, done)
 }
 
 fn wait_for(what: &str, timeout: Duration, procs: &[&Proc], mut f: impl FnMut() -> bool) {
@@ -219,10 +249,15 @@ fn coordinator_and_two_members_generate_through_the_api() {
 
     // Conversations: the group gets the message and the model's reply; the Home overview
     // shows the model running and the reply's speed.
-    let (st, r) = http(portal, "POST", "/api/chats/group/messages", Some(json!({ "content": "Hello" })));
-    assert_eq!(st, 200, "{r}");
-    assert_eq!(r["message"]["role"], "assistant");
-    assert!(r["message"]["error"].is_null() && r["message"]["tok_s"].as_f64().is_some_and(|t| t > 0.0), "{r}");
+    let (st, lines, done) = chat_send(portal, "group", "Hello");
+    assert_eq!(st, 200, "{lines:?}");
+    assert_eq!(done["role"], "assistant", "{lines:?}");
+    assert!(done["error"].is_null() && done["tok_s"].as_f64().is_some_and(|t| t > 0.0), "{done}");
+    // The reply arrives as it is written: progress lines (with the text so far) before the end.
+    let n = done.get("content").and_then(|c| c.as_str()).map(|c| c.len()).unwrap_or(0);
+    if n > 0 {
+        assert!(lines.len() >= 2 && lines[..lines.len() - 1].iter().all(|l| l["done"].is_null() && l["text"].is_string()), "{lines:?}");
+    }
     let (_, g) = http(portal, "GET", "/api/chats/group", None);
     let msgs = g["messages"].as_array().unwrap();
     assert_eq!((msgs.len(), msgs[0]["role"].as_str(), msgs[0]["content"].as_str()), (2, Some("user"), Some("Hello")), "{g}");
@@ -756,9 +791,17 @@ fn people_roles_and_signing_in() {
     // Bea's own conversation is hers alone; without a model, the reply says why.
     let (_, c) = http(dash, "POST", "/api/chats", None);
     let chat = c["id"].as_str().unwrap().to_string();
-    let (st, r) = http(dash, "POST", &format!("/api/chats/{chat}/messages"), Some(json!({ "content": "Hello?" })));
-    assert_eq!(st, 200, "{r}");
-    assert!(r["message"]["error"].as_str().is_some_and(|e| e.contains("pipeline")), "{r}");
+    let (st, _, done) = chat_send(dash, &chat, "Hello?");
+    assert_eq!(st, 200, "{done}");
+    assert!(done["error"].as_str().is_some_and(|e| e.contains("pipeline")), "{done}");
+    assert_eq!(http(dash, "POST", &format!("/api/chats/{chat}/stop"), None).0, 404, "nothing is being written");
+
+    // Preferences: replies "as they're written" by default; Bea chooses "all at once".
+    assert_eq!(http(dash, "GET", "/api/me", None).1["reply_style"], "stream");
+    assert_eq!(http(dash, "POST", "/api/me/prefs", Some(json!({ "reply_style": "sideways" }))).0, 400);
+    assert_eq!(http(dash, "POST", "/api/me/prefs", Some(json!({ "reply_style": "whole" }))).0, 200);
+    assert_eq!(http(dash, "GET", "/api/me", None).1["reply_style"], "whole");
+    assert_eq!(http(portal, "GET", "/api/me", None).1["reply_style"], "stream", "a preference is per person");
     let (_, list) = http(dash, "GET", "/api/chats", None);
     assert_eq!(list["conversations"][0]["title"], "Hello?", "{list}");
     assert_eq!(http(portal, "GET", &format!("/api/chats/{chat}"), None).0, 404, "not even the owner opens someone's personal chat");

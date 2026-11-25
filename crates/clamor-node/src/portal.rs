@@ -53,6 +53,8 @@ pub async fn serve(bind: String, tls_bind: String, shared: Shared) -> anyhow::Re
         .route("/api/chats", get(list_chats).post(new_chat))
         .route("/api/chats/{id}", get(get_chat).delete(delete_chat))
         .route("/api/chats/{id}/messages", post(send_chat))
+        .route("/api/chats/{id}/stop", post(stop_chat))
+        .route("/api/me/prefs", post(set_prefs))
         .route("/api/joins/{id}/{decision}", post(decide_join))
         .layer(axum::middleware::from_fn_with_state(shared.clone(), crate::access::layer))
         .with_state(shared.clone());
@@ -421,20 +423,40 @@ struct Run {
 
 /// Submit a prompt to the head and collect the reply.
 async fn run(head: HeadHandle, prompt: Vec<u32>, max_new: u32) -> Run {
+    run_with(head, prompt, max_new, None, |_| {}).await
+}
+
+/// `run`, calling `on_token` with the tokens so far after each one, and stopping early (the
+/// head cancels the request; what was written is kept) when `stop` is notified.
+async fn run_with(head: HeadHandle, prompt: Vec<u32>, max_new: u32, stop: Option<Arc<tokio::sync::Notify>>, mut on_token: impl FnMut(&[u32])) -> Run {
     let t0 = Instant::now();
     let (req, mut rx) = head.submit(prompt, max_new);
-    let mut guard = CancelOnDrop { head, req, done: false };
+    let mut guard = CancelOnDrop { head: head.clone(), req, done: false };
     let mut tokens = Vec::new();
     let mut first_ms = None;
+    let mut stopping = false;
     let reason = loop {
-        match tokio::time::timeout(Duration::from_secs(600), rx.recv()).await {
-            Err(_) => break DoneReason::Failed("timed out after 600 s without a token".into()),
-            Ok(None) => break DoneReason::Failed("pipeline stopped".into()),
-            Ok(Some(Event::Token { id, .. })) => {
-                first_ms.get_or_insert(t0.elapsed().as_millis() as u64);
-                tokens.push(id);
+        let stop_now = async {
+            match (&stop, stopping) {
+                (Some(s), false) => s.notified().await,
+                _ => std::future::pending().await,
             }
-            Ok(Some(Event::Done(r))) => break r,
+        };
+        tokio::select! {
+            _ = stop_now => {
+                stopping = true;
+                head.cancel(req);
+            }
+            ev = tokio::time::timeout(Duration::from_secs(600), rx.recv()) => match ev {
+                Err(_) => break DoneReason::Failed("timed out after 600 s without a token".into()),
+                Ok(None) => break DoneReason::Failed("pipeline stopped".into()),
+                Ok(Some(Event::Token { id, .. })) => {
+                    first_ms.get_or_insert(t0.elapsed().as_millis() as u64);
+                    tokens.push(id);
+                    on_token(&tokens);
+                }
+                Ok(Some(Event::Done(r))) => break r,
+            }
         }
     };
     guard.done = !matches!(reason, DoneReason::Failed(_));
@@ -500,7 +522,8 @@ async fn me(State(shared): State<Shared>, Extension(caller): Extension<Caller>) 
     let sw = shared.lock().unwrap();
     let pending = if caller.how != "session" || true { sw.auth.signins.iter().filter(|s| s.approved_by.is_none() && s.created_unix + crate::people::SIGNIN_SECS > unix_now()).count() } else { 0 };
     let has_pin = sw.auth.profile.person(&caller.person).is_some_and(|p| p.pin.is_some());
-    Json(json!({ "id": caller.person, "name": caller.name, "role": caller.role, "how": caller.how, "has_pin": has_pin, "pending_signins": pending, "swarm": sw.name }))
+    let reply_style = sw.auth.profile.person(&caller.person).and_then(|p| p.reply_style.clone()).unwrap_or_else(|| "stream".into());
+    Json(json!({ "id": caller.person, "name": caller.name, "role": caller.role, "how": caller.how, "has_pin": has_pin, "pending_signins": pending, "swarm": sw.name, "reply_style": reply_style }))
 }
 
 #[derive(Deserialize)]
@@ -749,7 +772,12 @@ fn open_chat(sw: &crate::coordinator::Swarm, id: &str, caller: &Caller) -> Resul
 
 async fn get_chat(State(shared): State<Shared>, Extension(caller): Extension<Caller>, Path(id): Path<String>) -> ApiResult {
     let sw = shared.lock().unwrap();
-    Ok(Json(serde_json::to_value(open_chat(&sw, &id, &caller)?).unwrap()))
+    let mut v = serde_json::to_value(open_chat(&sw, &id, &caller)?).unwrap();
+    // A reply being written right now (e.g. the page was reloaded, or someone else asked).
+    if let Some(g) = sw.generating.get(&id) {
+        v["live"] = json!({ "text": g.progress.borrow().text, "asker": g.asker });
+    }
+    Ok(Json(v))
 }
 
 async fn delete_chat(State(shared): State<Shared>, Extension(caller): Extension<Caller>, Path(id): Path<String>) -> ApiResult {
@@ -767,9 +795,54 @@ struct SendReq {
     content: String,
 }
 
-/// Add a message to a conversation and get the model's reply (the whole conversation is the
-/// prompt, oldest messages dropped if it does not fit the context).
-async fn send_chat(State(shared): State<Shared>, Extension(caller): Extension<Caller>, Path(id): Path<String>, Json(req): Json<SendReq>) -> ApiResult {
+/// A reply being written: what it says so far, and the finished message at the end.
+#[derive(Clone, Default, Serialize)]
+pub struct Progress {
+    pub text: String,
+    pub tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub done: Option<crate::chats::ChatMsg>,
+}
+
+/// A conversation the model is answering right now.
+pub struct Generation {
+    /// Who asked (they, or an admin, may stop it).
+    pub asker: String,
+    pub stop: Arc<tokio::sync::Notify>,
+    pub progress: tokio::sync::watch::Receiver<Progress>,
+}
+
+/// Build the prompt for a conversation: the whole conversation, the oldest messages dropped
+/// until it fits with room for a reply (and as a last resort the group's system note).
+fn chat_prompt(tok: &Tokenizer, conv: &crate::chats::Conversation, n_ctx: u32) -> Result<Vec<u32>, String> {
+    let mut msgs = crate::chats::model_messages(conv);
+    let mut keep_system = usize::from(msgs.first().is_some_and(|m| m.role == "system"));
+    let budget = n_ctx.saturating_sub(256.min(n_ctx / 2)) as usize;
+    let prompt = loop {
+        match encode_chat(tok, &msgs) {
+            Ok(p) if p.len() <= budget => break p,
+            Ok(_) if msgs.len() > keep_system + 1 => {
+                msgs.remove(keep_system);
+            }
+            Ok(_) if keep_system == 1 => {
+                msgs.remove(0);
+                keep_system = 0;
+            }
+            Ok(p) => break p,
+            Err(e) => return Err(e.to_string()),
+        }
+    };
+    if prompt.len() as u32 >= n_ctx {
+        return Err(format!("that message alone is longer than the model's context ({n_ctx} tokens)"));
+    }
+    Ok(prompt)
+}
+
+/// Add a message to a conversation; the model's reply comes back as it is written, one JSON
+/// object per line: `{"text": <reply so far>, "tokens": n}`, and finally `{"done": <message>}`.
+/// The reply is written (and saved) even if the asker goes away; POST .../stop ends it early.
+async fn send_chat(State(shared): State<Shared>, Extension(caller): Extension<Caller>, Path(id): Path<String>, Json(req): Json<SendReq>) -> Result<axum::response::Response, (StatusCode, String)> {
+    use axum::response::IntoResponse;
     let content = req.content.trim().to_string();
     if content.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "say something".into()));
@@ -777,62 +850,108 @@ async fn send_chat(State(shared): State<Shared>, Extension(caller): Extension<Ca
     let conv = {
         let mut sw = shared.lock().unwrap();
         open_chat(&sw, &id, &caller)?;
-        sw.chats.append(&id, crate::chats::ChatMsg { role: "user".into(), content, by: Some(caller.name.clone()), at: unix_now(), tok_s: None, error: None });
+        if sw.generating.contains_key(&id) {
+            return Err((StatusCode::CONFLICT, "the model is still answering the last message".into()));
+        }
+        sw.chats.append(&id, crate::chats::ChatMsg { role: "user".into(), content, by: Some(caller.name.clone()), at: unix_now(), tok_s: None, error: None, stopped: false });
         sw.chats.get(&id).cloned().expect("exists")
     };
-    let reply = match ready_pipeline(&shared) {
-        Err((_, e)) => Err(e),
-        Ok((head, _, n_ctx, tok)) => match tok {
-            None => Err("this model's tokenizer is not supported yet".to_string()),
-            Some(tok) => {
-                let mut msgs = crate::chats::model_messages(&conv);
-                let mut keep_system = usize::from(msgs.first().is_some_and(|m| m.role == "system"));
-                // Leave room for a reply; drop the oldest messages until the rest fits, and as a
-                // last resort the group's system note: the latest message always stays.
-                let budget = n_ctx.saturating_sub(256.min(n_ctx / 2)) as usize;
-                let prompt = loop {
-                    match encode_chat(&tok, &msgs) {
-                        Ok(p) if p.len() <= budget => break Ok(p),
-                        Ok(_) if msgs.len() > keep_system + 1 => {
-                            msgs.remove(keep_system);
-                        }
-                        Ok(_) if keep_system == 1 => {
-                            msgs.remove(0);
-                            keep_system = 0;
-                        }
-                        Ok(p) => break Ok(p),
-                        Err(e) => break Err(e.to_string()),
-                    }
+    let (tx, rx) = tokio::sync::watch::channel(Progress::default());
+    let stop = Arc::new(tokio::sync::Notify::new());
+    let setup = ready_pipeline(&shared).map_err(|(_, e)| e).and_then(|(head, _, n_ctx, tok)| {
+        let tok = tok.ok_or_else(|| "this model's tokenizer is not supported yet".to_string())?;
+        let prompt = chat_prompt(&tok, &conv, n_ctx)?;
+        Ok((head, tok, n_ctx, prompt))
+    });
+    match setup {
+        Err(e) => {
+            // Nothing to generate: answer with the reason, as one finished line.
+            let msg = crate::chats::ChatMsg { role: "assistant".into(), content: String::new(), by: None, at: unix_now(), tok_s: None, error: Some(e), stopped: false };
+            shared.lock().unwrap().chats.append(&id, msg.clone());
+            let _ = tx.send(Progress { done: Some(msg), ..Default::default() });
+        }
+        Ok((head, tok, n_ctx, prompt)) => {
+            shared.lock().unwrap().generating.insert(id.clone(), Generation { asker: caller.person.clone(), stop: stop.clone(), progress: rx.clone() });
+            let (shared2, id2) = (shared.clone(), id.clone());
+            tokio::spawn(async move {
+                let room = n_ctx - prompt.len() as u32;
+                let tx2 = tx.clone();
+                let tok2 = tok.clone();
+                let conv2 = conv.clone();
+                let r = run_with(head, prompt, 1024.min(room), Some(stop), move |tokens| {
+                    let text = crate::chats::tidy_reply(&conv2, &tok2.decode(tokens, true));
+                    tx2.send_replace(Progress { text, tokens: tokens.len() as u32, done: None });
+                })
+                .await;
+                let text = crate::chats::tidy_reply(&conv, &tok.decode(&r.tokens, true));
+                let stopped = r.done == "cancelled";
+                let msg = match (&r.error, text.is_empty() && stopped) {
+                    (Some(e), _) => crate::chats::ChatMsg { role: "assistant".into(), content: text, by: None, at: unix_now(), tok_s: None, error: Some(e.clone()), stopped: false },
+                    (None, _) => crate::chats::ChatMsg { role: "assistant".into(), content: text, by: None, at: unix_now(), tok_s: r.decode_tok_s.map(|s| s as f32), error: None, stopped },
                 };
-                match prompt {
-                    Err(e) => Err(e),
-                    Ok(p) if p.len() as u32 >= n_ctx => Err(format!("that message alone is longer than the model's context ({n_ctx} tokens)")),
-                    Ok(p) => {
-                        let room = n_ctx - p.len() as u32;
-                        let r = run(head, p, 1024.min(room)).await;
-                        match r.error {
-                            Some(e) => Err(e),
-                            None => Ok((tok.decode(&r.tokens, true), r.decode_tok_s)),
-                        }
+                let mut sw = shared2.lock().unwrap();
+                if let Some(s) = msg.tok_s {
+                    sw.speeds.push_back((msg.at, s));
+                    while sw.speeds.len() > 30 {
+                        sw.speeds.pop_front();
                     }
                 }
-            }
-        },
-    };
-    let now = unix_now();
-    let msg = match reply {
-        Ok((text, speed)) => crate::chats::ChatMsg { role: "assistant".into(), content: crate::chats::tidy_reply(&conv, &text), by: None, at: now, tok_s: speed.map(|s| s as f32), error: None },
-        Err(e) => crate::chats::ChatMsg { role: "assistant".into(), content: String::new(), by: None, at: now, tok_s: None, error: Some(e) },
-    };
-    let mut sw = shared.lock().unwrap();
-    if let Some(s) = msg.tok_s {
-        sw.speeds.push_back((now, s));
-        while sw.speeds.len() > 30 {
-            sw.speeds.pop_front();
+                sw.chats.append(&id2, msg.clone());
+                sw.generating.remove(&id2);
+                drop(sw);
+                tx.send_replace(Progress { text: msg.content.clone(), tokens: r.tokens.len() as u32, done: Some(msg) });
+            });
         }
     }
-    sw.chats.append(&id, msg.clone());
-    Ok(Json(json!({ "message": msg })))
+    // Stream the progress to the asker, one line per update, until the finished message.
+    let (btx, brx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::convert::Infallible>>(16);
+    let mut rx = rx;
+    tokio::spawn(async move {
+        loop {
+            let p = rx.borrow_and_update().clone();
+            let finished = p.done.is_some();
+            let mut line = serde_json::to_vec(&p).unwrap();
+            line.push(b'\n');
+            if (!p.text.is_empty() || finished) && btx.send(Ok(line.into())).await.is_err() {
+                return; // the asker went away; the reply is still written and saved
+            }
+            if finished || rx.changed().await.is_err() {
+                return;
+            }
+        }
+    });
+    let body = axum::body::Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(brx));
+    Ok(([(axum::http::header::CONTENT_TYPE, "application/x-ndjson"), (axum::http::header::CACHE_CONTROL, "no-cache")], body).into_response())
+}
+
+/// Stop the reply being written in a conversation (what is written so far is kept).
+async fn stop_chat(State(shared): State<Shared>, Extension(caller): Extension<Caller>, Path(id): Path<String>) -> ApiResult {
+    let sw = shared.lock().unwrap();
+    open_chat(&sw, &id, &caller)?;
+    let g = sw.generating.get(&id).ok_or((StatusCode::NOT_FOUND, "nothing is being written".to_string()))?;
+    if g.asker != caller.person && caller.role < Role::Admin {
+        return Err((StatusCode::FORBIDDEN, "only whoever asked (or an admin) can stop this reply".into()));
+    }
+    g.stop.notify_one();
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct PrefsReq {
+    reply_style: String,
+}
+
+/// The caller's own preferences.
+async fn set_prefs(State(shared): State<Shared>, Extension(caller): Extension<Caller>, Json(req): Json<PrefsReq>) -> ApiResult {
+    if !matches!(req.reply_style.as_str(), "stream" | "whole") {
+        return Err((StatusCode::BAD_REQUEST, "reply_style is stream or whole".into()));
+    }
+    let mut sw = shared.lock().unwrap();
+    let auth = &mut sw.auth;
+    let p = auth.profile.people.iter_mut().find(|p| p.id == caller.person).ok_or((StatusCode::NOT_FOUND, "no such person".to_string()))?;
+    p.reply_style = Some(req.reply_style);
+    auth.save();
+    Ok(Json(json!({ "ok": true })))
 }
 
 // ---------------------------------------------------------------- the home screen at a glance

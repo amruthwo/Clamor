@@ -77,7 +77,8 @@ drops off can rejoin later without benchmarking again.
 | **Works** | Downloadable releases for Linux, macOS, Windows and Android (Termux), which can update themselves (signed) |
 | **Works** | A desktop app with installers (Flatpak, .deb, .rpm, AppImage, .dmg, .exe); people with roles (owner, admins, members), sign-in, and encrypted connections between devices |
 | **Works** | A home screen with chat (a group chat for everyone, and your own private conversations) and at-a-glance widgets: swarm health, who is here, the running model and its speed, pooled memory, your devices |
-| **In progress** | Replies that appear as they are written (with a Stop button), private chats that even the swarm's owner cannot read |
+| **Works** | Replies that appear as they are written (or all at once, as each person prefers), with a Stop button |
+| **In progress** | Private chats that even the swarm's owner cannot read |
 | **Planned** | An OpenAI-compatible API for agent tools, a phone app, coordinator hand-over |
 
 CI runs the tests on Linux (x86_64 and arm64), Windows and macOS. The Vulkan, CUDA and Android builds are

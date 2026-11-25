@@ -225,12 +225,12 @@ impl CoordinatorProfile {
         use crate::people::{Person, Role, OWNER_ID};
         if !self.people.iter().any(|p| p.role == Role::Owner) {
             let name = std::env::var("USER").or_else(|_| std::env::var("USERNAME")).ok().filter(|n| !n.is_empty()).unwrap_or_else(|| "Owner".into());
-            self.people.insert(0, Person { id: OWNER_ID.into(), name, role: Role::Owner, pin: None, created_unix: clamor_proto::unix_now() });
+            self.people.insert(0, Person { id: OWNER_ID.into(), name, role: Role::Owner, pin: None, created_unix: clamor_proto::unix_now(), reply_style: None });
         }
         for i in 0..self.approved.len() {
             if self.approved[i].person.is_empty() || !self.people.iter().any(|p| p.id == self.approved[i].person) {
                 let id = crate::people::new_person_id();
-                self.people.push(Person { id: id.clone(), name: self.approved[i].name.clone(), role: Role::Member, pin: None, created_unix: self.approved[i].approved_unix });
+                self.people.push(Person { id: id.clone(), name: self.approved[i].name.clone(), role: Role::Member, pin: None, created_unix: self.approved[i].approved_unix, reply_style: None });
                 self.approved[i].person = id;
             }
         }

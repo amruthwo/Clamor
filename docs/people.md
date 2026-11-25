@@ -29,6 +29,12 @@ wrote it), and your own conversations (**New chat**), which only you can open, f
 devices. Conversations are kept on the coordinator, so whoever runs the coordinator's computer
 could read the files; chats that even the owner cannot read are planned.
 
+Replies appear **as the model writes them**. If you prefer to read a reply only once it is
+finished, choose **All at once** under your preferences (press your name at the top of the
+dashboard); you then see how far it has got ("Writing… 120 words so far"). Either way, **Stop**
+ends a reply early and keeps what was written. A reply is finished and saved even if you close
+the page meanwhile.
+
 ## Signing in
 
 You rarely need to:

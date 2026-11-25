@@ -32,6 +32,7 @@ fn capture_output() {
             .name("clamor-output".into())
             .spawn(move || {
                 for line in BufReader::new(read).lines().map_while(Result::ok) {
+                    logcat(&line);
                     let l = LISTENER.lock().unwrap().clone();
                     if let Some(l) = l {
                         l(line);
@@ -40,6 +41,20 @@ fn capture_output() {
             })
             .ok();
     });
+}
+
+/// Also to Android's system log (tag "clamor"), readable with `adb logcat -s clamor`.
+fn logcat(line: &str) {
+    #[link(name = "log")]
+    extern "C" {
+        fn __android_log_write(prio: i32, tag: *const std::ffi::c_char, text: *const std::ffi::c_char) -> i32;
+    }
+    const INFO: i32 = 4;
+    if let Ok(text) = std::ffi::CString::new(line) {
+        unsafe {
+            __android_log_write(INFO, c"clamor".as_ptr(), text.as_ptr());
+        }
+    }
 }
 
 pub struct Runner(Option<JoinHandle<anyhow::Result<()>>>);

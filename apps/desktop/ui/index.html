@@ -37,6 +37,7 @@
   .dot.on { background:var(--ok); } .dot.wait { background:var(--warn); } .dot.off { background:var(--bad); }
   .pass { font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:13px; }
   iframe { flex:1; border:0; width:100%; background:var(--bg); }
+  #setup-log { max-height:260px; border:1px solid var(--line); border-radius:8px; margin-top:8px; }
   .log { flex:1; margin:0; padding:12px 14px; overflow:auto; font:12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space:pre-wrap; }
   .waiting { flex:1; display:grid; place-items:center; text-align:center; padding:24px; }
 </style>
@@ -67,6 +68,7 @@
   </div>
   <p class="row mute"><label class="row" style="display:flex"><input type="checkbox" id="autostart" style="width:auto"> Start Clamor when I log in</label></p>
   <p class="err" id="no-node" hidden>clamor-node was not found next to this app. Reinstall Clamor.</p>
+  <details id="setup-log-box" hidden><summary>Show log</summary><pre class="log" id="setup-log"></pre></details>
 </section>
 
 <section id="running" hidden style="display:flex; flex-direction:column; flex:1; min-height:0">
@@ -95,6 +97,9 @@ async function refresh() {
   $('setup').hidden = set;
   $('running').hidden = !set;
   $('no-node').hidden = st.node_found;
+  // What clamor-node said while starting or joining: the way to see why it did not work.
+  $('setup-log-box').hidden = !st.log.length;
+  $('setup-log').textContent = st.log.join('\n');
   $('ask-status').textContent = !set && st.running && !st.joined && st.check_code ? `Asking to join. Check code ${st.check_code}: an admin approves this device in the swarm's dashboard when it shows the same code.` : '';
   if (!set) return;
   $('swarm-name').textContent = st.setup.swarm || 'swarm';

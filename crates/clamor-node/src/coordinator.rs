@@ -107,7 +107,7 @@ impl SwarmAuth {
             None => {
                 let id = crate::people::new_person_id();
                 let pname = person_name.map(str::trim).filter(|n| !n.is_empty()).unwrap_or(name);
-                self.profile.people.push(crate::people::Person { id: id.clone(), name: pname.chars().take(40).collect(), role: crate::people::Role::Member, pin: None, created_unix: unix_now() });
+                self.profile.people.push(crate::people::Person { id: id.clone(), name: pname.chars().take(40).collect(), role: crate::people::Role::Member, pin: None, created_unix: unix_now(), reply_style: None });
                 id
             }
         };
@@ -188,6 +188,8 @@ pub struct Swarm {
     pub joins: Vec<PendingJoin>,
     /// Conversations (personal and group).
     pub chats: crate::chats::Chats,
+    /// Conversations the model is answering right now.
+    pub generating: std::collections::HashMap<String, crate::portal::Generation>,
     /// Recent replies: (unix time, tokens per second), newest last.
     pub speeds: std::collections::VecDeque<(u64, f32)>,
     pub coordinator: NodeId,
@@ -212,7 +214,7 @@ impl Swarm {
         engine.tls = Some(tls.clone());
         Swarm {
             tls,
-            tls_server, name, auth, invite: None, join_hint: String::new(), portal_tls_port: None, joins: Vec::new(), chats, speeds: Default::default(), coordinator, nodes: BTreeMap::new(), next_generation: 1, engine, data_port, quick_bench, pipeline: None, next_epoch: 1, share_port }
+            tls_server, name, auth, invite: None, join_hint: String::new(), portal_tls_port: None, joins: Vec::new(), chats, generating: Default::default(), speeds: Default::default(), coordinator, nodes: BTreeMap::new(), next_generation: 1, engine, data_port, quick_bench, pipeline: None, next_epoch: 1, share_port }
     }
 
     /// A node that held a pipeline stage is gone: that pipeline cannot run any more.

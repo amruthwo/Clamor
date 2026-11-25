@@ -74,6 +74,9 @@
   .widgets { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:12px; }
   .widget { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:12px 14px; display:grid; gap:6px; align-content:start; min-height:118px; min-width:0; }
   .widget > * { min-width:0; }
+  button.linkish { border:0; background:transparent; color:var(--mute); padding:5px 6px; }
+  button.linkish:hover { color:var(--ink); text-decoration:underline; }
+  .msg.stopped .meta::before { content:'stopped · '; }
   .widget h3 { margin:0; font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--mute); font-weight:600; }
   .widget .big { font-size:22px; font-weight:650; line-height:1.1; }
   .widget .cap { font-size:13px; color:var(--mute); }
@@ -106,6 +109,7 @@
   .composer textarea { flex:1; font:inherit; color:inherit; background:var(--card); border:1px solid var(--line); border-radius:10px; padding:8px 10px; resize:none; min-height:42px; max-height:160px; }
   .empty { margin:auto; text-align:center; color:var(--mute); padding:24px; max-width:420px; }
   .typing::after { content:'…'; animation: blink 1s steps(3) infinite; }
+  .caret { animation: blink 1s steps(2) infinite; color:var(--mute); }
   @keyframes blink { 50% { opacity:.3; } }
   .convpick { display:none; }
   @media (max-width: 700px) {
@@ -124,7 +128,7 @@
 <header>
   <h1>Clamor</h1>
   <div class="sub" id="sub">connecting…</div>
-  <span class="mute" id="whoami"></span>
+  <button id="whoami" class="linkish" title="Your preferences" hidden></button>
   <button id="signout" hidden>Sign out</button>
   <button id="add-device">Add device</button>
 </header>
@@ -186,7 +190,7 @@
 
   <section data-page="people"><h2>People</h2>
     <table><thead><tr><th>Name</th><th>Role</th><th>Devices</th><th></th></tr></thead><tbody id="people"></tbody></table>
-    <p class="mute" id="pin-row"></p>
+
   </section>
 
   <section data-page="devices"><h2>Devices</h2>
@@ -203,6 +207,24 @@
     </table>
   </section>
 </main>
+<dialog id="prefs" aria-labelledby="pref-title">
+  <form method="dialog">
+    <div class="dlg-head"><h3 id="pref-title">Your preferences</h3><div class="mute" id="pref-sub"></div></div>
+    <div class="dlg-body">
+      <div class="field"><div class="label" id="lbl-style">Replies</div>
+        <div class="seg" role="group" aria-labelledby="lbl-style" id="pref-style">
+          <button type="button" data-v="stream">As they're written</button><button type="button" data-v="whole">All at once</button>
+        </div>
+        <div class="help" id="help-style"></div>
+      </div>
+      <div class="field"><div class="label">Signing in from a browser</div>
+        <div class="row"><button type="button" id="pref-pin"></button></div>
+        <div class="help">With a PIN you can sign in on any browser without someone approving a code.</div>
+      </div>
+    </div>
+    <div class="dlg-foot"><span class="spacer"></span><button value="cancel" class="primary">Done</button></div>
+  </form>
+</dialog>
 <dialog id="invite" aria-labelledby="inv-title">
   <form method="dialog">
     <div class="dlg-head"><h3 id="inv-title">Add a device</h3><div class="mute">Run this on the new device, with Clamor installed:</div></div>
@@ -504,12 +526,26 @@ function renderRunning(o) {
 }
 
 // ---- chat
-let chatId = 'group', chatList = null, sending = false, shownCount = -1;
+let chatId = 'group', chatList = null, sending = false, shownCount = -1, liveShown = '';
+const words = t => (t.trim().match(/\S+/g) || []).length;
 function bubble(m) {
   if (m.error) return `<div class="msg assistant error">Couldn't answer: ${esc(m.error)}</div>`;
   const who = m.role === 'user' && chatId === 'group' && m.by ? `<span class="who">${esc(m.by)}</span>` : '';
-  const meta = m.tok_s ? `<span class="meta">${m.tok_s.toFixed(1)} tokens/s</span>` : '';
-  return `<div class="msg ${m.role === 'user' ? 'user' : 'assistant'}">${who}${esc(m.content)}${meta}</div>`;
+  const meta = m.tok_s ? `<span class="meta">${m.tok_s.toFixed(1)} tokens/s</span>` : (m.stopped ? '<span class="meta"></span>' : '');
+  return `<div class="msg ${m.role === 'user' ? 'user' : 'assistant'}${m.stopped ? ' stopped' : ''}">${who}${esc(m.content)}${meta}</div>`;
+}
+// A reply being written: the text so far ("As they're written"), or a progress line.
+function liveBubble(text) {
+  if (me && me.reply_style === 'whole' || !text) {
+    const n = words(text || '');
+    return `<div class="msg assistant typing" id="typing">${n ? `Writing… ${n} word${n === 1 ? '' : 's'} so far` : 'Writing'}</div>`;
+  }
+  return `<div class="msg assistant" id="typing">${esc(text)}<span class="caret">▍</span></div>`;
+}
+function setLive(text) {
+  const el = $('typing'), atEnd = $('msgs').scrollHeight - $('msgs').scrollTop - $('msgs').clientHeight < 40;
+  if (el) el.outerHTML = liveBubble(text); else $('msgs').insertAdjacentHTML('beforeend', liveBubble(text));
+  if (atEnd) $('msgs').scrollTop = $('msgs').scrollHeight;
 }
 async function loadChats() {
   chatList = await fetch('/api/chats').then(r => r.json());
@@ -522,28 +558,59 @@ async function loadThread(force) {
   const r = await fetch('/api/chats/' + encodeURIComponent(chatId));
   if (!r.ok) { chatId = 'group'; return; }
   const c = await r.json();
-  if (!force && c.messages.length === shownCount) return;
-  shownCount = c.messages.length;
+  const live = c.live ? c.live.text : '';
+  if (!force && c.messages.length === shownCount && live === liveShown) return;
+  shownCount = c.messages.length; liveShown = live;
   const empty = chatId === 'group' ? 'The group chat: everyone in the swarm sees it, and the model answers.' : 'A chat of your own: only you can see it, on any of your devices.';
-  $('msgs').innerHTML = c.messages.map(bubble).join('') || `<div class="empty">${empty}</div>`;
+  $('msgs').innerHTML = c.messages.map(bubble).join('') || (c.live ? '' : `<div class="empty">${empty}</div>`);
+  // Someone's reply is being written (another device, or before a reload).
+  if (c.live) $('msgs').insertAdjacentHTML('beforeend', liveBubble(live));
   $('msgs').scrollTop = $('msgs').scrollHeight;
 }
 window.openChat = async id => { chatId = id; shownCount = -1; await loadChats(); await loadThread(true); };
 window.newChat = async () => { const r = await (await fetch('/api/chats', { method:'POST' })).json(); openChat(r.id); };
 $('convpick').onchange = e => e.target.value === '__new' ? newChat() : openChat(e.target.value);
+function sendMode(on) {
+  sending = on;
+  $('send').textContent = on ? 'Stop' : 'Send';
+  $('send').classList.toggle('primary', !on);
+  $('send').type = on ? 'button' : 'submit';
+}
+$('send').onclick = e => {
+  if (!sending) return; // a normal submit
+  e.preventDefault();
+  fetch('/api/chats/' + encodeURIComponent(chatId) + '/stop', { method:'POST' });
+};
 $('composer').onsubmit = async e => {
   e.preventDefault();
   const text = $('say').value.trim();
   if (!text || sending) return;
-  sending = true; $('send').disabled = true; $('say').value = '';
+  const asked = chatId;
+  sendMode(true); $('say').value = '';
   const empty = $('msgs').querySelector('.empty'); if (empty) empty.remove();
-  $('msgs').insertAdjacentHTML('beforeend', bubble({ role: 'user', content: text, by: me.name }) + '<div class="msg assistant typing" id="typing"></div>');
-  $('msgs').scrollTop = $('msgs').scrollHeight;
+  $('msgs').insertAdjacentHTML('beforeend', bubble({ role: 'user', content: text, by: me.name }));
+  setLive('');
   try {
-    const r = await fetch('/api/chats/' + encodeURIComponent(chatId) + '/messages', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ content: text }) });
+    const r = await fetch('/api/chats/' + encodeURIComponent(asked) + '/messages', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ content: text }) });
     if (!r.ok) throw new Error(await r.text());
+    // One JSON object per line: the reply so far, then {"done": message}.
+    const reader = r.body.getReader(), dec = new TextDecoder();
+    let buf = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
+        if (!line.trim() || chatId !== asked) continue;
+        const p = JSON.parse(line);
+        if (p.done) { $('typing')?.remove(); $('msgs').insertAdjacentHTML('beforeend', bubble(p.done)); $('msgs').scrollTop = $('msgs').scrollHeight; }
+        else setLive(p.text);
+      }
+    }
   } catch (err) { $('typing')?.remove(); $('msgs').insertAdjacentHTML('beforeend', bubble({ role: 'assistant', error: String(err.message || err) })); }
-  sending = false; $('send').disabled = false;
+  sendMode(false);
   await loadChats(); await loadThread(true);
 };
 $('say').onkeydown = e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('composer').requestSubmit(); } };
@@ -555,7 +622,7 @@ async function checkMe() {
     me = null;
     $('main').hidden = true; $('signin').hidden = false; $('navbar').hidden = true;
     for (const id of ['add-device', 'signout']) $(id).hidden = true;
-    $('whoami').textContent = '';
+    $('whoami').textContent = ''; $('whoami').hidden = true;
     $('sub').textContent = 'sign in to see the swarm';
     if (!signin) {
       signin = await (await fetch('/api/login/start', { method:'POST' })).json();
@@ -568,7 +635,7 @@ async function checkMe() {
   }
   me = await r.json();
   $('main').hidden = false; $('signin').hidden = true; $('navbar').hidden = false;
-  $('whoami').textContent = `${me.name} · ${me.role}`;
+  $('whoami').textContent = `${me.name} · ${me.role}`; $('whoami').hidden = false;
   $('signout').hidden = me.how !== 'session';
   $('muster').disabled = me.role === 'member';
   $('add-device').hidden = false;
@@ -583,13 +650,27 @@ async function refreshPeople() {
     if (me.role !== 'member' && p.role !== 'owner' && (p.role !== 'admin' || me.role === 'owner')) actions += `<button class="danger" onclick='removePerson(${JSON.stringify(p.id)}, ${JSON.stringify(p.name)})'>Remove…</button>`;
     return `<tr><td>${esc(p.name)}${p.id === me.id ? ' <small>(you)</small>' : ''}</td><td>${esc(p.role)}</td><td>${p.devices.map(esc).join(', ') || '<span class="mute">none</span>'}</td><td>${actions}</td></tr>`;
   }).join('');
-  $('pin-row').innerHTML = `To sign in from a browser without approving a code, set a PIN: <button onclick='setPin()'>${me.has_pin ? 'Change my PIN' : 'Set my PIN'}</button>`;
   $('approvals').innerHTML = joins.joins.map(j => `<div class="approve"><b>${esc(j.device)} wants to join${j.person_name !== j.device ? ' as ' + esc(j.person_name) : ''}</b> <span class="mute">(from ${esc(j.from)})</span> <span>Approve only if the device shows the check code <b>${esc(j.code)}</b>.</span> <button class="primary" onclick='decideJoin(${JSON.stringify(j.id)}, "approve")'>Approve</button> <button onclick='decideJoin(${JSON.stringify(j.id)}, "decline")'>Decline</button></div>`).join('') + pend.pending.map(s => `<div class="approve"><b>A browser (${esc(s.from)}) wants to sign in.</b> <span>If it shows <b>${esc(s.code)}</b> and it is you, approve it: it signs in as you.</span> <button class="primary" onclick='approveSignin(${JSON.stringify(s.code)})'>Approve as me</button></div>`).join('');
 }
 window.setRole = (id, role) => post('/api/people/' + encodeURIComponent(id) + '/role', { role });
 window.removePerson = (id, name) => confirm(`Remove ${name} from the swarm? Their devices leave and need a new invitation to come back.`) && post('/api/people/' + encodeURIComponent(id) + '/remove');
 window.approveSignin = code => post('/api/login/approve', { code });
 window.decideJoin = (id, d) => post('/api/joins/' + encodeURIComponent(id) + '/' + d);
+const STYLE_HELP = { stream: 'Words appear as the model writes them, so long answers start right away.', whole: 'The reply appears when it is finished; meanwhile you see how far it has got.' };
+$('whoami').onclick = () => {
+  seg('pref-style', me.reply_style || 'stream');
+  $('help-style').textContent = STYLE_HELP[me.reply_style || 'stream'];
+  $('pref-sub').textContent = `${me.name} · ${me.role} in “${me.swarm}”`;
+  $('pref-pin').textContent = me.has_pin ? 'Change my PIN' : 'Set a PIN';
+  $('prefs').showModal();
+};
+$('pref-style').onclick = async e => {
+  const v = e.target.dataset.v; if (!v) return;
+  seg('pref-style', v); $('help-style').textContent = STYLE_HELP[v];
+  const r = await fetch('/api/me/prefs', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ reply_style: v }) });
+  if (r.ok) me.reply_style = v; else alert(await r.text());
+};
+$('pref-pin').onclick = () => setPin();
 window.setPin = async () => {
   const pin = prompt('New PIN (4 to 12 digits):');
   if (pin) post('/api/me/pin', { pin });
@@ -621,6 +702,7 @@ refresh().then(() => {
   const m = location.hash.match(/^#settings=(.+)$/);
   if (m) openSettings(decodeURIComponent(m[1]));
   if (location.hash === '#add-device') $('add-device').click();
+  if (location.hash === '#prefs') $('whoami').click();
 });
 setInterval(refresh, 3000);
 // (checkMe also drives the sign-in screen's polling.)

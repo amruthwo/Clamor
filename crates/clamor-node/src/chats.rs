@@ -28,6 +28,9 @@ pub struct ChatMsg {
     /// For replies that failed: why.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The reply was stopped before the model finished it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stopped: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -128,7 +131,7 @@ impl Chats {
 pub fn model_messages(c: &Conversation) -> Vec<clamor_engine_ggml::ChatMessage> {
     let mut out = Vec::new();
     if c.owner.is_none() {
-        out.push(clamor_engine_ggml::ChatMessage { role: "system".into(), content: "This is a group chat. Each person's message starts with their name and a colon. Answer the latest message directly; do not start your reply with anyone's name.".into() });
+        out.push(clamor_engine_ggml::ChatMessage { role: "system".into(), content: "You are Clamor, the assistant in a group chat. Each person's message starts with their name and a colon. Answer the latest message directly, without starting your reply with a name, a label or a colon.".into() });
     }
     for m in c.messages.iter().filter(|m| m.error.is_none()) {
         let content = match (&m.by, c.owner.is_none(), m.role.as_str()) {
@@ -145,7 +148,7 @@ pub fn model_messages(c: &Conversation) -> Vec<clamor_engine_ggml::ChatMessage> 
 pub fn tidy_reply(c: &Conversation, reply: &str) -> String {
     let r = reply.trim();
     if c.owner.is_none() {
-        for name in c.messages.iter().filter_map(|m| m.by.as_deref()) {
+        for name in c.messages.iter().filter_map(|m| m.by.as_deref()).chain(["Clamor", "Assistant"]) {
             if let Some(rest) = r.strip_prefix(name).and_then(|x| x.strip_prefix(':')) {
                 return rest.trim().to_string();
             }
@@ -163,7 +166,7 @@ mod tests {
     use super::*;
 
     fn msg(role: &str, content: &str, by: Option<&str>) -> ChatMsg {
-        ChatMsg { role: role.into(), content: content.into(), by: by.map(Into::into), at: 1, tok_s: None, error: None }
+        ChatMsg { role: role.into(), content: content.into(), by: by.map(Into::into), at: 1, tok_s: None, error: None, stopped: false }
     }
 
     #[test]
@@ -193,6 +196,7 @@ mod tests {
         assert_eq!(tidy_reply(&g, "Bea: Paris."), "Paris.");
         assert_eq!(tidy_reply(&g, "bea: Paris."), "Paris.");
         assert_eq!(tidy_reply(&g, "Paris: a city."), "Paris: a city.", "only names of people in the chat");
+        assert_eq!(tidy_reply(&g, "Clamor: Paris."), "Paris.", "nor its own name");
         g.owner = Some("bea".into());
         assert_eq!(model_messages(&g)[0].content, "hi");
         assert_eq!(tidy_reply(&g, "Bea: hi"), "Bea: hi", "personal chats are left alone");

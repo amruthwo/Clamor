@@ -72,22 +72,57 @@ async fn send(t: &Target, req: Request) -> Result<Response> {
     tls.write_all(&body).await?;
     tls.flush().await?;
 
-    // Generous: a chat reply can take minutes to generate.
+    // Read the status line and headers, then pass the body on as it arrives (a chat reply is
+    // streamed while the model writes it).
     let mut raw = Vec::new();
-    tokio::time::timeout(Duration::from_secs(900), tls.read_to_end(&mut raw)).await??;
-    let split = raw.windows(4).position(|w| w == b"\r\n\r\n").ok_or_else(|| anyhow::anyhow!("bad response"))?;
+    let mut buf = vec![0u8; 16 << 10];
+    let split = loop {
+        if let Some(i) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+            break i;
+        }
+        let n = tokio::time::timeout(Duration::from_secs(900), tls.read(&mut buf)).await??;
+        if n == 0 {
+            anyhow::bail!("the coordinator closed the connection");
+        }
+        raw.extend_from_slice(&buf[..n]);
+        if raw.len() > 64 << 10 {
+            anyhow::bail!("bad response");
+        }
+    };
     let head = String::from_utf8_lossy(&raw[..split]).to_string();
-    let body = raw[split + 4..].to_vec();
+    let first = raw[split + 4..].to_vec();
     let mut lines = head.lines();
     let status: u16 = lines.next().and_then(|l| l.split(' ').nth(1)).and_then(|c| c.parse().ok()).ok_or_else(|| anyhow::anyhow!("bad status line"))?;
-    let mut resp = Response::new(Body::from(body));
+    let (btx, brx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(16);
+    tokio::spawn(async move {
+        if !first.is_empty() && btx.send(Ok(first.into())).await.is_err() {
+            return;
+        }
+        loop {
+            // Generous: a chat reply can take minutes.
+            match tokio::time::timeout(Duration::from_secs(900), tls.read(&mut buf)).await {
+                Ok(Ok(0)) | Err(_) => return,
+                Ok(Ok(n)) => {
+                    if btx.send(Ok(bytes::Bytes::copy_from_slice(&buf[..n]))).await.is_err() {
+                        return;
+                    }
+                }
+                Ok(Err(e)) => {
+                    let _ = btx.send(Err(e)).await;
+                    return;
+                }
+            }
+        }
+    });
+    let mut resp = Response::new(Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(brx)));
     *resp.status_mut() = StatusCode::from_u16(status)?;
     for l in lines {
         if let Some((k, v)) = l.split_once(':') {
             // Cookies belong to the coordinator's own dashboard, not to this proxy.
-            if k.eq_ignore_ascii_case("content-type") {
-                if let Ok(v) = HeaderValue::from_str(v.trim()) {
-                    resp.headers_mut().insert(axum::http::header::CONTENT_TYPE, v);
+            // A known length passes on (otherwise the body goes out chunked, as it arrives).
+            if k.eq_ignore_ascii_case("content-type") || k.eq_ignore_ascii_case("cache-control") || k.eq_ignore_ascii_case("content-length") {
+                if let (Ok(name), Ok(v)) = (axum::http::HeaderName::from_bytes(k.trim().as_bytes()), HeaderValue::from_str(v.trim())) {
+                    resp.headers_mut().insert(name, v);
                 }
             }
         }

@@ -428,18 +428,33 @@ impl LlamaStage {
     /// Run this stage's layers on a batch of tokens starting at position `pos`.
     /// `pos` must equal the number of tokens already processed for `request`.
     pub fn forward(&mut self, request: u64, pos: u32, input: LlamaInput<'_>) -> Result<LlamaOutput> {
-        self.run(request, pos, input, Logits::All, false).map(|(o, _)| o)
+        self.run(request, pos, input, Logits::All, false, None).map(|(o, _)| o)
     }
 
     /// `forward`, choosing which tokens get logits (only matters on the tail).
     pub fn forward_logits(&mut self, request: u64, pos: u32, input: LlamaInput<'_>, logits: Logits) -> Result<LlamaOutput> {
-        self.run(request, pos, input, logits, false).map(|(o, _)| o)
+        self.run(request, pos, input, logits, false, None).map(|(o, _)| o)
+    }
+
+    /// Run only `layers` (a sub-range of this stage's layers) on hidden states, and return hidden
+    /// states: no embedding and no output head, whatever this stage is. Lets one loaded stage
+    /// serve the middle of another ring (a private chat, whose ends run on the asker's device),
+    /// with the same per-request KV caches (use request ids that cannot clash with the stage's
+    /// own ring).
+    pub fn forward_part(&mut self, request: u64, pos: u32, hidden: &[f32], layers: Range<u32>) -> Result<Vec<f32>> {
+        if layers.is_empty() || layers.start < self.layers.start || layers.end > self.layers.end {
+            return Err(Error::Ggml(format!("layers {layers:?} are not within this stage's {:?}", self.layers)));
+        }
+        match self.run(request, pos, LlamaInput::Hidden(hidden), Logits::All, false, Some(layers))?.0 {
+            LlamaOutput::Hidden(h) => Ok(h),
+            LlamaOutput::Logits(_) => unreachable!("a part never produces logits"),
+        }
     }
 
     /// Like `forward`, but also returns the hidden state after every local layer
     /// (each `n_tokens * n_embd`). For tests and debugging.
     pub fn forward_traced(&mut self, request: u64, pos: u32, input: LlamaInput<'_>) -> Result<(LlamaOutput, Vec<Vec<f32>>)> {
-        self.run(request, pos, input, Logits::All, true)
+        self.run(request, pos, input, Logits::All, true, None)
     }
 
     fn kv_for(&mut self, request: u64) -> Result<&mut KvCache> {
@@ -473,7 +488,8 @@ impl LlamaStage {
 
     /// Split long batches into `prefill_chunk`-sized passes (each extends the KV cache), so the
     /// working memory stays bounded however long the prompt is.
-    fn run(&mut self, request: u64, pos: u32, input: LlamaInput<'_>, logits: Logits, trace: bool) -> Result<(LlamaOutput, Vec<Vec<f32>>)> {
+    fn run(&mut self, request: u64, pos: u32, input: LlamaInput<'_>, logits: Logits, trace: bool, part: Option<Range<u32>>) -> Result<(LlamaOutput, Vec<Vec<f32>>)> {
+        let tail = part.is_none() && self.is_tail();
         let e = self.hp.n_embd as usize;
         let n = match &input {
             LlamaInput::Tokens(t) => t.len(),
@@ -481,24 +497,24 @@ impl LlamaStage {
         };
         let chunk = self.prefill_chunk as usize;
         if trace || n <= chunk {
-            return self.run_batch(request, pos, input, logits, trace);
+            return self.run_batch(request, pos, input, logits, trace, part);
         }
         let (mut hidden, mut all_logits, mut last) = (Vec::new(), Vec::new(), None);
         for start in (0..n).step_by(chunk) {
             let end = (start + chunk).min(n);
-            let part = match &input {
+            let part_in = match &input {
                 LlamaInput::Tokens(t) => LlamaInput::Tokens(&t[start..end]),
                 LlamaInput::Hidden(h) => LlamaInput::Hidden(&h[start * e..end * e]),
             };
             // Only the final chunk's last row matters for Logits::Last.
             let want = if logits == Logits::Last && end < n { Logits::Last } else { logits };
-            match self.run_batch(request, pos + start as u32, part, want, false)?.0 {
+            match self.run_batch(request, pos + start as u32, part_in, want, false, part.clone())?.0 {
                 LlamaOutput::Hidden(h) => hidden.extend_from_slice(&h),
                 LlamaOutput::Logits(l) if logits == Logits::All => all_logits.extend_from_slice(&l),
                 LlamaOutput::Logits(l) => last = Some(l),
             }
         }
-        let out = if self.is_tail() {
+        let out = if tail {
             LlamaOutput::Logits(if logits == Logits::All { all_logits } else { last.unwrap_or_default() })
         } else {
             LlamaOutput::Hidden(hidden)
@@ -506,12 +522,16 @@ impl LlamaStage {
         Ok((out, Vec::new()))
     }
 
-    fn run_batch(&mut self, request: u64, pos: u32, input: LlamaInput<'_>, logits: Logits, trace: bool) -> Result<(LlamaOutput, Vec<Vec<f32>>)> {
+    fn run_batch(&mut self, request: u64, pos: u32, input: LlamaInput<'_>, logits: Logits, trace: bool, part: Option<Range<u32>>) -> Result<(LlamaOutput, Vec<Vec<f32>>)> {
         let hp = self.hp.clone();
+        // A part takes and gives hidden states, whatever this stage's own role.
+        let (head, tail) = if part.is_some() { (false, false) } else { (self.is_head(), self.is_tail()) };
+        let first = self.layers.start;
+        let runs = |li: usize| part.as_ref().is_none_or(|p| p.contains(&(first + li as u32)));
         let (e, hd, nh, nkv) = (hp.n_embd as i64, hp.head_dim() as i64, hp.n_head as i64, hp.n_head_kv as i64);
         let n = match &input {
             LlamaInput::Tokens(t) => {
-                if !self.is_head() {
+                if !head {
                     return Err(Error::Ggml(format!("stage {:?} is not the head; it takes hidden states, not tokens", self.layers)));
                 }
                 if let Some(&bad) = t.iter().find(|&&x| x >= hp.n_vocab) {
@@ -520,7 +540,7 @@ impl LlamaStage {
                 t.len()
             }
             LlamaInput::Hidden(h) => {
-                if self.is_head() {
+                if head {
                     return Err(Error::Ggml("the head stage takes tokens, not hidden states".into()));
                 }
                 if h.len() % hp.n_embd as usize != 0 {
@@ -590,6 +610,9 @@ impl LlamaStage {
 
             let mut traced = Vec::new();
             for (li, w) in self.blocks.iter().enumerate() {
+                if !runs(li) {
+                    continue;
+                }
                 // Attention.
                 let h = sys::ggml_mul(ctx, sys::ggml_rms_norm(ctx, x, hp.rms_eps), w.attn_norm);
                 let proj = |wt: T, bias: Option<T>| {
@@ -630,7 +653,7 @@ impl LlamaStage {
                     traced.push(x);
                 }
             }
-            let out = if self.is_tail() {
+            let out = if tail {
                 if logits == Logits::Last && n > 1 {
                     // Just the last token's row (x is contiguous [e, n]).
                     x = sys::ggml_view_2d(ctx, x, e, 1, (*x).nb[1], (n as usize - 1) * (*x).nb[1]);
@@ -691,7 +714,7 @@ impl LlamaStage {
             let result = read(out);
             let traced: Vec<Vec<f32>> = traced.into_iter().map(read).collect();
             self.caches.get_mut(&request).unwrap().n_past = pos + n;
-            let out = if self.is_tail() { LlamaOutput::Logits(result) } else { LlamaOutput::Hidden(result) };
+            let out = if tail { LlamaOutput::Logits(result) } else { LlamaOutput::Hidden(result) };
             Ok((out, traced))
         }
     }

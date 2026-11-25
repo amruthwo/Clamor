@@ -14,6 +14,7 @@ mod neighbour;
 mod people;
 mod pipeline;
 mod portal;
+mod private;
 mod share;
 mod stage;
 mod update;

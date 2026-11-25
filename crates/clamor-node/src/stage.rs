@@ -118,6 +118,8 @@ pub struct Assignment {
 pub struct Started {
     /// Present on stage 0.
     pub head: Option<HeadHandle>,
+    /// The loaded engine, which other rings (private chats) can use part of.
+    pub exec: ComputeThread,
     pub abort: AbortHandle,
     /// Ends when the stage stops; `Err` says why.
     pub task: JoinHandle<Result<()>>,
@@ -205,8 +207,8 @@ pub async fn start(cfg: &EngineConfig, a: &Assignment, progress: impl FnMut(u64,
         stall_timeout: clamor_transport::stage::DEFAULT_STALL_TIMEOUT,
         tls: link_tls(cfg, a)?,
     };
-    let h = run_stage(stage_cfg, listener, exec);
-    Ok(Started { head: h.head, abort: h.task.abort_handle(), task: h.task, load_ms })
+    let h = run_stage(stage_cfg, listener, exec.clone());
+    Ok(Started { head: h.head, exec, abort: h.task.abort_handle(), task: h.task, load_ms })
 }
 
 /// A stage's engine on its own thread, named `clamor-compute`. Loading and every forward pass
@@ -214,13 +216,26 @@ pub async fn start(cfg: &EngineConfig, a: &Assignment, progress: impl FnMut(u64,
 /// the async runtime that sends heartbeats and serves the API stays at normal priority. A new
 /// thread per stage also means a priority change applies from the next pipeline, on every OS.
 /// Dropping it (the stage stopped) ends the thread, which frees the model.
+#[derive(Clone)]
 pub struct ComputeThread {
     jobs: std::sync::mpsc::Sender<Job>,
 }
 
 enum Job {
     Forward { request: u64, pos: u32, input: OwnedInput, reply: std::sync::mpsc::SyncSender<Result<StageOutput>> },
+    Part { request: u64, pos: u32, acts: Acts, layers: std::ops::Range<u32>, reply: std::sync::mpsc::SyncSender<Result<Acts>> },
     Release(u64),
+}
+
+/// An engine that can also run part of its layers for another ring.
+pub trait PartRunner: StageExecutor {
+    fn forward_part(&mut self, request: u64, pos: u32, acts: &Acts, layers: std::ops::Range<u32>) -> Result<Acts>;
+}
+
+impl PartRunner for GgmlExecutor {
+    fn forward_part(&mut self, request: u64, pos: u32, acts: &Acts, layers: std::ops::Range<u32>) -> Result<Acts> {
+        GgmlExecutor::forward_part(self, request, pos, acts, layers)
+    }
 }
 
 enum OwnedInput {
@@ -229,7 +244,7 @@ enum OwnedInput {
 }
 
 impl ComputeThread {
-    pub async fn spawn<E: StageExecutor>(low_priority: bool, load: impl FnOnce() -> Result<E> + Send + 'static) -> Result<Self> {
+    pub async fn spawn<E: PartRunner>(low_priority: bool, load: impl FnOnce() -> Result<E> + Send + 'static) -> Result<Self> {
         let (jobs, rx) = std::sync::mpsc::channel::<Job>();
         let (loaded_tx, loaded_rx) = tokio::sync::oneshot::channel::<Result<()>>();
         std::thread::Builder::new()
@@ -259,6 +274,9 @@ impl ComputeThread {
                             };
                             let _ = reply.send(exec.forward(request, pos, input));
                         }
+                        Job::Part { request, pos, acts, layers, reply } => {
+                            let _ = reply.send(exec.forward_part(request, pos, &acts, layers));
+                        }
                         Job::Release(r) => exec.release(r),
                     }
                 }
@@ -282,6 +300,78 @@ impl StageExecutor for ComputeThread {
     fn release(&mut self, request: u64) {
         let _ = self.jobs.send(Job::Release(request));
     }
+}
+
+/// Part of a running stage's layers, in the middle of another ring (a private chat). Request ids
+/// of that ring are tagged so they never share a KV cache with the stage's own ring.
+pub struct PartView {
+    exec: ComputeThread,
+    layers: std::ops::Range<u32>,
+    tag: u64,
+}
+
+const RING_TAG_SHIFT: u32 = 48;
+
+impl PartView {
+    fn id(&self, request: u64) -> Result<u64> {
+        if request >> RING_TAG_SHIFT != 0 {
+            bail!("request id {request} is too large for a shared stage");
+        }
+        Ok(self.tag | request)
+    }
+}
+
+impl StageExecutor for PartView {
+    fn forward(&mut self, request: u64, pos: u32, input: StageInput<'_>) -> Result<StageOutput> {
+        let StageInput::Acts(acts) = input else {
+            bail!("the middle of a ring takes activations, not tokens");
+        };
+        let request = self.id(request)?;
+        let (reply, answer) = std::sync::mpsc::sync_channel(1);
+        self.exec.jobs.send(Job::Part { request, pos, acts, layers: self.layers.clone(), reply }).map_err(|_| anyhow!("the compute thread has stopped"))?;
+        Ok(StageOutput::Acts(answer.recv().map_err(|_| anyhow!("the compute thread has stopped"))??))
+    }
+    fn release(&mut self, request: u64) {
+        if let Ok(id) = self.id(request) {
+            let _ = self.exec.jobs.send(Job::Release(id));
+        }
+    }
+}
+
+/// One stage of a private ring that runs part of an already loaded stage.
+pub struct RingPart {
+    pub ring: u32,
+    pub epoch: u32,
+    pub session: u64,
+    pub stage_index: u32,
+    pub stage_count: u32,
+    pub layers: std::ops::Range<u32>,
+    pub listen_port: u16,
+    pub downstream: String,
+    pub upstream_tls: String,
+    pub downstream_tls: String,
+}
+
+/// Join a private ring with part of the stage `exec` already holds.
+pub async fn start_part(cfg: &EngineConfig, exec: &ComputeThread, r: RingPart) -> Result<clamor_transport::stage::StageHandle> {
+    use clamor_transport::tls::parse_fingerprint;
+    let id = cfg.tls.clone().ok_or_else(|| anyhow!("no TLS certificate"))?;
+    let tls = clamor_transport::link::LinkTls { identity: id, upstream: parse_fingerprint(&r.upstream_tls)?, downstream: parse_fingerprint(&r.downstream_tls)? };
+    let listener = TcpListener::bind(("0.0.0.0", r.listen_port)).await.with_context(|| format!("binding data port {}", r.listen_port))?;
+    let downstream = lookup_host(&r.downstream).await?.next().ok_or_else(|| anyhow!("cannot resolve {}", r.downstream))?;
+    let cfg = StageConfig {
+        stage_index: r.stage_index,
+        stage_count: r.stage_count,
+        epoch: r.epoch,
+        session: r.session,
+        downstream: Some(downstream),
+        window: 4,
+        connect_timeout: Duration::from_secs(300),
+        stall_timeout: clamor_transport::stage::DEFAULT_STALL_TIMEOUT,
+        tls: Some(std::sync::Arc::new(tls)),
+    };
+    let view = PartView { exec: exec.clone(), layers: r.layers, tag: (r.ring as u64) << RING_TAG_SHIFT };
+    Ok(run_stage(cfg, listener, view))
 }
 
 #[cfg(test)]

@@ -17,7 +17,8 @@ use std::io::{self, Read, Write};
 /// v5: encrypted connections: the control connection is TLS (the join handshake signs the TLS
 /// exporter), and data links are TLS with certificates pinned by fingerprint (`Hello.tls_fp`,
 /// `ShardAssign.upstream_tls/downstream_tls`).
-pub const PROTOCOL_VERSION: u16 = 5;
+/// v6: private chats (`PrivateOpen/Close/Assign/Failed`, `RingJoin/Leave`).
+pub const PROTOCOL_VERSION: u16 = 6;
 /// Model sharing: every node serves layer slices of the models it holds on this HTTP port.
 pub const DEFAULT_SHARE_PORT: u16 = 7423;
 /// First data-plane port: stage `i` listens on `DEFAULT_DATA_PORT + i`.
@@ -533,6 +534,62 @@ pub enum Message {
     ShardRelease {
         model: String,
         epoch: u32,
+    },
+
+    // --- private chats: a ring whose ends run on the asker's device ---
+    /// Device -> coordinator: set up a private ring for this device (on the running pipeline).
+    PrivateOpen,
+    /// Device -> coordinator: it no longer needs its private ring.
+    PrivateClose,
+    /// Coordinator -> the asking device: run the two ends of private ring `ring`. Stage 0 (the
+    /// head: embedding and the first layers) and stage `stage_count - 1` (the last layers and
+    /// the output) both run on this device; the swarm's devices run the stages in between.
+    PrivateAssign {
+        ring: u32,
+        model: String,
+        #[serde(default)]
+        model_id: Option<String>,
+        /// Where to fetch the two slices (None: the device holds the model).
+        #[serde(default)]
+        source: Option<String>,
+        epoch: u32,
+        session: u64,
+        n_ctx: u32,
+        act_dtype: ActDType,
+        sampling: SamplingParams,
+        stage_count: u32,
+        head_layers: [u32; 2],
+        tail_layers: [u32; 2],
+        head_port: u16,
+        tail_port: u16,
+        /// The first middle stage (`host:port`) and its certificate.
+        head_downstream: String,
+        head_downstream_tls: String,
+        /// The last middle stage's certificate (the tail's upstream).
+        tail_upstream_tls: String,
+    },
+    /// Coordinator -> the asking device: its private ring cannot run (or stopped), and why.
+    PrivateFailed {
+        ring: Option<u32>,
+        message: String,
+    },
+    /// Coordinator -> a device running a pipeline stage: also run `layers` of that stage as
+    /// stage `stage_index` of private ring `ring`.
+    RingJoin {
+        ring: u32,
+        epoch: u32,
+        session: u64,
+        stage_index: u32,
+        stage_count: u32,
+        layers: [u32; 2],
+        listen_port: u16,
+        downstream: String,
+        upstream_tls: String,
+        downstream_tls: String,
+    },
+    /// Coordinator -> a device: leave private ring `ring`.
+    RingLeave {
+        ring: u32,
     },
 }
 

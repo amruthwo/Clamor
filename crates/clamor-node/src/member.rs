@@ -16,7 +16,7 @@ use tokio::time::{interval, sleep, timeout};
 
 /// Progress of this node's pipeline stage, reported back into the session loop.
 enum StageEvent {
-    Loaded { model: String, epoch: u32, stage_index: u32, load_ms: u64, abort: AbortHandle },
+    Loaded { model: String, epoch: u32, stage_index: u32, load_ms: u64, abort: AbortHandle, exec: stage::ComputeThread },
     Failed { model: String, epoch: u32, stage_index: u32, error: String, stopped: bool },
     /// Fetching the stage's slice from another node.
     Progress { epoch: u32, stage_index: u32, done: u64, total: u64 },
@@ -28,12 +28,17 @@ struct Slot {
     epoch: Option<u32>,
     loading: Option<AbortHandle>,
     running: Option<AbortHandle>,
+    /// The running stage's engine, which private rings run part of.
+    exec: Option<stage::ComputeThread>,
+    /// Private rings this stage helps run (their middle), by ring id.
+    rings: std::collections::HashMap<u32, AbortHandle>,
 }
 impl Slot {
     fn stop(&mut self) {
-        for h in [self.loading.take(), self.running.take()].into_iter().flatten() {
+        for h in [self.loading.take(), self.running.take()].into_iter().flatten().chain(self.rings.drain().map(|(_, h)| h)) {
             h.abort();
         }
+        self.exec = None;
         self.epoch = None;
     }
 }
@@ -52,7 +57,7 @@ fn spawn_stage(engine: EngineConfig, a: Assignment, tx: UnboundedSender<StageEve
         };
         match stage::start(&engine, &a, progress).await {
             Ok(s) => {
-                let _ = tx.send(StageEvent::Loaded { model: model.clone(), epoch, stage_index, load_ms: s.load_ms, abort: s.abort.clone() });
+                let _ = tx.send(StageEvent::Loaded { model: model.clone(), epoch, stage_index, load_ms: s.load_ms, abort: s.abort.clone(), exec: s.exec.clone() });
                 let error = match s.task.await {
                     Ok(Ok(())) => "stage stopped".to_string(),
                     Ok(Err(e)) => format!("{e:#}"),
@@ -111,10 +116,12 @@ pub async fn join(mut addr: String, creds: Credentials, id: Option<String>, mut 
     });
     // Serve our models to the rest of the swarm (layer slices), to the swarm's devices only.
     let allowed: share::AllowedKeys = Default::default();
-    // The swarm's dashboard on this device, signed as this device (see dashproxy.rs).
+    // The swarm's dashboard on this device, signed as this device (see dashproxy.rs), and the
+    // private chats it keeps here (private.rs).
     let dash: crate::dashproxy::Shared = Default::default();
+    let private = crate::private::new(creds.config_dir.clone());
     if let Some(bind) = &creds.dashboard {
-        if crate::dashproxy::serve(bind, dash.clone()).await? {
+        if crate::dashproxy::serve(bind, dash.clone(), private.clone()).await? {
             println!("the swarm's dashboard is at http://{bind}/ on this device");
         } else {
             println!("{bind} is taken: not serving the swarm's dashboard on this device");
@@ -126,7 +133,7 @@ pub async fn join(mut addr: String, creds: Credentials, id: Option<String>, mut 
     let mut backoff = 2u64;
     let mut swarm_id: Option<String> = None;
     loop {
-        match session(&addr, &creds, &allowed, &dash, &mut swarm_id, &id, bench_port, share_port, &mut backoff, &engine, &update_flag, updates.auto, overrides).await {
+        match session(&addr, &creds, &allowed, &dash, &private, &mut swarm_id, &id, bench_port, share_port, &mut backoff, &engine, &update_flag, updates.auto, overrides).await {
             Ok(Exit::Update) => {
                 // Returns only if the update failed; then carry on with this version.
                 if let Err(e) = update::update_and_restart().await {
@@ -176,7 +183,7 @@ pub async fn join(mut addr: String, creds: Credentials, id: Option<String>, mut 
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn session(addr: &str, creds: &Credentials, allowed: &share::AllowedKeys, dash: &crate::dashproxy::Shared, swarm_id: &mut Option<String>, id: &NodeId, bench_port: u16, share_port: u16, backoff: &mut u64, engine: &EngineConfig, update_flag: &update::UpdateFlag, auto_update: bool, overrides: crate::neighbour::Overrides) -> Result<Exit> {
+async fn session(addr: &str, creds: &Credentials, allowed: &share::AllowedKeys, dash: &crate::dashproxy::Shared, private: &crate::private::Shared, swarm_id: &mut Option<String>, id: &NodeId, bench_port: u16, share_port: u16, backoff: &mut u64, engine: &EngineConfig, update_flag: &update::UpdateFlag, auto_update: bool, overrides: crate::neighbour::Overrides) -> Result<Exit> {
     let scan = |dir: std::path::PathBuf| async move { tokio::task::spawn_blocking(move || share::scan(&dir)).await.unwrap_or_default() };
     let mut models = scan(engine.models_dir.clone()).await;
     let id2 = id.clone();
@@ -272,6 +279,13 @@ async fn session(addr: &str, creds: &Credentials, allowed: &share::AllowedKeys, 
         }
     });
 
+    // The device's own dashboard asks for private rings through this.
+    let (ctl_tx, mut ctl_rx) = unbounded_channel::<Message>();
+    {
+        let mut p = private.lock().unwrap();
+        p.control = Some(ctl_tx);
+        p.swarm(&ch.swarm_id);
+    }
     let mut hb = interval(Duration::from_secs(heartbeat_secs.max(1) as u64));
     // Notice models added to or removed from --models.
     let mut rescan = interval(Duration::from_secs(30));
@@ -309,11 +323,12 @@ async fn session(addr: &str, creds: &Credentials, allowed: &share::AllowedKeys, 
                         write_msg(&mut wr, &Message::ShardProgress { epoch, stage_index, done_bytes: done, total_bytes: total }).await?;
                     }
                 }
-                StageEvent::Loaded { model, epoch, stage_index, load_ms, abort } => {
+                StageEvent::Loaded { model, epoch, stage_index, load_ms, abort, exec } => {
                     if slot.epoch == Some(epoch) {
                         println!("stage {stage_index} of {model} ready (epoch {epoch}, loaded in {load_ms} ms)");
                         slot.loading = None;
                         slot.running = Some(abort);
+                        slot.exec = Some(exec);
                         write_msg(&mut wr, &Message::ShardReady { model, epoch, stage_index, load_ms }).await?;
                     } else {
                         abort.abort(); // superseded or released while loading
@@ -347,6 +362,9 @@ async fn session(addr: &str, creds: &Credentials, allowed: &share::AllowedKeys, 
                     return Ok(Exit::Update);
                 }
                 write_msg(&mut wr, &Message::Heartbeat { cpu_load: cpu, ram_available_bytes: ram, power, running_tasks: 0, update_available, paused: now, note: settings_note.clone() }).await?;
+            }
+            Some(m) = ctl_rx.recv() => {
+                write_msg(&mut wr, &m).await?;
             }
             _ = tokio::signal::ctrl_c() => {
                 let _ = write_msg(&mut wr, &Message::Leave).await;
@@ -393,6 +411,52 @@ async fn session(addr: &str, creds: &Credentials, allowed: &share::AllowedKeys, 
                         let a = Assignment { model, epoch, session, stage_index, stage_count, layer_start, layer_end, listen_port, downstream, act_dtype, n_ctx, embed, sampling, source, model_id, max_requests, need_bytes, upstream_tls, downstream_tls, policy };
                         slot.epoch = Some(epoch);
                         slot.loading = Some(spawn_stage(engine.clone(), a, stx.clone()));
+                    }
+                    Message::RingJoin { ring, epoch, session, stage_index, stage_count, layers, listen_port, downstream, upstream_tls, downstream_tls } => {
+                        // Part of the stage this device already runs, in the middle of someone's
+                        // private ring: no loading.
+                        match (&slot.exec, slot.epoch == Some(epoch)) {
+                            (Some(exec), true) => {
+                                let part = stage::RingPart { ring, epoch, session, stage_index, stage_count, layers: layers[0]..layers[1], listen_port, downstream, upstream_tls, downstream_tls };
+                                let (engine, exec) = (engine.clone(), exec.clone());
+                                let h = tokio::spawn(async move {
+                                    match stage::start_part(&engine, &exec, part).await {
+                                        Ok(h) => {
+                                            let _ = h.task.await;
+                                        }
+                                        Err(e) => eprintln!("private ring {ring}: {e:#}"),
+                                    }
+                                });
+                                println!("helping run a private chat (ring {ring}, layers {}..{})", layers[0], layers[1]);
+                                if let Some(old) = slot.rings.insert(ring, h.abort_handle()) {
+                                    old.abort();
+                                }
+                            }
+                            _ => eprintln!("asked to join private ring {ring}, but this device runs no stage of epoch {epoch}"),
+                        }
+                    }
+                    Message::RingLeave { ring } => {
+                        if let Some(h) = slot.rings.remove(&ring) {
+                            h.abort();
+                        }
+                    }
+                    Message::PrivateAssign { ring, model, model_id, source, epoch, session, n_ctx, act_dtype, sampling, stage_count, head_layers, tail_layers, head_port, tail_port, head_downstream, head_downstream_tls, tail_upstream_tls } => {
+                        println!("setting up private chats: loading this device's ends of {model}");
+                        {
+                            let mut p = private.lock().unwrap();
+                            p.stop();
+                            p.ring = Some(ring);
+                            p.state = crate::private::State::Starting;
+                        }
+                        let ends = crate::private::Ends { ring, model, model_id, source, epoch, session, n_ctx, act_dtype, sampling, stage_count, head_layers, tail_layers, head_port, tail_port, head_downstream, head_downstream_tls, tail_upstream_tls };
+                        crate::private::start_ends(engine.clone(), policy, ends, private.clone());
+                    }
+                    Message::PrivateFailed { ring, message } => {
+                        let mut p = private.lock().unwrap();
+                        if ring.is_none() || p.ring == ring {
+                            p.stop();
+                            p.state = crate::private::State::Failed(message);
+                        }
                     }
                     Message::ShardRelease { model, epoch } => {
                         if slot.epoch.is_some_and(|e| e <= epoch) {

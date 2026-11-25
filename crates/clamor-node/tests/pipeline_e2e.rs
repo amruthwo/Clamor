@@ -925,3 +925,88 @@ fn asking_to_join_waits_for_an_admin() {
     assert!(!m.log().contains("Check code"), "{}", m.log());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Private chats: a member's device runs both ends of the model (its own private ring) and the
+/// swarm's running stages run the middle without loading anything again. The conversation is
+/// served and kept by the device itself: the coordinator never sees the text.
+#[test]
+fn private_chats_stay_on_the_device() {
+    let dir = std::env::temp_dir().join(format!("clamor-node-private-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    if python_fixture(&dir).is_none() {
+        return;
+    }
+    let models = dir.display().to_string();
+    let empty = dir.join("empty");
+    std::fs::create_dir_all(&empty).unwrap();
+    let (ctrl, portal, tls_port, data, dash) = (free_port(), free_port(), free_port(), free_port_run(64), free_port());
+    let (ctrl_s, portal_s, tls_s, data_s, dash_s) = (format!("127.0.0.1:{ctrl}"), format!("127.0.0.1:{portal}"), format!("127.0.0.1:{tls_port}"), data.to_string(), format!("127.0.0.1:{dash}"));
+    let coord_cfg = cfg_dir(&dir, "coordinator");
+    let coord = spawn(&dir, "coordinator", &["coordinator", "--swarm", "home", "--passphrase", "private-test", "--id", "coord", "--bind", &ctrl_s, "--portal", &portal_s, "--portal-tls", &tls_s, "--models", &models, "--data-port", &data_s, "--quick-bench", "--no-update-check", "--config-dir", &coord_cfg, "--participation", "full", "--allow-battery"]);
+    wait_for("the portal", Duration::from_secs(120), &[&coord], || TcpStream::connect(("127.0.0.1", portal)).is_ok());
+    // The member holds no copy of the model: it fetches its slices, ends included.
+    let m = spawn(&dir, "member", &["join", &ctrl_s, "--passphrase", "private-test", "--name", "Bea", "--dashboard", &dash_s, "--id", "a", "--models", &empty.display().to_string(), "--cache-dir", &dir.join("cache").display().to_string(), "--no-update-check", "--config-dir", &cfg_dir(&dir, "member"), "--participation", "full", "--allow-battery"]);
+    let all = [&coord, &m];
+    wait_for("the member", Duration::from_secs(60), &all, || {
+        let (_, r) = http(portal, "GET", "/api/roster", None);
+        r["nodes"].as_array().is_some_and(|ns| ns.iter().any(|n| n["id"] == "a" && n["state"] == "ready"))
+    });
+    // Without a model there is nothing to run a private ring on.
+    let (st, r) = http(dash, "GET", "/api/private/status", None);
+    assert_eq!((st, r["state"].as_str()), (200, Some("off")), "{r}");
+    let (st, r) = http(portal, "POST", "/api/pipeline", Some(json!({ "model": "tiny.gguf", "ctx": 64, "stages": [{ "node": "coord", "layers": [0, 2] }, { "node": "a", "layers": [2, 4] }] })));
+    assert_eq!(st, 200, "{r}");
+    wait_for("the pipeline", Duration::from_secs(180), &all, || http(portal, "GET", "/api/pipeline", None).1["ready"] == true);
+
+    // Turn private chats on: the device runs layers 0..1 and 3..4, the swarm 1..3.
+    assert_eq!(http(dash, "POST", "/api/private/open", None).0, 200);
+    wait_for("private chats", Duration::from_secs(120), &all, || {
+        let (_, r) = http(dash, "GET", "/api/private/status", None);
+        assert_ne!(r["state"], "failed", "{r}");
+        r["state"] == "ready"
+    });
+    let (_, r) = http(dash, "GET", "/api/private/status", None);
+    assert_eq!(r["layers_here"], json!([1, 3, 4]), "{r}");
+    let (_, c) = http(dash, "POST", "/api/private/chats", None);
+    let id = c["id"].as_str().unwrap().to_string();
+    let secret = "zebra-umbrella-quartz";
+    let (st, text) = http_raw(dash, "POST", &format!("/api/private/chats/{id}/messages"), Some(json!({ "content": secret })));
+    assert_eq!(st, 200, "{text}");
+    let done: Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+    assert!(done["done"]["error"].is_null() && done["done"]["tok_s"].as_f64().is_some_and(|t| t > 0.0), "{done}");
+    let (_, conv) = http(dash, "GET", &format!("/api/private/chats/{id}"), None);
+    assert_eq!(conv["messages"].as_array().map(|m| m.len()), Some(2), "{conv}");
+    // The coordinator never had the text: not in its files, not in its log, not in its chats.
+    let leaked = walk(Path::new(&coord_cfg)).into_iter().filter(|p| std::fs::read(p).is_ok_and(|b| String::from_utf8_lossy(&b).contains(secret))).collect::<Vec<_>>();
+    assert!(leaked.is_empty(), "the coordinator stored the private text: {leaked:?}");
+    assert!(!coord.log().contains(secret));
+    assert_eq!(http(portal, "GET", &format!("/api/chats/{id}"), None).0, 404);
+    // ... and the device has it.
+    assert!(walk(&dir.join("member-config")).iter().any(|p| std::fs::read(p).is_ok_and(|b| String::from_utf8_lossy(&b).contains(secret))));
+    // The normal chat goes on alongside.
+    let (st, _, done) = chat_send(portal, "group", "Hello");
+    assert!(st == 200 && done["error"].is_null(), "{done}");
+
+    // Off again.
+    assert_eq!(http(dash, "POST", "/api/private/close", None).0, 200);
+    assert_eq!(http(dash, "GET", "/api/private/status", None).1["state"], "off");
+    let (st, text) = http_raw(dash, "POST", &format!("/api/private/chats/{id}/messages"), Some(json!({ "content": "again?" })));
+    assert_eq!(st, 200);
+    assert!(text.contains("off"), "a private chat needs its ring: {text}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Every file under `dir`.
+fn walk(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            out.extend(walk(&p));
+        } else {
+            out.push(p);
+        }
+    }
+    out
+}

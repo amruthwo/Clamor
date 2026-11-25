@@ -189,7 +189,9 @@ pub struct Swarm {
     /// Conversations (personal and group).
     pub chats: crate::chats::Chats,
     /// Conversations the model is answering right now.
-    pub generating: std::collections::HashMap<String, crate::portal::Generation>,
+    pub generating: std::collections::HashMap<String, crate::generate::Generation>,
+    /// Private rings handed out so far (their ids).
+    pub next_ring: u32,
     /// Recent replies: (unix time, tokens per second), newest last.
     pub speeds: std::collections::VecDeque<(u64, f32)>,
     pub coordinator: NodeId,
@@ -214,11 +216,24 @@ impl Swarm {
         engine.tls = Some(tls.clone());
         Swarm {
             tls,
-            tls_server, name, auth, invite: None, join_hint: String::new(), portal_tls_port: None, joins: Vec::new(), chats, generating: Default::default(), speeds: Default::default(), coordinator, nodes: BTreeMap::new(), next_generation: 1, engine, data_port, quick_bench, pipeline: None, next_epoch: 1, share_port }
+            tls_server, name, auth, invite: None, join_hint: String::new(), portal_tls_port: None, joins: Vec::new(), chats, generating: Default::default(), next_ring: 0, speeds: Default::default(), coordinator, nodes: BTreeMap::new(), next_generation: 1, engine, data_port, quick_bench, pipeline: None, next_epoch: 1, share_port }
     }
 
     /// A node that held a pipeline stage is gone: that pipeline cannot run any more.
     pub fn node_lost(&mut self, id: &NodeId, why: &str) {
+        // Its own private ring ends; rings it helped run cannot go on either.
+        crate::pipeline::close_private(self, id);
+        let broken: Vec<crate::pipeline::PrivateRing> = match self.pipeline.as_mut() {
+            Some(p) => {
+                let (b, keep): (Vec<_>, Vec<_>) = std::mem::take(&mut p.rings).into_iter().partition(|r| r.members.contains(id));
+                p.rings = keep;
+                b
+            }
+            None => Vec::new(),
+        };
+        for r in broken {
+            crate::pipeline::end_ring(self, r, Some("a device running part of your private chat left the swarm"));
+        }
         if let Some(p) = self.pipeline.as_mut() {
             let epoch = p.epoch;
             if let Some(i) = p.stages.iter().position(|s| &s.node == id) {
@@ -624,6 +639,13 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
                     let _ = tx.send(Message::SetPolicy { policy: e.report.policy });
                 }
             }
+            Message::PrivateOpen => {
+                let engine = shared.lock().unwrap().engine.clone();
+                if let Err(e) = crate::pipeline::open_private(&shared, &engine, &id) {
+                    let _ = tx.send(Message::PrivateFailed { ring: None, message: format!("{e:#}") });
+                }
+            }
+            Message::PrivateClose => crate::pipeline::close_private(&mut shared.lock().unwrap(), &id),
             Message::Inventory { models } => {
                 if let Some(e) = shared.lock().unwrap().nodes.get_mut(&id) {
                     e.models = models;

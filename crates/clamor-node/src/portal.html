@@ -97,6 +97,7 @@
   .convs button { text-align:left; border:0; background:transparent; padding:7px 9px; border-radius:8px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .convs button[aria-current=true] { background:var(--bg); font-weight:600; }
   .convs .new { color:var(--accent); }
+  .convhead { font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--mute); margin:12px 9px 2px; }
   .thread { display:flex; flex-direction:column; min-width:0; }
   .msgs { flex:1; overflow-y:auto; padding:14px; display:flex; flex-direction:column; gap:10px; max-height:520px; }
   .msg { max-width:min(80%, 640px); padding:9px 12px; border-radius:14px; white-space:pre-wrap; word-wrap:break-word; line-height:1.45; }
@@ -547,29 +548,70 @@ function setLive(text) {
   if (el) el.outerHTML = liveBubble(text); else $('msgs').insertAdjacentHTML('beforeend', liveBubble(text));
   if (atEnd) $('msgs').scrollTop = $('msgs').scrollHeight;
 }
+// Private chats exist only where this page is served by the device's own clamor-node (the
+// app, or 127.0.0.1:7421 on a member device): its conversations are kept there. Their ids
+// are "p:<id>" here.
+let privateHere = null, privateStatus = null, privateList = [];
+const isPrivate = id => id.startsWith('p:');
+const chatUrl = id => isPrivate(id) ? '/api/private/chats/' + encodeURIComponent(id.slice(2)) : '/api/chats/' + encodeURIComponent(id);
 async function loadChats() {
   chatList = await fetch('/api/chats').then(r => r.json());
+  if (privateHere === null) privateHere = (await fetch('/api/private/status').catch(() => ({ ok: false }))).ok;
+  if (privateHere) privateList = (await fetch('/api/private/chats').then(r => r.ok ? r.json() : { conversations: [] })).conversations;
   const items = [{ id: 'group', title: 'Group' }, ...chatList.conversations];
-  $('convs').innerHTML = `<button class="new" onclick="newChat()">+ New chat</button>` + items.map(c => `<button aria-current="${c.id === chatId}" onclick='openChat(${JSON.stringify(c.id)})'>${c.id === 'group' ? '👥 ' : ''}${esc(c.title)}</button>`).join('');
-  $('convpick').innerHTML = items.map(c => `<option value="${esc(c.id)}"${c.id === chatId ? ' selected' : ''}>${esc(c.title)}</option>`).join('') + '<option value="__new">+ New chat</option>';
+  const priv = privateList.map(c => ({ id: 'p:' + c.id, title: c.title }));
+  const btn = c => `<button aria-current="${c.id === chatId}" onclick='openChat(${JSON.stringify(c.id)})'>${c.id === 'group' ? '👥 ' : isPrivate(c.id) ? '🔒 ' : ''}${esc(c.title)}</button>`;
+  $('convs').innerHTML = `<button class="new" onclick="newChat()">+ New chat</button>` + items.map(btn).join('')
+    + (privateHere ? `<div class="convhead">Private · this device</div><button class="new" onclick="newPrivateChat()">+ New private chat</button>` + priv.map(btn).join('') : '');
+  $('convpick').innerHTML = [...items, ...priv].map(c => `<option value="${esc(c.id)}"${c.id === chatId ? ' selected' : ''}>${isPrivate(c.id) ? '🔒 ' : ''}${esc(c.title)}</option>`).join('') + '<option value="__new">+ New chat</option>' + (privateHere ? '<option value="__newp">+ New private chat</option>' : '');
 }
+// Private chats need this device's ends of the model: explain, and offer to turn them on.
+function privatePanel(st) {
+  const why = `<p>Your words stay on this device: it runs the first and the last part of the model itself, and the swarm's other devices (the coordinator included) only see numbers in between. The conversation is kept on this device too.</p>
+    <p class="mute">Not hidden: that you chatted, when, and roughly how long the messages were. And with deliberate effort, someone could turn those middle numbers back into rough text. <a href="https://github.com/amruthwo/Clamor/blob/main/docs/private-chats.md" target="_blank" rel="noopener">More</a></p>`;
+  if (st.state === 'ready') return '';
+  if (st.state === 'starting') return `<div class="empty">${why}<p><b>Starting…</b> this device is loading its part of the model.</p></div>`;
+  const failed = st.state === 'failed' ? `<p class="err">${esc(st.message || 'could not start')}</p>` : '';
+  return `<div class="empty">${why}${failed}<p><button class="primary" onclick="privateOn()">Turn on private chats</button></p></div>`;
+}
+window.privateOn = async () => {
+  const r = await fetch('/api/private/open', { method:'POST' });
+  if (!r.ok) alert(await r.text());
+  loadThread(true);
+};
+window.newPrivateChat = async () => {
+  const r = await fetch('/api/private/chats', { method:'POST' });
+  if (!r.ok) { alert(await r.text()); return; }
+  openChat('p:' + (await r.json()).id);
+};
 async function loadThread(force) {
   if (sending) return;
-  const r = await fetch('/api/chats/' + encodeURIComponent(chatId));
+  const r = await fetch(chatUrl(chatId));
   if (!r.ok) { chatId = 'group'; return; }
   const c = await r.json();
   const live = c.live ? c.live.text : '';
-  if (!force && c.messages.length === shownCount && live === liveShown) return;
-  shownCount = c.messages.length; liveShown = live;
-  const empty = chatId === 'group' ? 'The group chat: everyone in the swarm sees it, and the model answers.' : 'A chat of your own: only you can see it, on any of your devices.';
-  $('msgs').innerHTML = c.messages.map(bubble).join('') || (c.live ? '' : `<div class="empty">${empty}</div>`);
+  let panel = '';
+  if (isPrivate(chatId)) {
+    privateStatus = await fetch('/api/private/status').then(r => r.json());
+    panel = privatePanel(privateStatus);
+    $('say').disabled = privateStatus.state !== 'ready';
+    $('say').placeholder = privateStatus.state === 'ready' ? 'Message the model privately…' : 'Turn on private chats first';
+  } else {
+    $('say').disabled = false; $('say').placeholder = 'Message the model…';
+  }
+  const key = live + '|' + panel;
+  if (!force && c.messages.length === shownCount && key === liveShown) return;
+  shownCount = c.messages.length; liveShown = key;
+  const empty = chatId === 'group' ? 'The group chat: everyone in the swarm sees it, and the model answers.' : isPrivate(chatId) ? 'A private chat: it stays on this device.' : 'A chat of your own: only you can see it, on any of your devices.';
+  // The turn-on panel goes last: next to where you type, not scrolled away above old messages.
+  $('msgs').innerHTML = (c.messages.map(bubble).join('') || (c.live || panel ? '' : `<div class="empty">${empty}</div>`)) + panel;
   // Someone's reply is being written (another device, or before a reload).
   if (c.live) $('msgs').insertAdjacentHTML('beforeend', liveBubble(live));
   $('msgs').scrollTop = $('msgs').scrollHeight;
 }
 window.openChat = async id => { chatId = id; shownCount = -1; await loadChats(); await loadThread(true); };
 window.newChat = async () => { const r = await (await fetch('/api/chats', { method:'POST' })).json(); openChat(r.id); };
-$('convpick').onchange = e => e.target.value === '__new' ? newChat() : openChat(e.target.value);
+$('convpick').onchange = e => e.target.value === '__new' ? newChat() : e.target.value === '__newp' ? newPrivateChat() : openChat(e.target.value);
 function sendMode(on) {
   sending = on;
   $('send').textContent = on ? 'Stop' : 'Send';
@@ -579,7 +621,7 @@ function sendMode(on) {
 $('send').onclick = e => {
   if (!sending) return; // a normal submit
   e.preventDefault();
-  fetch('/api/chats/' + encodeURIComponent(chatId) + '/stop', { method:'POST' });
+  fetch(chatUrl(chatId) + '/stop', { method:'POST' });
 };
 $('composer').onsubmit = async e => {
   e.preventDefault();
@@ -591,7 +633,7 @@ $('composer').onsubmit = async e => {
   $('msgs').insertAdjacentHTML('beforeend', bubble({ role: 'user', content: text, by: me.name }));
   setLive('');
   try {
-    const r = await fetch('/api/chats/' + encodeURIComponent(asked) + '/messages', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ content: text }) });
+    const r = await fetch(chatUrl(asked) + '/messages', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ content: text }) });
     if (!r.ok) throw new Error(await r.text());
     // One JSON object per line: the reply so far, then {"done": message}.
     const reader = r.body.getReader(), dec = new TextDecoder();
@@ -703,6 +745,8 @@ refresh().then(() => {
   if (m) openSettings(decodeURIComponent(m[1]));
   if (location.hash === '#add-device') $('add-device').click();
   if (location.hash === '#prefs') $('whoami').click();
+  const c = location.hash.match(/^#chat=(.+)$/);
+  if (c) openChat(decodeURIComponent(c[1]));
 });
 setInterval(refresh, 3000);
 // (checkMe also drives the sign-in screen's polling.)

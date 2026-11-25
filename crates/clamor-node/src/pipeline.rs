@@ -62,6 +62,24 @@ pub struct Pipeline {
     pub head: Option<HeadHandle>,
     #[serde(skip)]
     pub local: Option<AbortHandle>,
+    /// The coordinator's own loaded stage (stage 0), for private rings' middles.
+    #[serde(skip)]
+    pub local_exec: Option<crate::stage::ComputeThread>,
+    /// Private rings running on this pipeline (see `open_private`).
+    #[serde(skip)]
+    pub rings: Vec<PrivateRing>,
+    /// The model file's id (`ModelInfo::id`), so private rings fetch the same file.
+    #[serde(skip)]
+    pub model_id: Option<String>,
+}
+
+/// A private chat's ring: its ends on the asker's device, its middle on this pipeline's stages.
+pub struct PrivateRing {
+    pub ring: u32,
+    pub asker: NodeId,
+    /// Devices running a middle stage (the coordinator's own is `local`).
+    pub members: Vec<NodeId>,
+    pub local: Option<AbortHandle>,
 }
 
 impl Pipeline {
@@ -207,7 +225,11 @@ fn model_spec(name: &str, file_size: u64, hp: &LlamaHparams) -> plan::ModelSpec 
 /// The nodes holding `name`. If the coordinator has it, its copy defines the model; otherwise the
 /// first holder's does. Nodes with a different file under the same name are not holders.
 fn holders(shared: &Shared, name: &str) -> Result<(ModelInfo, Vec<NodeId>)> {
-    let sw = shared.lock().unwrap();
+    holders_in(&shared.lock().unwrap(), name)
+}
+
+/// `holders`, with the swarm already locked.
+fn holders_in(sw: &crate::coordinator::Swarm, name: &str) -> Result<(ModelInfo, Vec<NodeId>)> {
     let reachable = |id: &NodeId, e: &crate::coordinator::NodeEntry| *id == sw.coordinator || e.tx.is_some();
     let has = |e: &crate::coordinator::NodeEntry| e.models.iter().find(|m| m.name == name).cloned();
     let chosen = sw.nodes.get(&sw.coordinator).and_then(has).or_else(|| sw.nodes.iter().filter(|(id, e)| reachable(id, e)).find_map(|(_, e)| has(e)));
@@ -445,6 +467,9 @@ pub async fn start(shared: &Shared, req: PipelineRequest) -> Result<()> {
             stages: layout.iter().enumerate().map(|(i, (node, a, b))| PipeStage { node: node.clone(), layer_start: *a, layer_end: *b, addr: addr(i), status: StageStatus::Loading, need_bytes: needs[i].unwrap_or(0) }).collect(),
             head: None,
             local: None,
+            local_exec: None,
+            rings: Vec::new(),
+            model_id: Some(info.id.clone()),
         });
         (epoch, assigns, senders)
     };
@@ -495,6 +520,7 @@ pub async fn start(shared: &Shared, req: PipelineRequest) -> Result<()> {
                         Some(p) if p.epoch == epoch => {
                             p.head = s.head;
                             p.local = Some(s.abort.clone());
+                            p.local_exec = Some(s.exec.clone());
                             p.mark_ready(epoch, 0, None, s.load_ms);
                         }
                         _ => {
@@ -524,7 +550,11 @@ pub async fn start(shared: &Shared, req: PipelineRequest) -> Result<()> {
 }
 
 /// Stop a pipeline: tell members to drop their stages and stop the local head.
-pub fn release(sw: &mut crate::coordinator::Swarm, p: Pipeline) {
+pub fn release(sw: &mut crate::coordinator::Swarm, mut p: Pipeline) {
+    // Private rings live on this pipeline's stages: they end with it.
+    for r in std::mem::take(&mut p.rings) {
+        end_ring(sw, r, Some("the swarm's model changed: open your private chat again"));
+    }
     if let Some(a) = &p.local {
         a.abort();
     }
@@ -600,7 +630,7 @@ mod tests {
     #[test]
     fn failure_blames_the_cause_not_the_knock_on_effects() {
         let st = |n: &str| PipeStage { node: id(n), layer_start: 0, layer_end: 0, addr: String::new(), status: StageStatus::Loading, need_bytes: 0 };
-        let mut p = Pipeline { model: "m".into(), epoch: 2, n_ctx: 8, n_layer: 4, act_dtype: ActDType::F16, stages: vec![st("c"), st("a"), st("b")], first_failure: None, failure_is_cause: false, tokenizer: None, tokenizer_note: None, head: None, local: None };
+        let mut p = Pipeline { model: "m".into(), epoch: 2, n_ctx: 8, n_layer: 4, act_dtype: ActDType::F16, stages: vec![st("c"), st("a"), st("b")], first_failure: None, failure_is_cause: false, tokenizer: None, tokenizer_note: None, head: None, local: None, local_exec: None, rings: Vec::new(), model_id: None };
         p.mark_failed(2, 0, None, "ring broken: tail link closed".into(), false);
         p.mark_failed(2, 1, Some(&id("a")), "upstream link closed".into(), false);
         assert_eq!(p.failure().as_deref(), Some("stage 0 (c): ring broken: tail link closed"), "only knock-on effects so far: the first");
@@ -635,3 +665,186 @@ mod tests {
 }
 
 
+
+// ---------------------------------------------------------------- private rings
+
+/// Ports of private ring `ring`: stage `i` listens on `base + i`.
+fn ring_port(data_port: u16, ring: u32, i: u32) -> u16 {
+    data_port + 32 + ((ring % 32) as u16) * 8 + i as u16
+}
+
+/// Layers each end of a private ring keeps on the asker's device: an eighth of the model, at
+/// least one. More layers make the middle's numbers harder to turn back into text.
+pub fn private_layers(n_layer: u32) -> u32 {
+    (n_layer / 8).max(1)
+}
+
+/// Tell everyone in a private ring to stop it; tell the asker why, if there is a reason.
+pub fn end_ring(sw: &mut crate::coordinator::Swarm, r: PrivateRing, why: Option<&str>) {
+    if let Some(a) = r.local {
+        a.abort();
+    }
+    for m in &r.members {
+        if let Some(tx) = sw.nodes.get(m).and_then(|e| e.tx.as_ref()) {
+            let _ = tx.send(Message::RingLeave { ring: r.ring });
+        }
+    }
+    if let (Some(why), Some(tx)) = (why, sw.nodes.get(&r.asker).and_then(|e| e.tx.as_ref())) {
+        let _ = tx.send(Message::PrivateFailed { ring: Some(r.ring), message: why.into() });
+    }
+}
+
+/// The asker's private ring ends (it closed it, or left the swarm).
+pub fn close_private(sw: &mut crate::coordinator::Swarm, asker: &NodeId) {
+    let rings = match sw.pipeline.as_mut() {
+        Some(p) => {
+            let (gone, keep): (Vec<_>, Vec<_>) = std::mem::take(&mut p.rings).into_iter().partition(|r| &r.asker == asker);
+            p.rings = keep;
+            gone
+        }
+        None => Vec::new(),
+    };
+    for r in rings {
+        end_ring(sw, r, None);
+    }
+}
+
+/// Set up a private ring for `asker` on the running pipeline: its device runs the first and
+/// last `private_layers` layers (with the embedding and the output), and the pipeline's stages
+/// run what lies between, each the part of its own layers that falls there, without loading
+/// anything again. The text never leaves the asker's device.
+pub fn open_private(shared: &Shared, engine: &crate::stage::EngineConfig, asker: &NodeId) -> Result<()> {
+    let mut sw = shared.lock().unwrap();
+    if *asker == sw.coordinator {
+        bail!("chats on the coordinator's own computer already stay on it");
+    }
+    close_private(&mut sw, asker);
+    let ring = {
+        sw.next_ring += 1;
+        sw.next_ring
+    };
+    let coordinator = sw.coordinator.clone();
+    let data_port = sw.data_port;
+    let p = sw.pipeline.as_ref().ok_or_else(|| anyhow!("no model is running"))?;
+    if !p.ready() || p.failure().is_some() {
+        bail!("the model is not ready");
+    }
+    let (n_layer, epoch, n_ctx, act_dtype, model) = (p.n_layer, p.epoch, p.n_ctx, p.act_dtype, p.model.clone());
+    let k = private_layers(n_layer);
+    if n_layer < 2 * k + 1 {
+        bail!("this model is too small to split for a private chat");
+    }
+    let middle = k..n_layer - k;
+    // The pipeline's stages that hold part of the middle, in order, with the part they run.
+    let parts: Vec<(NodeId, std::ops::Range<u32>, String)> = p
+        .stages
+        .iter()
+        .filter_map(|s| {
+            let r = s.layer_start.max(middle.start)..s.layer_end.min(middle.end);
+            (!r.is_empty()).then(|| (s.node.clone(), r, s.addr.rsplit_once(':').map(|(h, _)| h.to_string()).unwrap_or_default()))
+        })
+        .collect();
+    if parts.is_empty() || parts.len() > 6 {
+        bail!("the running model's layout does not allow a private chat");
+    }
+    let local_exec = p.local_exec.clone();
+    let model_id = p.model_id.clone();
+    let a = sw.nodes.get(asker).ok_or_else(|| anyhow!("unknown device"))?;
+    let a_tx = a.tx.clone().ok_or_else(|| anyhow!("{asker} is not connected"))?;
+    let a_fp = a.tls_fp.clone().ok_or_else(|| anyhow!("{asker} runs a Clamor without encryption"))?;
+    let a_host = a.peer_ip.ok_or_else(|| anyhow!("{asker} has no address"))?.to_string();
+    let a_coord_host = a.coord_ip.map(|i| i.to_string());
+    let holds = a.models.iter().any(|m| m.name == model);
+    let fp_of = |n: &NodeId| -> Result<String> {
+        if *n == coordinator {
+            Ok(sw.tls.fingerprint_hex())
+        } else {
+            sw.nodes.get(n).and_then(|e| e.tls_fp.clone()).ok_or_else(|| anyhow!("{n} has no certificate"))
+        }
+    };
+    let stage_count = parts.len() as u32 + 2;
+    let session = u64::from_le_bytes(crate::auth::random_bytes::<8>());
+    // Ring order: asker head (0) -> parts (1..=m) -> asker tail (m+1) -> asker head.
+    let host_of = |i: u32| -> String {
+        if i == 0 || i == stage_count - 1 {
+            return a_host.clone();
+        }
+        let (n, _, h) = &parts[i as usize - 1];
+        // The coordinator's own stage: reached at the address the asker uses for it.
+        if *n == coordinator { a_coord_host.clone().unwrap_or_else(|| h.clone()) } else { h.clone() }
+    };
+    let addr_of = |i: u32| format!("{}:{}", host_of(i), ring_port(data_port, ring, i));
+    let source = if holds {
+        None
+    } else {
+        let holders = holders_in(&sw, &model).map(|h| h.1).unwrap_or_default();
+        let from = if holders.contains(&coordinator) { Some(coordinator.clone()) } else { holders.first().cloned() };
+        match from.and_then(|f| share_url(&sw, &f, asker)) {
+            Some(u) => Some(u),
+            None => bail!("no device can send {asker} its part of {model}"),
+        }
+    };
+    let mut members = Vec::new();
+    let mut local_part = None;
+    for (i, (n, layers, _)) in parts.iter().enumerate() {
+        let i = i as u32 + 1;
+        let up = if i == 1 { a_fp.clone() } else { fp_of(&parts[i as usize - 2].0)? };
+        let down = if i as usize == parts.len() { a_fp.clone() } else { fp_of(&parts[i as usize].0)? };
+        let join = crate::stage::RingPart { ring, epoch, session, stage_index: i, stage_count, layers: layers.clone(), listen_port: ring_port(data_port, ring, i), downstream: addr_of(i + 1), upstream_tls: up, downstream_tls: down };
+        if *n == coordinator {
+            let exec = local_exec.clone().ok_or_else(|| anyhow!("the coordinator's stage is not running"))?;
+            let engine = engine.clone();
+            local_part = Some(
+                tokio::spawn(async move {
+                    match crate::stage::start_part(&engine, &exec, join).await {
+                        Ok(h) => {
+                            let _ = h.task.await;
+                        }
+                        Err(e) => eprintln!("private ring {ring}: {e:#}"),
+                    }
+                })
+                .abort_handle(),
+            );
+        } else {
+            let tx = sw.nodes.get(n).and_then(|e| e.tx.clone()).ok_or_else(|| anyhow!("{n} is not connected"))?;
+            let _ = tx.send(Message::RingJoin {
+                ring,
+                epoch,
+                session,
+                stage_index: i,
+                stage_count,
+                layers: [join.layers.start, join.layers.end],
+                listen_port: join.listen_port,
+                downstream: join.downstream,
+                upstream_tls: join.upstream_tls,
+                downstream_tls: join.downstream_tls,
+            });
+            members.push(n.clone());
+        }
+    }
+    let last_mid = &parts[parts.len() - 1].0;
+    let _ = a_tx.send(Message::PrivateAssign {
+        ring,
+        model,
+        model_id,
+        source,
+        epoch,
+        session,
+        n_ctx,
+        act_dtype,
+        sampling: SamplingParams::default(),
+        stage_count,
+        head_layers: [0, k],
+        tail_layers: [n_layer - k, n_layer],
+        head_port: ring_port(data_port, ring, 0),
+        tail_port: ring_port(data_port, ring, stage_count - 1),
+        head_downstream: addr_of(1),
+        head_downstream_tls: fp_of(&parts[0].0)?,
+        tail_upstream_tls: fp_of(last_mid)?,
+    });
+    println!("private ring {ring} for {asker}: its device runs layers 0..{k} and {}..{n_layer}; {} device(s) run the middle", n_layer - k, parts.len());
+    if let Some(p) = sw.pipeline.as_mut() {
+        p.rings.push(PrivateRing { ring, asker: asker.clone(), members, local: local_part });
+    }
+    Ok(())
+}

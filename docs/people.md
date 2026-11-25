@@ -27,7 +27,8 @@ shows the same check code as the dashboard.
 The **Home** page has a **Group** chat that everyone in the swarm shares (each message shows who
 wrote it), and your own conversations (**New chat**), which only you can open, from any of your
 devices. Conversations are kept on the coordinator, so whoever runs the coordinator's computer
-could read the files; chats that even the owner cannot read are planned.
+could read the files. For chats that even the owner cannot read, use a [private
+chat](private-chats.md) from the app on your own device.
 
 Replies appear **as the model writes them**. If you prefer to read a reply only once it is
 finished, choose **All at once** under your preferences (press your name at the top of the

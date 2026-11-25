@@ -463,20 +463,14 @@ async fn run(cmd: Cmd, priority: Option<Priority>) -> Result<()> {
         }
         Cmd::Swarms { scan, json } => {
             let config_dir = neighbour::config_dir();
-            let coordinated = auth::CoordinatorProfile::all(&config_dir);
-            let joined = auth::MemberProfile::all(&config_dir);
             if json {
-                let found = if scan { tokio::task::spawn_blocking(|| discovery::browse(std::time::Duration::from_secs(3))).await?? } else { Vec::new() };
-                let remembered: Vec<&str> = joined.iter().map(|p| p.swarm_id.as_str()).chain(coordinated.iter().map(|p| p.swarm_id.as_str())).collect();
-                let out = serde_json::json!({
-                    "coordinating": coordinated.iter().map(|p| serde_json::json!({ "id": p.swarm_id, "name": p.name, "approved_devices": p.approved.len() })).collect::<Vec<_>>(),
-                    "joined": joined.iter().map(|p| serde_json::json!({ "id": p.swarm_id, "name": p.name, "address": p.addresses.first(), "last_joined_unix": p.last_joined_unix })).collect::<Vec<_>>(),
-                    "on_network": found.iter().map(|f| serde_json::json!({ "id": f.swarm_id, "name": f.name, "addresses": f.addrs.iter().map(|a| a.to_string()).collect::<Vec<_>>(), "known": remembered.contains(&f.swarm_id.as_str()) })).collect::<Vec<_>>(),
-                    "cache_bytes": cache::size(&default_cache_dir()),
-                });
+                let out = tokio::task::spawn_blocking(move || swarms_json(&config_dir, scan)).await??;
                 println!("{}", serde_json::to_string_pretty(&out)?);
                 return Ok(());
             }
+            let config_dir = neighbour::config_dir();
+            let coordinated = auth::CoordinatorProfile::all(&config_dir);
+            let joined = auth::MemberProfile::all(&config_dir);
             if coordinated.is_empty() && joined.is_empty() {
                 println!("no swarms yet. Start one with `clamor-node coordinator`, or join one with `clamor-node join <coordinator> --passphrase <words>`.");
             }
@@ -579,4 +573,19 @@ fn pick<'a>(all: impl Iterator<Item = (&'a String, &'a String)>, want: Option<&s
         None if all.is_empty() => anyhow::bail!("this device {verb} no swarms"),
         None => anyhow::bail!("which swarm? this device {verb}: {}", names()),
     }
+}
+
+/// The swarms this device coordinates and has joined (and, with `scan`, those advertised on the
+/// local network), as the desktop app shows them: `clamor-node swarms --json`.
+pub fn swarms_json(config_dir: &std::path::Path, scan: bool) -> Result<serde_json::Value> {
+    let coordinated = auth::CoordinatorProfile::all(config_dir);
+    let joined = auth::MemberProfile::all(config_dir);
+    let found = if scan { discovery::browse(std::time::Duration::from_secs(3))? } else { Vec::new() };
+    let remembered: Vec<&str> = joined.iter().map(|p| p.swarm_id.as_str()).chain(coordinated.iter().map(|p| p.swarm_id.as_str())).collect();
+    Ok(serde_json::json!({
+        "coordinating": coordinated.iter().map(|p| serde_json::json!({ "id": p.swarm_id, "name": p.name, "approved_devices": p.approved.len() })).collect::<Vec<_>>(),
+        "joined": joined.iter().map(|p| serde_json::json!({ "id": p.swarm_id, "name": p.name, "address": p.addresses.first(), "last_joined_unix": p.last_joined_unix })).collect::<Vec<_>>(),
+        "on_network": found.iter().map(|f| serde_json::json!({ "id": f.swarm_id, "name": f.name, "addresses": f.addrs.iter().map(|a| a.to_string()).collect::<Vec<_>>(), "known": remembered.contains(&f.swarm_id.as_str()) })).collect::<Vec<_>>(),
+        "cache_bytes": cache::size(&default_cache_dir()),
+    }))
 }

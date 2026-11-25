@@ -157,6 +157,11 @@ fn detect_accelerators(os: Os, arch: &str, ram_total: u64) -> Vec<Accelerator> {
 
 /// Battery state, or None on a machine without a battery.
 pub fn read_power() -> Option<PowerState> {
+    // Set by the Android app, which reads the battery through Android (apps may not read the
+    // kernel's power-supply files there) and keeps this file current.
+    if let Some(p) = std::env::var_os("CLAMOR_POWER_FILE").and_then(|f| std::fs::read_to_string(f).ok()) {
+        return parse_power_file(&p);
+    }
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         read_power_sysfs(std::path::Path::new("/sys/class/power_supply"))
@@ -173,6 +178,14 @@ pub fn read_power() -> Option<PowerState> {
     {
         None
     }
+}
+
+/// `<percent> <plugged in: 0 or 1>`, e.g. "85 1".
+pub(crate) fn parse_power_file(s: &str) -> Option<PowerState> {
+    let mut it = s.split_whitespace();
+    let pct: u8 = it.next()?.parse().ok()?;
+    let plugged = it.next()? == "1";
+    Some(PowerState { on_battery: !plugged, battery_pct: Some(pct.min(100)) })
 }
 
 /// Linux power supplies, identified by their `type` file, not their name: batteries are called
@@ -263,6 +276,14 @@ mod tests {
         let desk = root.join("desk");
         fake_supply(&desk, "hidpp_battery_0", &[("type", "Battery"), ("scope", "Device"), ("status", "Discharging"), ("capacity", "40")]);
         assert_eq!(read_power_sysfs(&desk), None, "a desktop with a wireless mouse has no battery");
+    }
+
+    #[test]
+    fn the_android_apps_power_file() {
+        assert_eq!(parse_power_file("85 1\n"), Some(PowerState { on_battery: false, battery_pct: Some(85) }));
+        assert_eq!(parse_power_file("40 0"), Some(PowerState { on_battery: true, battery_pct: Some(40) }));
+        assert_eq!(parse_power_file(""), None);
+        assert_eq!(parse_power_file("x 1"), None);
     }
 
     #[test]

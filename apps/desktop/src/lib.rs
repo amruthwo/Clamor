@@ -389,6 +389,9 @@ pub fn run() {
                 // Android: settings, keys, models and the cache live in the app's own storage.
                 let dir = app.path().app_data_dir()?;
                 std::fs::create_dir_all(&dir)?;
+                // The app's service keeps the battery state here (apps cannot read it the Linux
+                // way on Android); clamor-node pauses a phone on battery unless told otherwise.
+                std::env::set_var("CLAMOR_POWER_FILE", dir.join("power.txt"));
                 let _ = DATA_DIR.set(dir);
             }
             #[cfg(desktop)]

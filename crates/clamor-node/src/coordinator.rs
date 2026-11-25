@@ -189,7 +189,7 @@ pub struct Swarm {
     /// Conversations (personal and group).
     pub chats: crate::chats::Chats,
     /// Conversations the model is answering right now.
-    pub generating: std::collections::HashMap<String, crate::portal::Generation>,
+    pub generating: std::collections::HashMap<String, crate::generate::Generation>,
     /// Recent replies: (unix time, tokens per second), newest last.
     pub speeds: std::collections::VecDeque<(u64, f32)>,
     pub coordinator: NodeId,

@@ -8,6 +8,7 @@ mod chats;
 mod coordinator;
 mod dashproxy;
 mod discovery;
+mod generate;
 mod member;
 mod neighbour;
 mod people;

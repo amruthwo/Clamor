@@ -349,7 +349,10 @@ pub async fn run_listener(bind: &str, shared: Shared) -> Result<()> {
     let listener = TcpListener::bind(bind).await?;
     println!("control plane listening on {bind}");
     loop {
-        let (stream, addr) = listener.accept().await?;
+        let (stream, addr) = tokio::select! {
+            a = listener.accept() => a?,
+            _ = crate::stop_requested() => return Ok(()),
+        };
         let shared = shared.clone();
         tokio::spawn(async move {
             if let Err(e) = handle_conn(stream, addr, shared).await {

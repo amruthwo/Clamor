@@ -183,6 +183,46 @@ fn split_equals_full() {
     }
 }
 
+/// Private chats: the asker's device runs the ends (head 0..1 and tail 3..4) and a stage that
+/// has loaded the middle of the model (here all of it, as a normal ring's full stage would)
+/// runs only layers 1..3 for that ring. Same logits as the full model, prefill and decode, while
+/// the same loaded stage keeps serving its own ring's requests in between.
+#[test]
+fn a_loaded_stage_can_run_part_of_its_layers_for_another_ring() {
+    let Some(f) = fixture() else { return };
+    for d in usable_devices(f) {
+        let mut shared = stage(f, 0..N_LAYER, d.index); // the normal ring's stage, all layers
+        let mut head = stage(f, 0..1, d.index); // the asker's device
+        let mut tail = stage(f, 3..N_LAYER, d.index);
+        // A request of the normal ring, interleaved below; ids must not clash with the part's.
+        let own = shared.forward(1, 0, LlamaInput::Tokens(&TOKENS[..2])).unwrap();
+        assert!(matches!(own, LlamaOutput::Logits(_)), "the shared stage still ends its own ring");
+        let private = 1u64 << 48 | 1;
+        // Prefill three tokens, then decode the rest one at a time.
+        let h = hidden(head.forward(1, 0, LlamaInput::Tokens(&TOKENS[..3])).unwrap());
+        let m = shared.forward_part(private, 0, &h, 1..3).unwrap();
+        assert_eq!(m.len(), h.len(), "hidden states in, hidden states out");
+        let got = logits(tail.forward(1, 0, LlamaInput::Hidden(&m)).unwrap());
+        assert!(max_err(&got, rows(&f.logits, V, 0..3)) < tol(&d), "{}: part prefill", d.name);
+        for p in 3..TOKENS.len() {
+            // The normal ring moves on too.
+            if p == 3 {
+                let own = logits(shared.forward(1, 2, LlamaInput::Tokens(&TOKENS[2..3])).unwrap());
+                assert!(max_err(&own, rows(&f.logits, V, 2..3)) < tol(&d), "{}: own ring unaffected", d.name);
+            }
+            let h = hidden(head.forward(1, p as u32, LlamaInput::Tokens(&TOKENS[p..p + 1])).unwrap());
+            let m = shared.forward_part(private, p as u32, &h, 1..3).unwrap();
+            let got = logits(tail.forward(1, p as u32, LlamaInput::Hidden(&m)).unwrap());
+            let err = max_err(&got, rows(&f.logits, V, p..p + 1));
+            assert!(err < tol(&d), "{}: part decode pos {p} err {err}", d.name);
+        }
+        assert!(shared.forward_part(9, 0, &h, 3..5).is_err(), "outside the stage's layers");
+        assert!(shared.forward_part(9, 0, &h, 2..2).is_err(), "empty");
+        shared.release(private);
+        assert_eq!(shared.n_past(private), 0);
+    }
+}
+
 /// Prefill part of the prompt, then decode one token at a time through the KV cache: every
 /// step must match the reference's full-prompt row for that position.
 #[test]

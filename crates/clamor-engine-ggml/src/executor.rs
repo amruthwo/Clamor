@@ -90,6 +90,15 @@ impl GgmlExecutor {
         self.live.store(self.stage.live_requests(), Ordering::Relaxed);
     }
 
+    /// Run only `layers` (within this stage's) on incoming activations, for another ring whose
+    /// ends run elsewhere (a private chat): activations in, activations out.
+    pub fn forward_part(&mut self, request: u64, pos: u32, acts: &Acts, layers: Range<u32>) -> Result<Acts> {
+        let h = self.decode(acts)?;
+        let out = self.stage.forward_part(request, pos, &h, layers).map_err(|e| anyhow!(e));
+        self.update_live();
+        Ok(self.encode(&out?, acts.n_tokens))
+    }
+
     fn encode(&self, h: &[f32], n_tokens: u32) -> Acts {
         let (dtype, scale, data) = match self.wire {
             DType::I8 => {
@@ -179,5 +188,71 @@ impl StageExecutor for GgmlExecutor {
         self.stage.release(request);
         self.rng.remove(&request);
         self.update_live();
+    }
+}
+
+/// One loaded stage used by several rings at once: its own ring (this, as a `StageExecutor`), and
+/// the middle of other rings through [`SharedExecutor::part`]. The weights are loaded once; each
+/// request has its own KV cache.
+#[derive(Clone)]
+pub struct SharedExecutor(Arc<std::sync::Mutex<GgmlExecutor>>);
+
+/// Request ids of other rings are tagged into their own range, so they never share a KV cache
+/// with this stage's own ring (whose head counts up from 1).
+const RING_TAG_SHIFT: u32 = 48;
+
+impl SharedExecutor {
+    pub fn new(e: GgmlExecutor) -> Self {
+        SharedExecutor(Arc::new(std::sync::Mutex::new(e)))
+    }
+
+    /// A view that runs `layers` for ring number `ring` (1 and up).
+    pub fn part(&self, layers: Range<u32>, ring: u16) -> PartExecutor {
+        assert!(ring > 0, "ring 0 is the stage's own");
+        PartExecutor { inner: self.0.clone(), layers, tag: (ring as u64) << RING_TAG_SHIFT }
+    }
+
+    pub fn live_requests(&self) -> Arc<AtomicUsize> {
+        self.0.lock().unwrap().live_requests()
+    }
+}
+
+impl StageExecutor for SharedExecutor {
+    fn forward(&mut self, request: u64, pos: u32, input: StageInput<'_>) -> Result<StageOutput> {
+        self.0.lock().unwrap().forward(request, pos, input)
+    }
+    fn release(&mut self, request: u64) {
+        self.0.lock().unwrap().release(request)
+    }
+}
+
+/// Part of a shared stage, in the middle of another ring.
+pub struct PartExecutor {
+    inner: Arc<std::sync::Mutex<GgmlExecutor>>,
+    layers: Range<u32>,
+    tag: u64,
+}
+
+impl PartExecutor {
+    fn id(&self, request: u64) -> Result<u64> {
+        if request >> RING_TAG_SHIFT != 0 {
+            bail!("request id {request} is too large for a shared stage");
+        }
+        Ok(self.tag | request)
+    }
+}
+
+impl StageExecutor for PartExecutor {
+    fn forward(&mut self, request: u64, pos: u32, input: StageInput<'_>) -> Result<StageOutput> {
+        let StageInput::Acts(a) = input else {
+            bail!("the middle of a ring takes activations, not tokens");
+        };
+        let id = self.id(request)?;
+        Ok(StageOutput::Acts(self.inner.lock().unwrap().forward_part(id, pos, &a, self.layers.clone())?))
+    }
+    fn release(&mut self, request: u64) {
+        if let Ok(id) = self.id(request) {
+            self.inner.lock().unwrap().release(id);
+        }
     }
 }

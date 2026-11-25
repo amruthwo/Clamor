@@ -98,7 +98,35 @@ impl Drop for Ring {
     }
 }
 
+/// Any of the executor kinds, so one ring can mix them.
+enum AnyExec {
+    Plain(GgmlExecutor),
+    Shared(SharedExecutor),
+    Part(PartExecutor),
+}
+impl StageExecutor for AnyExec {
+    fn forward(&mut self, request: u64, pos: u32, input: StageInput<'_>) -> anyhow::Result<StageOutput> {
+        match self {
+            AnyExec::Plain(e) => e.forward(request, pos, input),
+            AnyExec::Shared(e) => e.forward(request, pos, input),
+            AnyExec::Part(e) => e.forward(request, pos, input),
+        }
+    }
+    fn release(&mut self, request: u64) {
+        match self {
+            AnyExec::Plain(e) => e.release(request),
+            AnyExec::Shared(e) => e.release(request),
+            AnyExec::Part(e) => e.release(request),
+        }
+    }
+}
+
 async fn spawn_ring(execs: Vec<GgmlExecutor>, window: u32) -> Ring {
+    let live = execs.iter().map(|e| e.live_requests()).collect();
+    spawn_any_ring(execs.into_iter().map(AnyExec::Plain).collect(), live, window).await
+}
+
+async fn spawn_any_ring(execs: Vec<AnyExec>, live: Vec<Arc<AtomicUsize>>, window: u32) -> Ring {
     let n = execs.len();
     let mut listeners = Vec::new();
     let mut addrs = Vec::new();
@@ -107,7 +135,6 @@ async fn spawn_ring(execs: Vec<GgmlExecutor>, window: u32) -> Ring {
         addrs.push(l.local_addr().unwrap());
         listeners.push(l);
     }
-    let live = execs.iter().map(|e| e.live_requests()).collect();
     let stages = execs
         .into_iter()
         .zip(listeners)
@@ -177,6 +204,33 @@ async fn solo_ring_matches_numpy_greedy() {
     let (_, rx) = ring.head().submit(PROMPT.to_vec(), N_GEN);
     assert_eq!(collect(rx).await, (f.greedy.clone(), DoneReason::MaxTokens));
     ring.assert_all_released().await;
+}
+
+/// A private chat's ring shares the middle of a normal ring: ring A is head 0..1 -> a stage
+/// that loaded 1..4 (A's tail); ring B is the asker's head 0..1 -> that same loaded stage
+/// running only 1..3 -> the asker's tail 3..4. Both rings run at once and both generate the
+/// numpy greedy tokens; the shared stage's KV caches are separate per ring.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_private_ring_shares_the_middle_of_another_ring() {
+    let Some(f) = fixture() else { return };
+    let o = opts(DType::F16, 64);
+    let shared = SharedExecutor::new(GgmlExecutor::load(&f.model, 1..4, o.clone()).unwrap());
+    let a_head = GgmlExecutor::load(&f.model, 0..1, o.clone()).unwrap();
+    let b_head = GgmlExecutor::load(&f.model, 0..1, o.clone()).unwrap();
+    let b_tail = GgmlExecutor::load(&f.model, 3..4, o.clone()).unwrap();
+    let a_live = vec![a_head.live_requests(), shared.live_requests()];
+    let b_live = vec![b_head.live_requests(), shared.live_requests(), b_tail.live_requests()];
+    let ring_a = spawn_any_ring(vec![AnyExec::Plain(a_head), AnyExec::Shared(shared.clone())], a_live, 4).await;
+    let ring_b = spawn_any_ring(vec![AnyExec::Plain(b_head), AnyExec::Part(shared.part(1..3, 1)), AnyExec::Plain(b_tail)], b_live, 4).await;
+    // Same request ids in both rings, at the same time.
+    let (ia, ra) = ring_a.head().submit(PROMPT.to_vec(), N_GEN);
+    let (ib, rb) = ring_b.head().submit(PROMPT.to_vec(), N_GEN);
+    assert_eq!(ia, ib, "both heads count from 1: the shared stage must keep them apart");
+    let (got_a, got_b) = tokio::join!(collect(ra), collect(rb));
+    assert_eq!(got_a, (f.greedy.clone(), DoneReason::MaxTokens), "the normal ring");
+    assert_eq!(got_b, (f.greedy.clone(), DoneReason::MaxTokens), "the private ring");
+    ring_a.assert_all_released().await;
+    ring_b.assert_all_released().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]

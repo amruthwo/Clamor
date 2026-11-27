@@ -85,6 +85,26 @@ impl CatalogModel {
     }
 }
 
+// ---------------------------------------------------------------- deleting
+
+/// Delete a model from this device: the file `name` in `models_dir` (only if it is the model
+/// `model_id`, not another file that happens to have the same name) and the cached slices of it.
+/// Returns the bytes freed.
+pub fn delete_local(models_dir: &Path, cache_dir: &Path, name: &str, model_id: &str) -> Result<u64> {
+    let mut freed = 0;
+    if let Ok(path) = crate::stage::resolve_model(models_dir, name) {
+        if path.exists() {
+            let id = crate::share::model_id(&path)?;
+            if id == model_id {
+                freed += std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                std::fs::remove_file(&path).with_context(|| format!("deleting {}", path.display()))?;
+            }
+        }
+    }
+    freed += crate::cache::purge_model(cache_dir, model_id).1;
+    Ok(freed)
+}
+
 // ---------------------------------------------------------------- downloads
 
 #[derive(Clone, Debug, Serialize)]

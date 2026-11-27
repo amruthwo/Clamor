@@ -32,6 +32,7 @@ pub async fn serve(bind: String, tls_bind: String, shared: Shared) -> anyhow::Re
         .route("/api/catalog", get(catalog_handler))
         .route("/api/models/download", post(download_model))
         .route("/api/models/cancel", post(cancel_download))
+        .route("/api/models/delete", post(delete_model))
         .route("/api/muster", post(muster))
         .route("/api/nodes/{id}/drain", post(drain))
         .route("/api/nodes/{id}/remove", post(remove))
@@ -278,6 +279,74 @@ async fn download_model(State(shared): State<Shared>, Json(req): Json<DownloadRe
     })
     .map_err(|e| (StatusCode::CONFLICT, format!("{e:#}")))?;
     Ok(Json(json!({ "ok": true, "file": f.file, "size": f.size })))
+}
+
+#[derive(Deserialize)]
+struct DeleteReq {
+    /// The model's id (`ModelInfo::id`).
+    id: String,
+    /// One device, or every device that has it.
+    device: Option<String>,
+}
+
+/// Delete a model from one device or from all of them (admins): the file and the cached slices
+/// of it. Not while it is running. Devices older than 0.7.0 cannot be asked, and are listed.
+async fn delete_model(State(shared): State<Shared>, Json(req): Json<DeleteReq>) -> ApiResult {
+    let (local, deleted, skipped, name) = {
+        let sw = shared.lock().unwrap();
+        let running = sw.pipeline.as_ref().is_some_and(|p| p.model_id.as_deref() == Some(req.id.as_str()) || sw.nodes.values().any(|e| e.models.iter().any(|m| m.id == req.id && m.name == p.model)));
+        if running {
+            return Err((StatusCode::CONFLICT, "that model is running: stop it first".into()));
+        }
+        let holders: Vec<(NodeId, String)> = sw.nodes.iter().filter_map(|(id, e)| e.models.iter().find(|m| m.id == req.id).map(|m| (id.clone(), m.name.clone()))).filter(|(id, _)| req.device.as_deref().is_none_or(|d| d == id.0)).collect();
+        if holders.is_empty() {
+            return Err((StatusCode::NOT_FOUND, "no device has that model".into()));
+        }
+        let name = holders[0].1.clone();
+        // One device: that one. Everywhere: every device, so the cached slices other devices
+        // fetched of it go too (that is where much of the space is).
+        let targets: Vec<(NodeId, String)> = match &req.device {
+            Some(_) => holders,
+            None => sw.nodes.keys().map(|id| (id.clone(), name.clone())).collect(),
+        };
+        let (mut local, mut deleted, mut skipped) = (None, Vec::new(), Vec::new());
+        for (id, file) in targets {
+            if id == sw.coordinator {
+                local = Some(file);
+                deleted.push(id.0.clone());
+                continue;
+            }
+            let e = &sw.nodes[&id];
+            let new_enough = e.build.as_ref().is_some_and(|b| !crate::update::is_newer("0.7.0", &b.version));
+            match (&e.tx, new_enough) {
+                (Some(tx), true) => {
+                    let _ = tx.send(Message::DeleteModel { name: file, model_id: req.id.clone() });
+                    deleted.push(id.0.clone());
+                }
+                (None, _) if e.models.iter().any(|m| m.id == req.id) => skipped.push(json!({ "device": id.0, "why": "offline" })),
+                (Some(_), false) if e.models.iter().any(|m| m.id == req.id) => skipped.push(json!({ "device": id.0, "why": "needs Clamor 0.7.0 or later" })),
+                _ => {}
+            }
+        }
+        (local, deleted, skipped, name)
+    };
+    if let Some(file) = local {
+        let (dir, cache, coordinator) = {
+            let sw = shared.lock().unwrap();
+            (sw.engine.models_dir.clone(), sw.engine.cache_dir.clone(), sw.coordinator.clone())
+        };
+        let id = req.id.clone();
+        let (dir2, freed) = tokio::task::spawn_blocking(move || crate::models::delete_local(&dir, &cache, &file, &id).map(|b| (dir, b)))
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
+        println!("deleted {name} from this device ({:.1} GB freed)", freed as f64 / 1e9);
+        let found = tokio::task::spawn_blocking(move || crate::share::scan(&dir2)).await.unwrap_or_default();
+        if let Some(e) = shared.lock().unwrap().nodes.get_mut(&coordinator) {
+            e.models = found;
+        }
+    }
+    Ok(Json(json!({ "name": name, "deleted_on": deleted, "skipped": skipped })))
 }
 
 #[derive(Deserialize)]

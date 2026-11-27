@@ -591,6 +591,12 @@ pub enum Message {
     RingLeave {
         ring: u32,
     },
+    /// Coordinator -> device: delete this model file (if its id matches) and the cached slices of
+    /// it. Sent only to devices of Clamor 0.7.0 or later. The device sends a new `Inventory`.
+    DeleteModel {
+        name: String,
+        model_id: String,
+    },
 }
 
 // ---------------------------------------------------------------- framing

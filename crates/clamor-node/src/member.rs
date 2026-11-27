@@ -440,6 +440,17 @@ async fn session(addr: &str, creds: &Credentials, allowed: &share::AllowedKeys, 
                             h.abort();
                         }
                     }
+                    Message::DeleteModel { name, model_id } => {
+                        let (dir, cache) = (engine.models_dir.clone(), engine.cache_dir.clone());
+                        let r = tokio::task::spawn_blocking(move || crate::models::delete_local(&dir, &cache, &name, &model_id).map(|b| (name, b))).await;
+                        match r {
+                            Ok(Ok((name, freed))) => println!("deleted {name} from this device ({:.1} GB freed)", freed as f64 / 1e9),
+                            Ok(Err(e)) => eprintln!("could not delete the model: {e:#}"),
+                            Err(e) => eprintln!("could not delete the model: {e}"),
+                        }
+                        models = scan(engine.models_dir.clone()).await;
+                        write_msg(&mut wr, &Message::Inventory { models: models.clone() }).await?;
+                    }
                     Message::PrivateAssign { ring, model, model_id, source, epoch, session, n_ctx, act_dtype, sampling, stage_count, head_layers, tail_layers, head_port, tail_port, head_downstream, head_downstream_tls, tail_upstream_tls } => {
                         println!("setting up private chats: loading this device's ends of {model}");
                         {

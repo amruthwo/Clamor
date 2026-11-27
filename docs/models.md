@@ -29,6 +29,18 @@ releases): a changed or broken file is refused.
 You can still add any `.gguf` file yourself: put it in the models folder of any device
 (desktop app: tray menu, **Open models folder**).
 
+## Managing models
+
+**Models → On the swarm's devices** lists every model file in the swarm. Tap one to see which
+devices hold it, start it, or delete it (admins):
+
+- **Delete** next to a device removes the file from that device only (other copies stay).
+- **Delete from all devices** removes the file everywhere, and also the parts of it that other
+  devices cached while running it, so the disk space really comes back.
+
+A model that is running cannot be deleted: stop it first. Devices older than Clamor 0.7.0 cannot
+be asked to delete, and are listed when that happens.
+
 ## What Clamor runs today
 
 Clamor's engine runs the **Llama** and **Qwen2** families (Llama 3.x, Qwen2.5, SmolLM2 and

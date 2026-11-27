@@ -45,7 +45,7 @@ jobs:
         with: { targets: "${{ matrix.target }}" }
       - name: Vulkan SDK (Linux)
         if: matrix.variant == 'vulkan'
-        run: sudo apt-get update && sudo apt-get install -y libvulkan-dev glslc spirv-headers
+        run: sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/microsoft-prod.sources; sudo apt-get update && sudo apt-get install -y libvulkan-dev glslc spirv-headers
       - name: Android NDK
         if: matrix.android
         id: ndk

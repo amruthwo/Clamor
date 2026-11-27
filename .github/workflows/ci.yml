@@ -60,7 +60,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update && sudo apt-get install -y libvulkan-dev glslc spirv-headers
+      - run: sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/microsoft-prod.sources; sudo apt-get update && sudo apt-get install -y libvulkan-dev glslc spirv-headers
       # -vv streams the build script output, so the log shows CMake progress ("[ 45%] Building ...")
       # instead of sitting on the last "Compiling" line while ggml builds.
       - run: cargo build -vv -p clamor-engine-ggml --release --features vulkan

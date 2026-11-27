@@ -41,6 +41,8 @@ jobs:
       - name: System libraries (Linux)
         if: runner.os == 'Linux'
         run: |
+          # GitHub's runners list Microsoft's package server, which now refuses requests (403); we use nothing from it.
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/microsoft-prod.sources
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf \
             libvulkan-dev glslc spirv-headers flatpak

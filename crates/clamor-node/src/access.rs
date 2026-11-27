@@ -57,7 +57,10 @@ pub fn identify(sw: &Swarm, peer: SocketAddr, via: Via, method: &Method, path_q:
             return crate::auth::verify_share_request(h, &signed, |k| profile.approved.iter().any(|d| d.key == k))
                 .ok()
                 .and_then(|key| {
-                    let device = profile.approved.iter().find(|d| d.key == key).map(|d| d.name.clone());
+                    // The device in the roster with this key (connected first): its current id,
+                    // which can differ from the name it was first approved under.
+                    let in_roster = sw.nodes.iter().filter(|(_, e)| e.key.as_deref() == Some(key.as_str())).max_by_key(|(_, e)| e.tx.is_some()).map(|(id, _)| id.0.clone());
+                    let device = in_roster.or_else(|| profile.approved.iter().find(|d| d.key == key).map(|d| d.name.clone()));
                     profile.person_of_key(&key).map(|p| (p.id.clone(), device))
                 })
                 .and_then(|(id, device)| as_caller(&id, "device", device));

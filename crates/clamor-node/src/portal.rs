@@ -35,6 +35,7 @@ pub async fn serve(bind: String, tls_bind: String, shared: Shared) -> anyhow::Re
         .route("/api/muster", post(muster))
         .route("/api/nodes/{id}/drain", post(drain))
         .route("/api/nodes/{id}/remove", post(remove))
+        .route("/api/me/leave", post(leave))
         .route("/api/invite", post(invite))
         .route("/api/nodes/{id}/policy", post(set_policy))
         .route("/api/nodes/{id}/name", post(set_device_name))
@@ -156,6 +157,8 @@ struct RosterRow {
     person: Option<(String, String)>,
     /// The name someone gave it (shown instead of the id).
     label: Option<String>,
+    /// When it was first approved into the swarm (none for the coordinator).
+    joined_unix: Option<u64>,
 }
 
 fn row(entry: &NodeEntry, id: &NodeId, coordinator: &NodeId, sw: &crate::coordinator::Swarm) -> RosterRow {
@@ -177,6 +180,7 @@ fn row(entry: &NodeEntry, id: &NodeId, coordinator: &NodeId, sw: &crate::coordin
         report: entry.report.clone(),
         person,
         label: sw.auth.profile.device_names.get(&id.0).cloned(),
+        joined_unix: entry.key.as_deref().and_then(|k| sw.auth.profile.approved.iter().find(|d| d.key == k)).map(|d| d.approved_unix),
     }
 }
 
@@ -415,17 +419,39 @@ fn qr_svg(text: &str) -> Option<String> {
 async fn remove(State(shared): State<Shared>, Path(id): Path<String>) -> ApiResult {
     let id = NodeId(id);
     let mut sw = shared.lock().unwrap();
+    remove_device(&mut sw, id)
+}
+
+/// A device leaving the swarm for good, from its own app (the request is signed with its key):
+/// as if an admin removed it. It finishes its work and leaves; its key is no longer approved.
+async fn leave(State(shared): State<Shared>, Extension(caller): Extension<Caller>) -> ApiResult {
+    let mut sw = shared.lock().unwrap();
+    let id = match (&caller.device, caller.how) {
+        (Some(d), "device") => NodeId(d.clone()),
+        _ => return Err((StatusCode::BAD_REQUEST, "only a device's own app can make it leave (the coordinator stops or deletes the swarm instead)".into())),
+    };
+    println!("{id} is leaving the swarm");
+    remove_device(&mut sw, id)
+}
+
+fn remove_device(sw: &mut crate::coordinator::Swarm, id: NodeId) -> ApiResult {
     if id == sw.coordinator {
         return Err((StatusCode::BAD_REQUEST, "the coordinator cannot remove itself".into()));
     }
     let entry = sw.nodes.get(&id).ok_or((StatusCode::NOT_FOUND, format!("unknown node {id}")))?;
     let (key, tx) = (entry.key.clone(), entry.tx.clone());
-    let revoked = key.as_deref().is_some_and(|k| sw.auth.revoke(k));
+    // An old entry of a device that is in the swarm under another name shares its key: forget
+    // the entry, but keep the key approved.
+    let shared_key = key.as_deref().is_some_and(|k| sw.nodes.iter().any(|(other, e)| *other != id && e.key.as_deref() == Some(k)));
+    let revoked = !shared_key && key.as_deref().is_some_and(|k| sw.auth.revoke(k));
     if let Some(tx) = tx {
         let _ = tx.send(Message::Drain { grace_secs: 30 });
     }
     sw.node_lost(&id, "removed from the swarm");
     sw.nodes.remove(&id);
+    if sw.auth.profile.device_names.remove(&id.0).is_some() {
+        sw.auth.save();
+    }
     sw.broadcast_approved();
     println!("{id} removed from the swarm{}", if revoked { "; its key is no longer approved" } else { "" });
     Ok(Json(json!({ "removed": id, "revoked": revoked })))

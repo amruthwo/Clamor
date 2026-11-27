@@ -38,8 +38,16 @@ Turn on **Start Clamor when I log in** to have it start with your computer, in t
 in **Settings → This app**).
 
 After that the app remembers what it does: next time it starts straight into the dashboard.
-**Settings → Change swarm** stops Clamor on this computer and goes back to the first screen (swarms you
-joined are remembered, so rejoining needs no passphrase).
+**Settings → Change or leave swarm** offers:
+
+- **Join or start another swarm:** Clamor stops here and goes back to the first screen; the swarm
+  is remembered, so rejoining needs no passphrase.
+- **Leave** (a device that joined): it tells the swarm, finishes its work, leaves and forgets the
+  swarm; coming back needs a new invitation.
+- **Delete** (the computer that runs the swarm): the swarm ends for everyone; its passphrase and
+  approvals are deleted.
+
+Either can also delete the model files this device downloaded for that swarm.
 
 ## Where things are
 

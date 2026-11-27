@@ -519,6 +519,19 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
             sw.next_generation += 1;
             let (swarm, coordinator) = (sw.name.clone(), sw.coordinator.clone());
             let previous = sw.nodes.remove(&id);
+            // The same device (its key) back under another name (a phone that used to report
+            // "localhost"): its old, offline entry goes, with its name and settings carried over.
+            let stale: Vec<NodeId> = sw.nodes.iter().filter(|(other, e)| **other != id && e.tx.is_none() && e.key.as_deref() == Some(device_key.as_str())).map(|(other, _)| other.clone()).collect();
+            let mut previous = previous;
+            for old in stale {
+                println!("{old} is back as {id}");
+                let e = sw.nodes.remove(&old);
+                previous = previous.or(e);
+                if let Some(label) = sw.auth.profile.device_names.remove(&old.0) {
+                    sw.auth.profile.device_names.entry(id.0.clone()).or_insert(label);
+                    sw.auth.save();
+                }
+            }
             let (policy, bench, link) = match previous {
                 Some(p) => (p.report.policy, p.report.bench, p.report.link),
                 None => (Policy::default_for(info.class), None, None),

@@ -303,6 +303,63 @@ async fn restart(shared: State<'_, Shared>) -> Result<(), String> {
 
 /// Stop taking part and forget the setup (the swarm itself is still remembered by clamor-node,
 /// so joining it again needs no passphrase).
+/// Ask this device's own dashboard (127.0.0.1:7421, which signs requests with the device's key)
+/// to POST `path` to the coordinator.
+fn post_local(path: &str) -> Result<String, String> {
+    use std::io::{Read, Write};
+    let mut s = std::net::TcpStream::connect_timeout(&"127.0.0.1:7421".parse().unwrap(), Duration::from_secs(5)).map_err(|e| format!("this device's Clamor is not running ({e})"))?;
+    s.set_read_timeout(Some(Duration::from_secs(20))).ok();
+    write!(s, "POST {path} HTTP/1.0\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\n\r\n").map_err(|e| e.to_string())?;
+    let mut resp = String::new();
+    s.read_to_string(&mut resp).map_err(|e| e.to_string())?;
+    let (head, body) = resp.split_once("\r\n\r\n").unwrap_or((&resp, ""));
+    if head.split_whitespace().nth(1).is_some_and(|c| c.starts_with('2')) { Ok(body.to_string()) } else { Err(body.trim().to_string()) }
+}
+
+/// The arguments for a one-off command about this device's swarms (`leave`).
+fn swarm_cmd(mut args: Vec<String>) -> Vec<String> {
+    if let Some(d) = DATA_DIR.get() {
+        args.extend(["--config-dir".into(), app_dir().display().to_string(), "--cache-dir".into(), d.join("cache").display().to_string()]);
+    }
+    args
+}
+
+/// Leave the swarm for good (a member): the coordinator removes this device and no longer
+/// approves its key; this device forgets the swarm, and with `purge` its cached model parts.
+/// On the coordinator: delete the swarm (its passphrase and approvals), after stopping it.
+#[tauri::command]
+async fn leave_swarm(shared: State<'_, Shared>, purge: bool) -> Result<(), String> {
+    let shared = shared.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let s = load_setup();
+        let swarm = s.swarm.clone().ok_or("no swarm to leave")?;
+        let coordinator = s.mode.as_deref() == Some("coordinator");
+        if !coordinator {
+            // Tell the swarm first (gracefully: it finishes its work and leaves). If the
+            // coordinator cannot be reached, leave anyway: an admin can remove the device later.
+            if let Err(e) = post_local("/api/me/leave") {
+                eprintln!("could not tell the swarm: {e}");
+            }
+            let t0 = Instant::now();
+            while t0.elapsed() < Duration::from_secs(35) && shared.lock().unwrap().runner.as_mut().is_some_and(|r| r.exited().is_none()) {
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        }
+        stop_node(&shared);
+        let mut args = vec!["leave".to_string(), swarm];
+        if coordinator {
+            args.push("--delete-swarm".into());
+        }
+        if purge {
+            args.push("--purge".into());
+        }
+        crate::runner::run_once(&swarm_cmd(args))?;
+        save_setup(&Setup::default())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 async fn reset(shared: State<'_, Shared>) -> Result<(), String> {
     let shared = shared.inner().clone();
@@ -422,7 +479,7 @@ pub fn run() {
     let builder = builder
         .plugin(tauri_plugin_opener::init())
         .manage(shared.clone())
-        .invoke_handler(tauri::generate_handler![status, swarms, dashboard_url, start_swarm, join_swarm, restart, reset, autostart_enabled, set_autostart, update_check, update_install])
+        .invoke_handler(tauri::generate_handler![status, swarms, dashboard_url, start_swarm, join_swarm, restart, reset, autostart_enabled, set_autostart, update_check, update_install, leave_swarm])
         .setup(move |app| {
             #[cfg(mobile)]
             {

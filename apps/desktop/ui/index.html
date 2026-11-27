@@ -284,10 +284,28 @@ window.logSheet = () => {
   sheet(`<h2>Log</h2><pre class="log" id="log-pre" style="max-height:60vh">${esc(st.log.join('\n'))}</pre><div class="acts"><button class="btn text st" onclick="navigator.clipboard?.writeText($('log-pre').textContent)">Copy</button><button class="btn filled st" onclick="closeOverlay()">Close</button></div>`);
   logOpen = true; const p = $('log-pre'); p.scrollTop = p.scrollHeight;
 };
+// Change or leave: join/start another (this swarm is remembered), or leave it for good (a
+// member: the swarm removes this device), or delete it (the coordinator).
 window.changeSwarm = () => {
-  sheet(`<h2>Change swarm?</h2><p class="body-l muted" style="margin:0">Clamor stops on this ${mobile ? 'phone' : 'computer'} and you can join or start another swarm. This one is remembered: you can rejoin it later without the passphrase.</p>
-    <div class="acts"><button class="btn text st" onclick="closeOverlay()">Cancel</button><button class="btn filled st" id="cs-go">Change swarm</button></div>`);
-  $('cs-go').onclick = async () => { closeOverlay(); await invoke('reset'); dashUrl = null; $('dash').removeAttribute('src'); step = 'welcome'; await refresh(); };
+  const coord = st.setup.mode === 'coordinator', name = esc(st.setup.swarm || 'this swarm'), dev = mobile ? 'phone' : 'computer';
+  sheet(`<h2>Change or leave ${name}</h2>
+    <div class="list">
+      <button class="item st" id="cs-switch">${ic('swap_horiz')}<div class="text"><span class="h">Join or start another swarm</span><span class="s">Clamor stops here for now. ${name} is remembered: you can rejoin it later without the passphrase.</span></div></button>
+      ${coord
+        ? `<button class="item st" id="cs-leave" style="color:var(--error)">${ic('delete')}<div class="text"><span class="h">Delete ${name}</span><span class="s">This ${dev} runs it: deleting it ends the swarm for everyone. Its passphrase and approvals are gone, and every device has to join a new swarm.</span></div></button>`
+        : `<button class="item st" id="cs-leave" style="color:var(--error)">${ic('logout')}<div class="text"><span class="h">Leave ${name}</span><span class="s">This ${dev} finishes its work, leaves, and forgets the swarm. Coming back needs a new invitation.</span></div></button>`}
+    </div>
+    <label class="item" style="border-radius:16px;background:var(--surface-container)"><div class="text"><span class="h">Also delete its model files</span><span class="s">The parts of models this ${dev} downloaded for ${name}</span></div><span class="switch"><input type="checkbox" id="cs-purge"></span></label>
+    <div class="err" id="cs-err"></div>
+    <div class="acts"><button class="btn text st" onclick="closeOverlay()">Cancel</button></div>`);
+  $('cs-switch').onclick = async () => { closeOverlay(); await invoke('reset'); dashUrl = null; $('dash').removeAttribute('src'); step = 'welcome'; await refresh(); };
+  $('cs-leave').onclick = async () => {
+    const b = $('cs-leave');
+    if (!b.dataset.sure) { b.dataset.sure = '1'; b.querySelector('.h').textContent = coord ? `Press again to delete ${st.setup.swarm || 'it'} for good` : 'Press again to leave for good'; return; }
+    b.disabled = true; b.querySelector('.h').textContent = coord ? 'Deleting…' : 'Leaving…';
+    try { await invoke('leave_swarm', { purge: $('cs-purge').checked }); closeOverlay(); dashUrl = null; $('dash').removeAttribute('src'); step = 'welcome'; await refresh(); }
+    catch (e) { $('cs-err').textContent = String(e); b.disabled = false; }
+  };
 };
 
 // The dashboard (in the frame) asks for app things over postMessage.

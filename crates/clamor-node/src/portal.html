@@ -100,6 +100,13 @@ a { color:var(--primary); }
 .chips { display:flex; gap:8px; flex-wrap:wrap; }
 .chip[aria-pressed="true"] { background:var(--secondary-container); color:var(--on-secondary-container); border-color:transparent; }
 .chip[aria-pressed="true"]::before { content:""; width:16px; height:16px; margin-left:-6px; background:currentColor; -webkit-mask:url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 -960 960 960"><path d="m382-354 339-339q12-12 28-12t28 12q12 12 12 28.5T777-636L410-268q-12 12-28 12t-28-12L182-440q-12-12-11.5-28.5T183-497q12-12 28.5-12t28.5 12l142 143Z"/></svg>') center/contain no-repeat; mask:url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 -960 960 960"><path d="m382-354 339-339q12-12 28-12t28 12q12 12 12 28.5T777-636L410-268q-12 12-28 12t-28-12L182-440q-12-12-11.5-28.5T183-497q12-12 28.5-12t28.5 12l142 143Z"/></svg>') center/contain no-repeat; }
+.dev-cards { display:grid; grid-template-columns:repeat(auto-fill, minmax(260px, 1fr)); gap:12px; margin-top:12px; }
+.dev-card { background:var(--surface-container-low); border-radius:16px; padding:16px; display:grid; gap:12px; text-align:left; border:0; width:100%; color:inherit; }
+.dev-card .head { display:flex; gap:12px; align-items:center; min-width:0; }
+.dev-card .head .name { flex:1; min-width:0; } .dev-card .head .name span { display:block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; } .dev-card .head .name b { display:block; font-size:16px; font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.dev-card .metrics { display:grid; grid-template-columns:1fr 1fr; gap:10px 16px; }
+.dev-card .metric span { display:block; font-size:12px; color:var(--on-surface-variant); } .dev-card .metric b { font-weight:500; font-variant-numeric:tabular-nums; }
+.dev-card .foot { font-size:12px; color:var(--on-surface-variant); }
 .pbar { height:4px; border-radius:2px; background:var(--surface-container-highest); overflow:hidden; margin-top:6px; }
 .pbar i { display:block; height:100%; background:var(--primary); transition:width .5s; }
 .item.dim .h, .item.dim .tile-icon { opacity:.6; }
@@ -430,7 +437,9 @@ pre.log { margin:0; padding:12px 14px; border-radius:12px; background:var(--surf
             <div id="warnings"></div>
             <div class="row"><button class="btn tonal st" id="muster"><svg class="i"><use href="#i-speed"/></svg>Re-run the muster</button><span class="body-s muted">Measures every device and link again.</span></div>
           </div>
-          <div class="table-wrap" style="margin-top:12px"><table class="data"><thead><tr><th>Device</th><th>State</th><th>Type</th><th>Clamor</th><th class="num">RAM free</th><th class="num">Mem BW</th><th class="num">GFLOP/s</th><th class="num">RTT</th><th class="num">Link</th></tr></thead><tbody id="measure"></tbody></table></div>
+          <div class="row" style="margin-top:16px;gap:8px"><span class="body-s muted">Sort by</span><div class="chips" id="dev-sort">
+            <button type="button" class="chip st" data-s="capable" aria-pressed="true">Most capable</button><button type="button" class="chip st" data-s="memory" aria-pressed="false">Memory</button><button type="button" class="chip st" data-s="type" aria-pressed="false">Type</button><button type="button" class="chip st" data-s="name" aria-pressed="false">Name</button><button type="button" class="chip st" data-s="joined" aria-pressed="false">Newest</button></div></div>
+          <div class="dev-cards" id="measure"></div>
         </div>
       </div></div>
     </section>
@@ -614,7 +623,7 @@ window.deviceSheet = id => {
   const n = nodes[id]; if (!n) return;
   const info = n.report.info, [label, tone, why] = devState(n), b = n.report.bench;
   const whose = n.person ? n.person[1] + (isMine(n) ? ' (you)' : '') : 'nobody yet';
-  const removable = me.role !== 'member' && !n.is_coordinator && n.state !== 'away';
+  const removable = me.role !== 'member' && !n.is_coordinator, away = n.state === 'away';
   const pausable = canEdit(n) && !n.is_coordinator && n.state !== 'away';
   const paused = n.report.policy.participation === 'paused';
   overlay(`<div class="row" style="padding:0 24px 12px;gap:16px;flex-wrap:nowrap"><div class="tile-icon big pri">${ic(devIcon(n), 's32')}</div><div style="flex:1;min-width:0"><div class="row" style="flex-wrap:nowrap;gap:4px"><div class="title-l" style="overflow:hidden;text-overflow:ellipsis">${esc(dn(n.id))}</div>${canEdit(n) ? `<button class="icon-btn st" title="Rename" onclick='renameSheet(${js(n.id)})'>${ic('edit', 's18')}</button>` : ''}</div><div class="body-s muted">${esc(whose)} · ${esc(info.class)} · ${esc(info.os)}/${esc(info.arch)}${n.is_coordinator ? ' · coordinator' : ''}${n.label ? ' · id ' + esc(n.id) : ''}</div></div><span class="badge ${tone}">${label}</span></div>
@@ -626,7 +635,7 @@ window.deviceSheet = id => {
       <div class="list">
         ${pausable ? `<button class="item st" onclick='closeOverlay();togglePause(${js(n.id)})'>${ic(paused ? 'play_circle' : 'pause_circle', 'lead-icon')}<div class="text"><span class="h">${paused ? 'Resume' : 'Pause'}</span><span class="s">${paused ? 'Let it help again' : 'The swarm carries on without it'}</span></div></button>` : ''}
         <div class="item">${ic('info', 'lead-icon')}<div class="text"><span class="h">Clamor ${n.build ? esc(n.build.version) : '(older)'}${n.build && n.build.variant !== 'cpu' ? ' · ' + esc(n.build.variant) : ''}</span><span class="s">${n.update_available ? esc(n.update_available) + ' is available' : 'Up to date'}</span></div></div>
-        ${removable ? `<button class="item st danger" onclick='removeDevice(${js(n.id)})'>${ic('do_not_disturb_on', 'lead-icon')}<div class="text"><span class="h">Remove from swarm</span><span class="s" style="color:inherit;opacity:.8">It finishes its work and leaves</span></div></button>` : ''}
+        ${removable ? `<button class="item st danger" onclick='removeDevice(${js(n.id)}, ${away})'>${ic(away ? 'delete' : 'do_not_disturb_on', 'lead-icon')}<div class="text"><span class="h">${away ? 'Forget this device' : 'Remove from swarm'}</span><span class="s" style="color:inherit;opacity:.8">${away ? 'It is offline: it leaves the list. Coming back needs a new invitation' : 'It finishes its work, then leaves. Coming back needs a new invitation'}</span></div></button>` : ''}
       </div>
     </div>`);
   bindDeviceSettings(n, 'ds');
@@ -649,9 +658,9 @@ window.togglePause = id => {
   const n = nodes[id], p = n.report.policy, paused = p.participation === 'paused';
   act(() => api('/api/nodes/' + encodeURIComponent(id) + '/policy', 'POST', { ...p, participation: paused ? 'full' : 'paused' }), paused ? 'Resumed' : 'Paused');
 };
-window.removeDevice = async id => {
+window.removeDevice = async (id, away) => {
   closeOverlay();
-  if (await confirmDialog('Remove ' + dn(id) + '?', 'It finishes its current work and leaves the swarm. To come back it needs a new invitation.', 'Remove', true))
+  if (await confirmDialog((away ? 'Forget ' : 'Remove ') + dn(id) + '?', away ? 'It is offline. It leaves the list, and coming back needs a new invitation (unless it is in the swarm under another name).' : 'It finishes its current work and leaves the swarm. To come back it needs a new invitation.', away ? 'Forget' : 'Remove', true))
     act(() => api('/api/nodes/' + encodeURIComponent(id) + '/remove', 'POST'), 'Removing ' + dn(id));
 };
 
@@ -844,13 +853,40 @@ function renderCoord() {
     $('group-stats').innerHTML = [[s.cpu_threads, 'CPU threads'], [gib(s.ram_available_bytes), 'GB free RAM'], [s.mem_bw_sum_gbps.toFixed(0), 'GB/s memory']].map(([v, k]) => `<div class="stat"><b>${esc(v)}</b><span>${esc(k)}</span></div>`).join('');
     $('warnings').innerHTML = s.warnings.map(w => `<div class="banner warn" style="margin-top:4px">${ic('warning')}<div class="text">${esc(w.replace(/GiB/g, 'GB'))}</div></div>`).join('');
   }
-  $('measure').innerHTML = roster.nodes.map(n => {
-    const r = n.report, b = r.bench, l = r.link;
-    return `<tr><td>${esc(dn(n.id))}${n.is_coordinator ? ' <span class="muted">(coordinator)</span>' : ''}</td><td>${devState(n)[0]}</td><td>${esc(r.info.class)} · ${esc(r.info.os)}/${esc(r.info.arch)}</td><td>${n.build ? esc(n.build.version) + (n.build.variant !== 'cpu' ? ' · ' + esc(n.build.variant) : '') : 'older'}</td>
-      <td class="num">${gib(r.info.ram_available_bytes)} / ${gib(r.info.ram_total_bytes)} GB</td><td class="num">${b ? b.mem_bw_gbps.toFixed(1) + ' GB/s' : '–'}</td><td class="num">${b ? b.cpu_gflops_mt.toFixed(0) : '–'}</td>
-      <td class="num">${l ? l.rtt_ms_p50.toFixed(1) + ' ms' : (n.is_coordinator ? 'local' : '–')}</td><td class="num">${l && l.up_mbps ? Math.min(l.up_mbps, l.down_mbps).toFixed(0) + ' Mbit/s' : '–'}</td></tr>`;
+  renderDeviceCards();
+}
+// Diagnostics: one card per device, sortable (the table needed sideways scrolling everywhere).
+let devSort = 'capable';
+const mbit = v => v >= 1000 ? (v / 1000).toFixed(v >= 10000 ? 0 : 1) + ' Gbit/s' : v.toFixed(0) + ' Mbit/s';
+const ago = t => { const s = Math.max(0, Date.now() / 1000 - t); return s < 3600 ? 'just now' : s < 86400 ? Math.round(s / 3600) + ' h ago' : Math.round(s / 86400) + ' days ago'; };
+function renderDeviceCards() {
+  const bw = n => n.report.bench ? n.report.bench.mem_bw_gbps : 0;
+  const sorts = {
+    // Token generation is limited by memory speed, then by how much memory there is.
+    capable: (a, b) => (bw(b) - bw(a)) || (b.report.info.ram_total_bytes - a.report.info.ram_total_bytes),
+    memory: (a, b) => b.report.info.ram_available_bytes - a.report.info.ram_available_bytes,
+    type: (a, b) => String(a.report.info.class).localeCompare(String(b.report.info.class)) || dn(a.id).localeCompare(dn(b.id)),
+    name: (a, b) => dn(a.id).localeCompare(dn(b.id)),
+    joined: (a, b) => (b.joined_unix || 0) - (a.joined_unix || 0),
+  };
+  const list = [...roster.nodes].sort(sorts[devSort] || sorts.capable);
+  $('measure').innerHTML = list.map(n => {
+    const r = n.report, b = r.bench, l = r.link, [label, tone] = devState(n), info = r.info;
+    const used = 1 - info.ram_available_bytes / Math.max(info.ram_total_bytes, 1);
+    return `<button class="dev-card st" onclick='deviceSheet(${js(n.id)})'>
+      <div class="head"><div class="tile-icon${n.is_coordinator ? ' pri' : ''}">${ic(devIcon(n))}</div><div class="name"><b>${esc(dn(n.id))}</b><span class="body-s muted">${esc(info.class)} · ${esc(info.os)}/${esc(info.arch)}</span></div><span class="badge ${tone}">${label}</span></div>
+      <div class="metrics">
+        <div class="metric" style="grid-column:1 / -1"><span>Memory: ${gib(info.ram_available_bytes)} GB free of ${gib(info.ram_total_bytes)}</span><div class="meter" style="margin-top:4px"><i style="width:${(used * 100).toFixed(0)}%"></i></div></div>
+        <div class="metric"><span>Memory speed</span><b>${b ? b.mem_bw_gbps.toFixed(1) + ' GB/s' : '–'}</b></div>
+        <div class="metric"><span>Compute</span><b>${b ? b.cpu_gflops_mt.toFixed(0) + ' GFLOP/s' : '–'}</b></div>
+        <div class="metric"><span>Network</span><b>${n.is_coordinator ? 'this device' : l ? l.rtt_ms_p50.toFixed(1) + ' ms' + (l.up_mbps ? ' · ' + mbit(Math.min(l.up_mbps, l.down_mbps)) : '') : '–'}</b></div>
+        <div class="metric"><span>Clamor</span><b>${n.build ? esc(n.build.version) + (n.build.variant !== 'cpu' ? ' · ' + esc(n.build.variant) : '') : 'older'}</b></div>
+      </div>
+      <div class="foot">${n.is_coordinator ? 'Coordinates the swarm' : n.joined_unix ? 'Joined ' + ago(n.joined_unix) : ''}${n.person ? ' · ' + esc(n.person[1]) : ''}</div>
+    </button>`;
   }).join('');
 }
+document.querySelectorAll('#dev-sort .chip').forEach(c => c.onclick = () => { devSort = c.dataset.s; document.querySelectorAll('#dev-sort .chip').forEach(x => x.setAttribute('aria-pressed', x === c)); renderDeviceCards(); });
 window.decideJoin = (id, d) => act(() => api('/api/joins/' + encodeURIComponent(id) + '/' + d, 'POST'), d === 'approve' ? 'Approved: the device is joining' : 'Declined');
 window.personSheet = id => {
   const p = people.find(p => p.id === id); if (!p) return;
@@ -890,7 +926,7 @@ function renderSettings() {
     $('app-list').innerHTML = `<button class="item st" onclick="appAction('log')">${ic('terminal', 'lead-icon')}<div class="text"><span class="h">Log</span><span class="s">What Clamor on this device is doing</span></div>${ic('chevron_right', 'trail')}</button>
       ${appState.autostart !== undefined && !appState.mobile ? `<label class="item st">${ic('power_settings_new', 'lead-icon')}<div class="text"><span class="h">Start Clamor when I log in</span><span class="s">In the background, in the tray</span></div><span class="switch"><input type="checkbox" id="app-auto" ${appState.autostart ? 'checked' : ''}></span></label>` : ''}
       ${appState.passphrase ? `<button class="item st" onclick='snack(${js(appState.passphrase)})'>${ic('key', 'lead-icon')}<div class="text"><span class="h">Swarm passphrase</span><span class="s">Tap to show</span></div>${ic('visibility', 'trail')}</button>` : ''}
-      <button class="item st" onclick="appAction('change-swarm')">${ic('swap_horiz', 'lead-icon')}<div class="text"><span class="h">Change swarm</span><span class="s">Leave this one (it is remembered) and join or start another</span></div>${ic('chevron_right', 'trail')}</button>`;
+      <button class="item st" onclick="appAction('change-swarm')">${ic('swap_horiz', 'lead-icon')}<div class="text"><span class="h">Change or leave swarm</span><span class="s">Join or start another, or leave this one for good</span></div>${ic('chevron_right', 'trail')}</button>`;
     const a = $('app-auto'); if (a) a.onchange = () => appAction('autostart', a.checked);
   }
 }

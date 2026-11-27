@@ -138,3 +138,10 @@ pub fn app_update(args: &[&str]) -> Result<Value, String> {
     }
     serde_json::from_slice(&out.stdout).map_err(|e| format!("{e}: {}", String::from_utf8_lossy(&out.stderr)))
 }
+
+/// Run a one-off clamor-node command (`leave`, ...) and wait for it; what it printed.
+pub fn run_once(args: &[String]) -> Result<String, String> {
+    let out = node_cmd()?.args(args).output().map_err(|e| e.to_string())?;
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    if out.status.success() { Ok(text) } else { Err(text.trim().trim_start_matches("Error: ").to_string()) }
+}

@@ -104,3 +104,8 @@ impl Runner {
 pub fn swarms_json(scan: bool, config_dir: &Path) -> Result<Value, String> {
     clamor_node::swarms_json(config_dir, scan).map_err(|e| format!("{e:#}"))
 }
+
+/// Run a one-off clamor-node command (`leave`, ...) in this process (the node is stopped).
+pub fn run_once(args: &[String]) -> Result<String, String> {
+    clamor_node::run_args(args.to_vec()).map(|_| String::new()).map_err(|e| format!("{e:#}"))
+}

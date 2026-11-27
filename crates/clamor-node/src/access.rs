@@ -91,6 +91,8 @@ pub fn required(method: &Method, path: &str) -> Option<Role> {
         | ("GET", ["api", "joins"])
         | ("POST", ["api", "joins", _, _])
         | ("POST", ["api", "pipeline"])
+        | ("POST", ["api", "models", "download"])
+        | ("POST", ["api", "models", "cancel"])
         | ("DELETE", ["api", "pipeline"]) => Some(Role::Admin),
         _ => Some(Role::Member),
     }

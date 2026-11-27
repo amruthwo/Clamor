@@ -4,10 +4,10 @@ name: desktop
 # Android APK (clamor-node runs inside it), signed with the Clamor Android key when the
 # ANDROID_KEYSTORE_* secrets are set.
 #  - Pull requests that touch the app build everything (artifacts only).
-#  - A tag vX.Y.Z also uploads the installers to that release (the release workflow creates it).
+#  - Releases call this from release.yml, which lists every installer in the signed manifest
+#    (each file comes with a .json description) and uploads them.
 on:
-  push:
-    tags: ["v*"]
+  workflow_call:
   workflow_dispatch:
   pull_request:
     paths: ["apps/desktop/**", ".github/workflows/desktop.yml"]
@@ -71,19 +71,12 @@ jobs:
           find apps/desktop/target/${{ matrix.target }}/release/bundle -maxdepth 2 -type f \
             \( -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' -o -name '*.dmg' -o -name '*-setup.exe' \) -exec cp {} out/ \;
           cp apps/desktop/flatpak/*.flatpak out/ 2>/dev/null || true
+          scripts/describe-installers.sh out "${{ matrix.target }}" "${{ matrix.cpu }}"
           ls -l out
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-${{ matrix.target }}
           path: out/*
-      - name: Attach to the release
-        if: startsWith(github.ref, 'refs/tags/v')
-        shell: bash
-        env: { GH_TOKEN: "${{ github.token }}" }
-        run: |
-          # The release workflow creates the (draft) release; wait for it.
-          for i in $(seq 1 60); do gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 && break; sleep 30; done
-          gh release upload "$GITHUB_REF_NAME" out/* --clobber
 
   android:
     name: android (apk)
@@ -157,15 +150,10 @@ jobs:
             "$bt/apksigner" sign --ks test.jks --ks-key-alias clamor --ks-pass pass:testtest --out "out/Clamor-$version-android-arm64-test.apk" aligned.apk
           fi
           "$bt/apksigner" verify --print-certs out/*.apk | head -3
+          rm -f out/*.idsig
+          scripts/describe-installers.sh out aarch64-linux-android "$CLAMOR_GGML_CPU"
           ls -l out
       - uses: actions/upload-artifact@v4
         with:
           name: android-arm64
-          path: out/*.apk
-      - name: Attach to the release
-        if: startsWith(github.ref, 'refs/tags/v')
-        shell: bash
-        env: { GH_TOKEN: "${{ github.token }}" }
-        run: |
-          for i in $(seq 1 60); do gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 && break; sleep 30; done
-          gh release upload "$GITHUB_REF_NAME" out/*.apk --clobber
+          path: out/*

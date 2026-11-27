@@ -25,6 +25,7 @@ use tauri::{AppHandle, Manager, State};
 #[cfg(not(target_os = "android"))]
 #[path = "runner_process.rs"]
 mod runner;
+mod updater;
 #[cfg(target_os = "android")]
 #[path = "runner_embedded.rs"]
 mod runner;
@@ -313,6 +314,45 @@ async fn reset(shared: State<'_, Shared>) -> Result<(), String> {
     .map_err(|e| e.to_string())?
 }
 
+/// Is there a newer version of this app (for how it is installed here)?
+#[tauri::command]
+async fn update_check() -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(|| updater::check(env!("CARGO_PKG_VERSION"))).await.map_err(|e| e.to_string())?
+}
+
+/// Download, verify and install the newer version (only ever on the person's request).
+/// `{"then": "restart" | "quit" | "open", "file", "message"}`: the window does the rest.
+#[tauri::command]
+async fn update_install(app: AppHandle, shared: State<'_, Shared>) -> Result<Value, String> {
+    let dir = app.path().app_cache_dir().map_err(|e| e.to_string())?.join("updates");
+    let after = tauri::async_runtime::spawn_blocking(move || updater::install(env!("CARGO_PKG_VERSION"), &dir)).await.map_err(|e| e.to_string())??;
+    Ok(match after {
+        updater::After::Restart | updater::After::Quit => {
+            let restart = matches!(after, updater::After::Restart);
+            // Leave the swarm gracefully before the new version takes over.
+            stop_node(&shared);
+            if restart {
+                updater::relaunch();
+            }
+            let a = app.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                a.exit(0);
+            });
+            serde_json::json!({ "then": if restart { "restart" } else { "quit" } })
+        }
+        updater::After::Open { file, message } => {
+            #[cfg(desktop)]
+            {
+                use tauri_plugin_opener::OpenerExt;
+                app.opener().open_path(file.display().to_string(), None::<&str>).map_err(|e| format!("could not open {}: {e}", file.display()))?;
+            }
+            // On Android the window hands the file to the installer (MainActivity's bridge).
+            serde_json::json!({ "then": "open", "file": file, "message": message })
+        }
+    })
+}
+
 #[tauri::command]
 fn autostart_enabled(app: AppHandle) -> bool {
     #[cfg(desktop)]
@@ -382,7 +422,7 @@ pub fn run() {
     let builder = builder
         .plugin(tauri_plugin_opener::init())
         .manage(shared.clone())
-        .invoke_handler(tauri::generate_handler![status, swarms, dashboard_url, start_swarm, join_swarm, restart, reset, autostart_enabled, set_autostart])
+        .invoke_handler(tauri::generate_handler![status, swarms, dashboard_url, start_swarm, join_swarm, restart, reset, autostart_enabled, set_autostart, update_check, update_install])
         .setup(move |app| {
             #[cfg(mobile)]
             {
@@ -392,6 +432,8 @@ pub fn run() {
                 // The app's service keeps the battery state here (apps cannot read it the Linux
                 // way on Android); clamor-node pauses a phone on battery unless told otherwise.
                 std::env::set_var("CLAMOR_POWER_FILE", dir.join("power.txt"));
+                // The app updates clamor-node (built into it) together with itself.
+                std::env::set_var("CLAMOR_APP_MANAGED", "1");
                 let _ = DATA_DIR.set(dir);
             }
             #[cfg(desktop)]

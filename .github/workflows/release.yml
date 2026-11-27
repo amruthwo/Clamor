@@ -9,7 +9,7 @@ on:
     tags: ["v*"]
   workflow_dispatch:
   pull_request:
-    paths: [".github/workflows/release.yml", "scripts/package-release.sh", "crates/clamor-node/build.rs", "crates/clamor-engine-ggml/build.rs", "crates/clamor-node/src/update.rs"]
+    paths: [".github/workflows/release.yml", "scripts/package-release.sh", "scripts/describe-installers.sh", "crates/clamor-node/build.rs", "crates/clamor-engine-ggml/build.rs", "crates/clamor-node/src/update.rs"]
 
 permissions:
   contents: write
@@ -80,11 +80,17 @@ jobs:
           name: clamor-${{ matrix.target }}-${{ matrix.variant }}
           path: dist/*
 
+  # The apps' installers (desktop and Android), built by desktop.yml.
+  apps:
+    uses: ./.github/workflows/desktop.yml
+    secrets: inherit
+
   release:
     # Runs on every trigger, so the manifest and signing are tested before a real release;
-    # only a tag creates the draft release.
+    # only a tag creates the draft release. The manifest lists the command-line builds and every
+    # app installer, so both the nodes and the apps can update from it.
     name: manifest, signature, draft release
-    needs: build
+    needs: [build, apps]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -99,7 +105,7 @@ jobs:
         run: |
           v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           jq -s --arg v "$v" --arg c "$GITHUB_SHA" '{version: $v, commit: $c, assets: .}' dist/*.json > dist/manifest.json
-          rm dist/clamor-*.json
+          find dist -name '*.json' ! -name manifest.json -delete
           cat dist/manifest.json
       - name: Sign the manifest
         # Nodes install only builds listed in a manifest signed by this key (see
@@ -117,7 +123,7 @@ jobs:
           have=$(openssl pkey -pubin -in pub.pem -outform DER | tail -c 32 | od -An -tx1 | tr -d ' \n')
           want=$(sed -n '/RELEASE_PUBKEY: \[u8; 32\]/,/];/p' crates/clamor-node/src/update.rs | grep -o '0x[0-9a-f][0-9a-f]' | sed 's/0x//' | tr -d '\n')
           [ "$have" = "$want" ] || { echo "::error::signing key ($have) does not match RELEASE_PUBKEY in update.rs ($want)"; exit 1; }
-          (cd dist && sha256sum clamor-* manifest.json manifest.json.sig > SHA256SUMS)
+          (cd dist && sha256sum $(ls | grep -v SHA256SUMS) > SHA256SUMS)
       - name: Create draft release
         if: startsWith(github.ref, 'refs/tags/v')
         env: { GH_TOKEN: "${{ github.token }}" }

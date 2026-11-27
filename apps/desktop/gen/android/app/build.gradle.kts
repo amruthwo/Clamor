@@ -40,8 +40,12 @@ android {
             }
         }
         getByName("release") {
+            // No R8 shrinking: it stripped classes Google's code scanner finds by reflection (the
+            // app crashed on "Scan a QR code"), and the rules here lack Android's defaults (@Keep,
+            // @JavascriptInterface). The APK is mostly the native engine, so it grows little, and
+            // crash traces stay readable.
             optimization {
-               enable = true
+               enable = false
             }
             proguardFiles(
                 *fileTree(".") {

@@ -9,6 +9,9 @@ import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import androidx.activity.enableEdgeToEdge
 import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.core.content.FileProvider
 import java.io.File
 
@@ -16,6 +19,7 @@ class MainActivity : TauriActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
+    keepClearOfSystemBars()
     // Asked together on first start:
     //  - notifications (Android 13+): the notification that keeps Clamor in the swarm in the background;
     //  - local network (Android 17+, shown as "Nearby devices"): finding and talking to the swarm.
@@ -25,6 +29,27 @@ class MainActivity : TauriActivity() {
     val missing = wanted.filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
     if (missing.isNotEmpty()) requestPermissions(missing.toTypedArray(), 1)
     ContextCompat.startForegroundService(this, Intent(this, ClamorService::class.java))
+  }
+
+  /** Android 15+ draws apps under the status and navigation bars. Clamor's pages are web pages
+   *  (and the dashboard sits in a frame, where CSS safe-area insets do not reach), so leave
+   *  room natively: pad the content by the bars (and a camera cutout), in the page's colour. */
+  private fun keepClearOfSystemBars() {
+    val content = findViewById<android.view.View>(android.R.id.content)
+    val night = (resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK) == android.content.res.Configuration.UI_MODE_NIGHT_YES
+    // The page background (Material 3 surface), so the strips look like part of the app.
+    content.setBackgroundColor(if (night) 0xFF111318.toInt() else 0xFFF9F9FC.toInt())
+    WindowCompat.getInsetsController(window, content).apply {
+      isAppearanceLightStatusBars = !night
+      isAppearanceLightNavigationBars = !night
+    }
+    ViewCompat.setOnApplyWindowInsetsListener(content) { v, insets ->
+      val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
+      // The keyboard: shrink the page above it, so the message box stays visible.
+      val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
+      v.setPadding(bars.left, bars.top, bars.right, maxOf(bars.bottom, ime.bottom))
+      WindowInsetsCompat.CONSUMED
+    }
   }
 
   override fun onWebViewCreate(webView: WebView) {

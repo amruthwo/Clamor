@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Clamor</title>
 <style>
   :root { color-scheme: light dark; --bg:#f6f7f9; --card:#fff; --ink:#15181d; --mute:#667085; --line:#e4e7ec; --accent:#2f6fed; --ok:#12805c; --warn:#b54708; --bad:#b42318; }
@@ -18,7 +18,7 @@
   [hidden] { display:none !important; }
 
   /* First run */
-  .setup { max-width:880px; width:100%; margin:0 auto; padding:28px 16px; overflow:auto; }
+  .setup { max-width:880px; width:100%; margin:0 auto; padding:calc(28px + env(safe-area-inset-top)) 16px calc(28px + env(safe-area-inset-bottom)); overflow:auto; }
   .setup h1 { margin:0 0 4px; font-size:26px; }
   .cards { display:grid; grid-template-columns:repeat(auto-fit, minmax(300px, 1fr)); gap:16px; margin-top:20px; }
   .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px; display:grid; gap:12px; align-content:start; }
@@ -30,7 +30,7 @@
   .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
 
   /* Running */
-  .bar { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:8px 14px; background:var(--card); border-bottom:1px solid var(--line); }
+  .bar { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:calc(8px + env(safe-area-inset-top)) 14px 8px; background:var(--card); border-bottom:1px solid var(--line); }
   .bar .name { font-weight:600; }
   .bar .spacer { flex:1; }
   .dot { display:inline-block; width:9px; height:9px; border-radius:50%; background:var(--mute); }
@@ -66,7 +66,7 @@
       <button class="primary" id="join-go">Join</button>
     </form>
   </div>
-  <p class="row mute"><label class="row" style="display:flex"><input type="checkbox" id="autostart" style="width:auto"> Start Clamor when I log in</label></p>
+  <p class="row mute" id="autostart-row"><label class="row" style="display:flex"><input type="checkbox" id="autostart" style="width:auto"> Start Clamor when I log in</label></p>
   <p class="err" id="no-node" hidden>clamor-node was not found next to this app. Reinstall Clamor.</p>
   <details id="setup-log-box" hidden><summary>Show log</summary><pre class="log" id="setup-log"></pre></details>
 </section>
@@ -160,6 +160,9 @@ $('leave').onclick = async () => {
   await invoke('reset'); dashUrl = null; $('dash').removeAttribute('src'); await refresh(); scan();
 };
 $('autostart').onchange = e => invoke('set_autostart', { on: e.target.checked }).catch(err => { $('setup-err').textContent = String(err); });
+
+// Phones have no "start when I log in": the app's service keeps Clamor in the swarm.
+if (/Android/i.test(navigator.userAgent)) $('autostart-row').hidden = true;
 
 (async () => {
   await refresh();

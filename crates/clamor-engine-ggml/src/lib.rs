@@ -24,7 +24,21 @@ pub use executor::{ExecutorOptions, GgmlExecutor, PartExecutor, Sampling, Shared
 pub use gguf::{GgufFile, GgufTensorInfo, SlicePlan};
 pub use llama::{plan_stage_slice, stage_tensors, stage_tensors_with, DEFAULT_PREFILL_CHUNK, LlamaHparams, LlamaInput, LlamaOutput, LlamaStage, Logits, StageOptions};
 pub use smoke::{matmul_check, matmul_gflops, MatmulReport};
-pub use tokenizer::{token_type, StreamDecoder, Tokenizer};
+pub use tokenizer::{supports_pre, token_type, StreamDecoder, Tokenizer};
+
+/// Model architectures the engine runs (`general.architecture`).
+pub const ARCHITECTURES: &[&str] = &["llama", "qwen2"];
+
+/// Can the engine run a model with this architecture and pre-tokenizer? Why not, if not.
+pub fn supports_model(arch: &str, tokenizer_pre: &str) -> std::result::Result<(), String> {
+    if !ARCHITECTURES.contains(&arch) {
+        return Err(format!("the {arch} architecture is not supported yet"));
+    }
+    if !supports_pre(tokenizer_pre) {
+        return Err(format!("its tokenizer ({tokenizer_pre}) is not supported yet"));
+    }
+    Ok(())
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

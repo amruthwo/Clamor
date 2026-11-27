@@ -49,7 +49,7 @@ impl LlamaHparams {
         let rope_neox = match arch.as_str() {
             "llama" => false,
             "qwen2" => true,
-            _ => return Err(Error::Gguf(format!("unsupported architecture {arch:?} (supported: llama, qwen2)"))),
+            _ => return Err(Error::Gguf(format!("unsupported architecture {arch:?} (supported: {})", crate::ARCHITECTURES.join(", ")))),
         };
         let key = |k: &str| format!("{arch}.{k}");
         let req = |k: &str| g.get_u32(&key(k)).ok_or_else(|| Error::Gguf(format!("missing {}", key(k))));

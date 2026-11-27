@@ -98,6 +98,11 @@ a { color:var(--primary); }
 .icon-btn.tonal { background:var(--secondary-container); color:var(--on-secondary-container); }
 .chip { flex:none; display:inline-flex; align-items:center; gap:8px; height:32px; padding:0 16px; border-radius:8px; border:1px solid var(--outline); background:transparent; color:var(--on-surface-variant); font-size:14px; font-weight:500; white-space:nowrap; }
 .chips { display:flex; gap:8px; flex-wrap:wrap; }
+.chip[aria-pressed="true"] { background:var(--secondary-container); color:var(--on-secondary-container); border-color:transparent; }
+.chip[aria-pressed="true"]::before { content:""; width:16px; height:16px; margin-left:-6px; background:currentColor; -webkit-mask:url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 -960 960 960"><path d="m382-354 339-339q12-12 28-12t28 12q12 12 12 28.5T777-636L410-268q-12 12-28 12t-28-12L182-440q-12-12-11.5-28.5T183-497q12-12 28.5-12t28.5 12l142 143Z"/></svg>') center/contain no-repeat; mask:url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 -960 960 960"><path d="m382-354 339-339q12-12 28-12t28 12q12 12 12 28.5T777-636L410-268q-12 12-28 12t-28-12L182-440q-12-12-11.5-28.5T183-497q12-12 28.5-12t28.5 12l142 143Z"/></svg>') center/contain no-repeat; }
+.pbar { height:4px; border-radius:2px; background:var(--surface-container-highest); overflow:hidden; margin-top:6px; }
+.pbar i { display:block; height:100%; background:var(--primary); transition:width .5s; }
+.item.dim .h, .item.dim .tile-icon { opacity:.6; }
 .badge { display:inline-flex; align-items:center; gap:4px; height:20px; padding:0 8px; border-radius:10px; font-size:11px; font-weight:500; letter-spacing:.5px; white-space:nowrap; }
 .badge.ok { background:var(--ok-container); color:var(--on-ok-container); }
 .badge.warn { background:var(--warn-container); color:var(--on-warn-container); }
@@ -180,9 +185,9 @@ table.data .num { text-align:right; font-variant-numeric:tabular-nums; }
 table.data td.wrap { white-space:normal; min-width:180px; }
 
 /* Chat */
-.chat-layout { flex:1; min-height:0; display:grid; grid-template-columns:1fr; }
+.chat-layout { flex:1; min-height:0; display:grid; grid-template-columns:1fr; grid-template-rows:minmax(0,1fr); }
 .chat-list-pane { display:none; }
-.conv { display:flex; flex-direction:column; min-height:0; }
+.conv { display:flex; flex-direction:column; min-height:0; overflow:hidden; }
 .chat-head-text { flex:1; min-width:0; display:grid; }
 .chat-head-text > span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .msgs { flex:1; min-height:0; overflow-y:auto; padding:8px 16px 16px; }
@@ -217,7 +222,10 @@ table.data td.wrap { white-space:normal; min-width:180px; }
 .model-chip .live.ok { background:var(--ok); box-shadow:0 0 0 3px color-mix(in srgb, var(--ok) 25%, transparent); }
 .model-chip .live.warn { background:var(--warn); }
 .model-chip .t { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.desk-pills { display:none; gap:8px; align-items:center; flex:none; }
+.desk-pills { display:none; gap:8px; align-items:center; flex:0 1 auto; min-width:0; overflow:hidden; }
+/* Narrower wide screens: the less important pills step aside instead of running off the edge. */
+@media (max-width:1599px) { .pill-w.opt1 { display:none !important; } }
+@media (max-width:1439px) { .pill-w.opt2 { display:none !important; } }
 .pill-w { display:inline-flex; align-items:center; gap:8px; height:32px; padding:0 12px; border-radius:16px; background:var(--surface-container-high); border:0; font-size:12px; font-weight:500; color:var(--on-surface-variant); white-space:nowrap; }
 .pill-w b { color:var(--on-surface); font-weight:500; }
 .pill-w .mini-meter { width:36px; height:6px; border-radius:3px; background:var(--surface-container-highest); overflow:hidden; }
@@ -333,6 +341,7 @@ pre.log { margin:0; padding:12px 14px; border-radius:12px; background:var(--surf
               <span class="title-m" id="chat-title">Group</span>
               <span class="body-s muted" id="chat-sub"></span>
             </div>
+            <button class="icon-btn st" id="chat-more" title="This chat" onclick="chatMenu()" hidden><svg class="i"><use href="#i-more_vert"/></svg></button>
             <button class="model-chip st" onclick="go('models')" title="The model the swarm runs"><span class="live" id="mc-dot"></span><span class="t" id="mc-text">No model</span></button>
             <div class="desk-pills" id="desk-pills"></div>
           </header>
@@ -368,11 +377,28 @@ pre.log { margin:0; padding:12px 14px; border-radius:12px; background:var(--surf
       <header class="topbar"><span class="title-l">Models</span></header>
       <div class="scroll"><div class="wrap">
         <div class="card hero" id="running"></div>
+        <div>
+          <div class="section-title">Find a model</div>
+          <div style="display:grid;gap:12px">
+            <div class="seg" id="cat-quant" style="max-width:420px"><button type="button" class="st" data-v="q8" aria-pressed="true">Best quality</button><button type="button" class="st" data-v="q4" aria-pressed="false">Smaller</button></div>
+            <div class="chips" id="cat-chips">
+              <button type="button" class="chip st" data-f="fits" aria-pressed="true">Fits this swarm</button>
+              <button type="button" class="chip st" data-f="runs" aria-pressed="true">Runs in Clamor</button>
+              <button type="button" class="chip st" data-f="tools" aria-pressed="false">Tools</button>
+              <button type="button" class="chip st" data-f="thinking" aria-pressed="false">Thinking</button>
+              <button type="button" class="chip st" data-f="vision" aria-pressed="false">Vision</button>
+              <button type="button" class="chip st" data-f="embedding" aria-pressed="false">Embedding</button>
+              <button type="button" class="chip st" data-f="code" aria-pressed="false">Code</button>
+            </div>
+            <div class="list" id="catalog"><div class="empty">Loading the catalog…</div></div>
+            <p class="body-s muted" style="margin:0;padding:0 16px">Speeds are predicted from this swarm's measurements, at 8k context. A download goes to the coordinator and is checked against Clamor's catalog; the other devices fetch only the parts they run.</p>
+          </div>
+        </div>
         <div><div class="section-title">On the swarm's devices</div><div class="list" id="model-files"></div>
           <p class="body-s muted" style="padding:8px 16px 0;margin:0">One copy is enough: the other devices fetch the layers they run. Put a .gguf file in the models folder of any device (desktop app: tray menu, <b>Open models folder</b>).</p></div>
-        <div>
-          <div class="section-title">What could this swarm run?</div>
-          <div class="card" style="display:grid;gap:12px">
+        <details class="card" style="display:block">
+          <summary class="title-s" style="cursor:pointer">Plan by model size</summary>
+          <div style="display:grid;gap:12px;margin-top:12px">
             <div class="row">
               <label class="row body-s muted">Quantization <select class="select" id="quant"><option>q4</option><option>q6</option><option selected>q8</option><option>f16</option></select></label>
               <label class="row body-s muted">Context <select class="select" id="ctx"><option>4096</option><option selected>8192</option><option>16384</option><option>32768</option></select></label>
@@ -382,7 +408,7 @@ pre.log { margin:0; padding:12px 14px; border-radius:12px; background:var(--surf
             <div id="plans"></div>
             <p class="body-s muted" id="assume" style="margin:0"></p>
           </div>
-        </div>
+        </details>
       </div></div>
     </section>
 
@@ -517,6 +543,7 @@ function route() {
   screen = h;
   for (const s of SCREENS) { const el = $('s-' + s); el.hidden = s !== h; if (s === h && changed) { el.classList.remove('enter'); void el.offsetWidth; el.classList.add('enter'); } }
   document.querySelectorAll('[data-nav]').forEach(a => a.dataset.nav === h ? a.setAttribute('aria-current', 'page') : a.removeAttribute('aria-current'));
+  if (h === 'models' && changed && me && o) loadCatalog(false);
 }
 addEventListener('hashchange', route);
 
@@ -709,7 +736,7 @@ function renderModels() {
       ${m.failure ? `<p class="err" style="margin:8px 0 0">${esc(m.failure)}</p>` : ''}
       <div class="row" style="margin-top:8px"><span class="body-s muted">${last ? last.toFixed(1) + ' tok/s on the last reply' : 'No replies yet'} · ${gib(m.need_bytes)} GB</span><span class="spacer"></span>${admin ? '<button class="btn outlined st" onclick="stopModel()">Stop</button>' : ''}</div>`;
   } else {
-    $('running').innerHTML = `<div class="row" style="gap:16px;flex-wrap:nowrap"><div class="tile-icon big">${ic('neurology', 's32')}</div><div><div class="title-m">No model is running</div><div class="body-s muted">${admin ? 'Start one from the list below.' : 'An admin can start one.'}</div></div></div>`;
+    $('running').innerHTML = `<div class="row" style="gap:16px;flex-wrap:nowrap"><div class="tile-icon big">${ic('neurology', 's32')}</div><div><div class="title-m">No model is running</div><div class="body-s muted">${admin ? 'Find one below: download it, then Start.' : 'An admin can start one.'}</div></div></div>`;
   }
   const files = {};
   for (const n of roster.nodes) for (const f of (n.models || [])) (files[f.id] ??= { name: f.name, size: f.size, on: [] }).on.push(n.id);
@@ -732,6 +759,69 @@ function renderPlan() {
   }
   $('assume').textContent = `Sizes are typical models at this quantization. Estimates assume ${(plan.assumptions.mem_efficiency * 100).toFixed(0)}% memory-bandwidth and ${(plan.assumptions.compute_efficiency * 100).toFixed(0)}% compute efficiency: planning numbers, not promises.`;
 }
+// ---- Find a model (the catalog)
+const CAP = { tools: ['build', 'Tools'], thinking: ['psychology', 'Thinking'], vision: ['visibility', 'Vision'], embedding: ['data_array', 'Embedding'], code: ['terminal', 'Code'] };
+let cat = null, catQuant = 'q8', catAt = 0;
+async function loadCatalog(force) {
+  if (!force && cat && Date.now() - catAt < 10000 && !(cat.models || []).some(m => m.download && ['downloading', 'verifying'].includes(m.download.state))) return;
+  try { cat = await api('/api/catalog?quant=' + catQuant); catAt = Date.now(); renderCatalog(); } catch (e) { $('catalog').innerHTML = `<div class="empty err">${esc(e.message || e)}</div>`; }
+}
+const catFilters = () => [...document.querySelectorAll('#cat-chips .chip[aria-pressed="true"]')].map(c => c.dataset.f);
+function modelLine(m) {
+  const f = m.fit, gbs = (m.file.size / 1e9).toFixed(1) + ' GB';
+  if (!m.runs) return `${gbs} · Not in Clamor yet: ${m.why}`;
+  if (!f.feasible) return `${gbs} · Too big for this swarm right now`;
+  return `${gbs} · ~${f.decode_tok_s >= 10 ? f.decode_tok_s.toFixed(0) : f.decode_tok_s.toFixed(1)} tok/s on ${plural(f.devices, 'device')}`;
+}
+function modelAction(m) {
+  const admin = me.role !== 'member', d = m.download, running = o.model && m.have.some(h => h.file === o.model.name);
+  if (running) return '<span class="badge pri">Running</span>';
+  if (d && ['downloading', 'verifying'].includes(d.state)) return `<span class="body-s">${d.state === 'verifying' ? 'Checking…' : Math.floor(d.done / d.total * 100) + '%'}</span>`;
+  const here = m.have.find(h => h.quant === m.file.quant) || m.have[0];
+  if (here && admin && m.runs) return `<button class="btn tonal sm st" onclick='event.stopPropagation();startModel(${js(here.file)})'>Start</button>`;
+  if (here) return '<span class="badge ok">On the swarm</span>';
+  if (admin && m.runs) return `<button class="icon-btn tonal st" title="Download" onclick='event.stopPropagation();downloadModel(${js(m.id)})'>${ic('download')}</button>`;
+  return '';
+}
+function renderCatalog() {
+  if (!cat) return;
+  const on = catFilters();
+  const list = cat.models.filter(m => on.every(f => f === 'fits' ? m.fit.feasible : f === 'runs' ? m.runs : m.caps.includes(f)));
+  // Best first: runs, fits, then the biggest (usually the smartest) that is still quick enough.
+  list.sort((a, b) => (b.runs - a.runs) || (b.fit.feasible - a.fit.feasible) || ((b.fit.decode_tok_s >= 2) - (a.fit.decode_tok_s >= 2)) || (b.params_b - a.params_b));
+  const best = list.find(m => m.runs && m.fit.feasible && m.fit.decode_tok_s >= 2 && !m.caps.includes('embedding'));
+  $('catalog').innerHTML = list.map(m => {
+    const d = m.download, busy = d && ['downloading', 'verifying'].includes(d.state);
+    return `<div role="button" tabindex="0" class="item st ${m.runs && m.fit.feasible ? '' : 'dim'}" onclick='modelSheet(${js(m.id)})' onkeydown='if(event.key==="Enter")modelSheet(${js(m.id)})'><div class="tile-icon ${m === best ? 'pri' : ''}">${ic('neurology')}</div>
+      <div class="text"><span class="h">${esc(m.name)}</span><span class="s">${esc(modelLine(m))}</span>
+      ${m.caps.length || m === best ? `<span class="row" style="gap:4px;margin-top:4px">${m === best ? '<span class="badge pri">Best fit</span>' : ''}${m.caps.map(c => CAP[c] ? `<span class="badge neutral">${ic(CAP[c][0], 's16')}${CAP[c][1]}</span>` : '').join('')}</span>` : ''}
+      ${busy ? `<div class="pbar"><i style="width:${(d.done / d.total * 100).toFixed(1)}%"></i></div>` : ''}${d && d.state === 'failed' ? `<span class="s err">Download failed: ${esc(d.error)}</span>` : ''}</div>
+      <div class="trail">${modelAction(m)}</div></div>`;
+  }).join('') || `<div class="empty">No model matches all of these filters. ${on.includes('fits') ? 'Try without <b>Fits this swarm</b>, or add a device.' : 'Try fewer filters.'}</div>`;
+}
+window.modelSheet = id => {
+  const m = cat.models.find(m => m.id === id); if (!m) return;
+  const f = m.fit, d = m.download, admin = me.role !== 'member', busy = d && ['downloading', 'verifying'].includes(d.state);
+  const fitText = !m.runs ? `Clamor cannot run it yet: ${m.why}.` : f.feasible ? `Runs here at about ${f.decode_tok_s.toFixed(1)} tokens/s, split over ${plural(f.devices, 'device')} (needs ${gib(f.need_bytes)} GB with an 8k context).` : `Too big for this swarm right now: ${(f.notes || []).join('; ').replace(/GiB/g, 'GB') || 'not enough memory'}.`;
+  overlay(`<div class="row" style="padding:0 24px 12px;gap:16px;flex-wrap:nowrap"><div class="tile-icon big pri">${ic('neurology', 's32')}</div><div style="flex:1;min-width:0"><div class="title-l">${esc(m.name)}</div><div class="body-s muted">${esc(m.maker)} · ${m.params_b.toFixed(1)}B parameters · ${esc(m.license)}</div></div></div>
+    <div class="body">
+      <div class="body-l">${esc(m.about)}</div>
+      ${m.caps.length ? `<div class="row" style="gap:6px">${m.caps.map(c => CAP[c] ? `<span class="badge neutral">${ic(CAP[c][0], 's16')}${CAP[c][1]}</span>` : '').join('')}</div>` : ''}
+      <div class="banner ${m.runs && f.feasible ? '' : 'warn'}">${ic(m.runs && f.feasible ? 'check_circle' : 'info')}<div class="text">${esc(fitText)}</div></div>
+      <div class="list">
+        <div class="item">${ic('description', 'lead-icon')}<div class="text"><span class="h">${esc(m.file.file)}</span><span class="s">${(m.file.size / 1e9).toFixed(2)} GB · ${esc(m.file.quant)}${m.file.quant === 'Q8_0' ? ' (tested with Clamor)' : ' (smaller; should work, less tested)'} · up to ${Math.round(m.context / 1024)}k context</span></div></div>
+        <a class="item st" href="https://huggingface.co/${esc(m.repo)}" target="_blank" rel="noopener" style="text-decoration:none;color:inherit">${ic('open_in_new', 'lead-icon')}<div class="text"><span class="h">Source</span><span class="s">huggingface.co/${esc(m.repo)} · SHA-256 ${esc(m.file.sha256.slice(0, 12))}…</span></div></a>
+      </div>
+      ${busy ? `<div><div class="body-s muted">${d.state === 'verifying' ? 'Checking the file…' : `Downloading: ${(d.done / 1e9).toFixed(2)} of ${(d.total / 1e9).toFixed(2)} GB`}</div><div class="pbar"><i style="width:${(d.done / d.total * 100).toFixed(1)}%"></i></div></div>` : ''}
+      <div class="acts">${busy && admin ? `<button class="btn text st" onclick='cancelDownload(${js(d.file)})'>Cancel download</button>` : ''}<button class="btn text st" onclick="closeOverlay()">Close</button>${!busy && admin && m.runs ? (m.have.length ? `<button class="btn filled st" onclick='closeOverlay();startModel(${js((m.have.find(h => h.quant === m.file.quant) || m.have[0]).file)})'>Start</button>` : `<button class="btn filled st" onclick='closeOverlay();downloadModel(${js(m.id)})'>${ic('download')}Download ${(m.file.size / 1e9).toFixed(1)} GB</button>`) : ''}</div>
+    </div>`);
+};
+window.downloadModel = id => act(async () => { const r = await api('/api/models/download', 'POST', { id, quant: catQuant }); loadCatalog(true); return r; }, 'Downloading… it continues if you close this page');
+window.cancelDownload = file => { closeOverlay(); act(() => api('/api/models/cancel', 'POST', { file }).then(r => { loadCatalog(true); return r; }), 'Cancelled: starting again later picks up where it stopped'); };
+document.querySelectorAll('#cat-chips .chip').forEach(c => c.onclick = () => { c.setAttribute('aria-pressed', c.getAttribute('aria-pressed') !== 'true'); renderCatalog(); });
+bindSegs($('cat-quant').parentElement);
+$('cat-quant').addEventListener('change', () => { catQuant = segValue($('cat-quant')); loadCatalog(true); });
+
 window.startModel = name => act(() => api('/api/pipeline', 'POST', { model: name }), 'Starting ' + modelName(name) + '…');
 window.stopModel = async () => { if (await confirmDialog('Stop the model?', 'Chats wait until a model runs again.', 'Stop')) act(() => api('/api/pipeline', 'DELETE'), 'Stopped'); };
 
@@ -878,8 +968,11 @@ function liveHtml(text) {
   const body = !text ? '<span class="typing"><i></i><i></i><i></i></span>' : whole ? `<span class="muted">Writing… ${plural(n, 'word')} so far</span>` : esc(text);
   return `<div class="m bot" id="live"><img class="bot-avatar thinking" src="/icon.svg" alt=""><div class="body"><div class="who">Clamor</div>${body}</div></div>`;
 }
+// Follow new text only while the reader is at the bottom; reading further up stays put.
+const nearEnd = () => { const b = $('msgs'); return b.scrollHeight - b.scrollTop - b.clientHeight < 80; };
+const toEnd = () => { const b = $('msgs'); b.scrollTop = b.scrollHeight; };
 function setLive(text) {
-  const box = $('msgs'), atEnd = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
+  const box = $('msgs'), atEnd = nearEnd();
   const el = $('live');
   if (el) el.outerHTML = liveHtml(text); else $('msgs-inner').insertAdjacentHTML('beforeend', liveHtml(text));
   if (atEnd) box.scrollTop = box.scrollHeight;
@@ -915,15 +1008,36 @@ async function loadThread(force) {
     $('say').disabled = false; $('say').placeholder = 'Message Clamor';
   }
   $('private-note').hidden = !isPrivate(chatId);
+  $('chat-more').hidden = chatId === 'group';
   const [title, sub] = chatMeta(); $('chat-title').textContent = title; $('chat-sub').textContent = sub;
   const live = c.live ? c.live.text : null;
   const key = chatId + '|' + c.messages.length + '|' + live + '|' + panel + '|' + (me?.reply_style);
   if (!force && key === shownKey) return;
+  const sameChat = shownKey.split('|')[0] === chatId, wasEnd = nearEnd(), keep = $('msgs').scrollTop;
   shownKey = key;
   $('msgs-inner').innerHTML = (c.messages.length ? c.messages.map(msgHtml).join('') : (live !== null || panel ? '' : emptyHtml())) + panel;
   if (live !== null) $('msgs-inner').insertAdjacentHTML('beforeend', liveHtml(live));
-  $('msgs').scrollTop = $('msgs').scrollHeight;
+  if (!sameChat || wasEnd) toEnd(); else $('msgs').scrollTop = keep;
 }
+// A personal or private chat's menu: delete it (the group chat is everyone's and stays).
+window.chatMenu = () => {
+  const [title] = chatMeta();
+  overlay(`<h2>${esc(title)}</h2><div class="body"><div class="list">
+    <button class="item st danger" onclick="deleteChat()">${ic('delete', 'lead-icon')}<div class="text"><span class="h">Delete this chat</span><span class="s" style="color:inherit;opacity:.8">${isPrivate(chatId) ? 'Removed from this device' : 'Removed for you, on all your devices'}</span></div></button>
+  </div><div class="acts"><button class="btn text st" onclick="closeOverlay()">Close</button></div></div>`);
+};
+window.deleteChat = async () => {
+  closeOverlay();
+  const [title] = chatMeta(), id = chatId;
+  if (!await confirmDialog(`Delete “${title}”?`, 'The conversation is gone for good.', 'Delete', true)) return;
+  try {
+    if (sending) await fetch(chatUrl(id) + '/stop', { method: 'POST' }).catch(() => {});
+    await api(chatUrl(id), 'DELETE');
+    snack('Chat deleted');
+    chatId = 'group'; shownKey = '';
+    await loadChats(); await loadThread(true);
+  } catch (e) { snack(String(e.message || e)); }
+};
 window.openChat = async id => { chatId = id; closeOverlay(); shownKey = ''; renderChatList(); await loadThread(true); if (innerWidth >= 600) $('say').focus(); };
 window.newChat = async () => { try { const r = await api('/api/chats', 'POST'); await loadChats(); openChat(r.id); } catch (e) { snack(String(e.message || e)); } };
 function sendMode(on) {
@@ -940,7 +1054,9 @@ $('composer').onsubmit = async e => {
   sendMode(true); $('say').value = ''; grow();
   if (!$('msgs-inner').querySelector('.m')) $('msgs-inner').innerHTML = '';
   $('msgs-inner').insertAdjacentHTML('beforeend', msgHtml({ role: 'user', content: text, by: me.name }));
+  toEnd();
   setLive('');
+  toEnd();
   try {
     const r = await fetch(chatUrl(asked) + '/messages', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ content: text }) });
     if (!r.ok) throw new Error(await r.text());
@@ -956,7 +1072,7 @@ $('composer').onsubmit = async e => {
         const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
         if (!line.trim() || chatId !== asked) continue;
         const p = JSON.parse(line);
-        if (p.done) { $('live')?.remove(); $('msgs-inner').insertAdjacentHTML('beforeend', msgHtml(p.done)); $('msgs').scrollTop = $('msgs').scrollHeight; }
+        if (p.done) { const e = nearEnd(); $('live')?.remove(); $('msgs-inner').insertAdjacentHTML('beforeend', msgHtml(p.done)); if (e) toEnd(); }
         else setLive(p.text);
       }
     }
@@ -981,8 +1097,8 @@ function renderChatHeader() {
     <button class="pill-w st" onclick="go('models')" title="Speed of the last replies">${path ? `<svg width="40" height="16" viewBox="0 0 40 16" preserveAspectRatio="none"><path d="${path}" fill="none" stroke="var(--primary)" stroke-width="1.6"/></svg>` : ic('speed', 's16')}<b>${last ? last.toFixed(0) : '–'}</b> tok/s</button>
     <button class="pill-w st" onclick="go('swarm')" title="Swarm health"><span class="dot" style="background:${tone}"></span><b>${esc(head)}</b> · ${h.online}/${h.total} devices</button>
     <button class="pill-w st" onclick="go('swarm')" title="Memory the model uses, of what the swarm pools">${ic('memory', 's16')}<span class="mini-meter"><i style="width:${(used / pooled * 100).toFixed(0)}%"></i></span><b>${gib(used)}</b>/${gib(pooled)} GB</button>
-    <button class="pill-w st" onclick="go('swarm')" title="${esc(o.people.here.join(', '))}"><span class="avs">${o.people.here.slice(0, 3).map(n => `<span style="background:${colorOf(n)}">${esc(initials(n)[0])}</span>`).join('')}</span><b>${o.people.here.length}</b> here</button>
-    ${here ? `<button class="pill-w st" onclick='deviceSheet(${js(here.id)})' title="${esc(dn(here.id))}">${ic(devIcon(here), 's16')}This device · <b>${devState(here)[0]}</b></button>` : ''}`;
+    <button class="pill-w st opt2" onclick="go('swarm')" title="${esc(o.people.here.join(', '))}"><span class="avs">${o.people.here.slice(0, 3).map(n => `<span style="background:${colorOf(n)}">${esc(initials(n)[0])}</span>`).join('')}</span><b>${o.people.here.length}</b> here</button>
+    ${here ? `<button class="pill-w st opt1" onclick='deviceSheet(${js(here.id)})' title="${esc(dn(here.id))}">${ic(devIcon(here), 's16')}This device · <b>${devState(here)[0]}</b></button>` : ''}`;
 }
 
 // ------------------------------------------------------------------ Banners (things that need you)
@@ -1036,6 +1152,7 @@ async function refresh() {
     knownNodes = ids;
     route();
     renderChatHeader(); renderSwarm(); renderModels(); renderPlan(); renderSettings(); renderBanners();
+    if (screen === 'models') loadCatalog(false);
     if (me.role !== 'member') renderCoord();
     if (!chatList) await loadChats();
     loadThread(false);

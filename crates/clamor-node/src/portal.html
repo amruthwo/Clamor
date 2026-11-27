@@ -338,6 +338,7 @@ pre.log { margin:0; padding:12px 14px; border-radius:12px; background:var(--surf
               <span class="title-m" id="chat-title">Group</span>
               <span class="body-s muted" id="chat-sub"></span>
             </div>
+            <button class="icon-btn st" id="chat-more" title="This chat" onclick="chatMenu()" hidden><svg class="i"><use href="#i-more_vert"/></svg></button>
             <button class="model-chip st" onclick="go('models')" title="The model the swarm runs"><span class="live" id="mc-dot"></span><span class="t" id="mc-text">No model</span></button>
             <div class="desk-pills" id="desk-pills"></div>
           </header>
@@ -1004,6 +1005,7 @@ async function loadThread(force) {
     $('say').disabled = false; $('say').placeholder = 'Message Clamor';
   }
   $('private-note').hidden = !isPrivate(chatId);
+  $('chat-more').hidden = chatId === 'group';
   const [title, sub] = chatMeta(); $('chat-title').textContent = title; $('chat-sub').textContent = sub;
   const live = c.live ? c.live.text : null;
   const key = chatId + '|' + c.messages.length + '|' + live + '|' + panel + '|' + (me?.reply_style);
@@ -1014,6 +1016,25 @@ async function loadThread(force) {
   if (live !== null) $('msgs-inner').insertAdjacentHTML('beforeend', liveHtml(live));
   if (!sameChat || wasEnd) toEnd(); else $('msgs').scrollTop = keep;
 }
+// A personal or private chat's menu: delete it (the group chat is everyone's and stays).
+window.chatMenu = () => {
+  const [title] = chatMeta();
+  overlay(`<h2>${esc(title)}</h2><div class="body"><div class="list">
+    <button class="item st danger" onclick="deleteChat()">${ic('delete', 'lead-icon')}<div class="text"><span class="h">Delete this chat</span><span class="s" style="color:inherit;opacity:.8">${isPrivate(chatId) ? 'Removed from this device' : 'Removed for you, on all your devices'}</span></div></button>
+  </div><div class="acts"><button class="btn text st" onclick="closeOverlay()">Close</button></div></div>`);
+};
+window.deleteChat = async () => {
+  closeOverlay();
+  const [title] = chatMeta(), id = chatId;
+  if (!await confirmDialog(`Delete “${title}”?`, 'The conversation is gone for good.', 'Delete', true)) return;
+  try {
+    if (sending) await fetch(chatUrl(id) + '/stop', { method: 'POST' }).catch(() => {});
+    await api(chatUrl(id), 'DELETE');
+    snack('Chat deleted');
+    chatId = 'group'; shownKey = '';
+    await loadChats(); await loadThread(true);
+  } catch (e) { snack(String(e.message || e)); }
+};
 window.openChat = async id => { chatId = id; closeOverlay(); shownKey = ''; renderChatList(); await loadThread(true); if (innerWidth >= 600) $('say').focus(); };
 window.newChat = async () => { try { const r = await api('/api/chats', 'POST'); await loadChats(); openChat(r.id); } catch (e) { snack(String(e.message || e)); } };
 function sendMode(on) {

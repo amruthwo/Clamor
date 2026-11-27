@@ -748,13 +748,39 @@ function renderModels() {
     $('running').innerHTML = `<div class="row" style="gap:16px;flex-wrap:nowrap"><div class="tile-icon big">${ic('neurology', 's32')}</div><div><div class="title-m">No model is running</div><div class="body-s muted">${admin ? 'Find one below: download it, then Start.' : 'An admin can start one.'}</div></div></div>`;
   }
   const files = {};
-  for (const n of roster.nodes) for (const f of (n.models || [])) (files[f.id] ??= { name: f.name, size: f.size, on: [] }).on.push(n.id);
+  for (const n of roster.nodes) for (const f of (n.models || [])) (files[f.id] ??= { id: f.id, name: f.name, size: f.size, on: [] }).on.push(n.id);
+  modelFiles = files;
   const list = Object.values(files).sort((a, b) => a.name.localeCompare(b.name));
   $('model-files').innerHTML = list.map(f => {
     const running = m && m.name === f.name;
-    return `<div class="item">${ic('description', 'lead-icon')}<div class="text"><span class="h">${esc(modelName(f.name))}</span><span class="s">${gib(f.size)} GB · on ${esc(f.on.map(dn).join(', '))}</span></div><div class="trail">${running ? '<span class="badge pri">Running</span>' : admin ? `<button class="btn tonal sm st" onclick='startModel(${js(f.name)})'>Start</button>` : ''}</div></div>`;
+    return `<div role="button" tabindex="0" class="item st" onclick='modelFileSheet(${js(f.id)})'>${ic('description', 'lead-icon')}<div class="text"><span class="h">${esc(modelName(f.name))}</span><span class="s">${gib(f.size)} GB · on ${esc(f.on.map(dn).join(', '))}</span></div><div class="trail">${running ? '<span class="badge pri">Running</span>' : admin ? `<button class="btn tonal sm st" onclick='event.stopPropagation();startModel(${js(f.name)})'>Start</button>` : ''}${ic('chevron_right')}</div></div>`;
   }).join('') || '<div class="empty">No model files yet.</div>';
 }
+// A model file on the swarm's devices: where it is, start it, delete it from one device or all.
+let modelFiles = {};
+window.modelFileSheet = id => {
+  const f = modelFiles[id]; if (!f) return;
+  const admin = me.role !== 'member', running = o.model && o.model.name === f.name;
+  const blocked = running ? 'Stop it first to delete it.' : '';
+  overlay(`<div class="row" style="padding:0 24px 12px;gap:16px;flex-wrap:nowrap"><div class="tile-icon big pri">${ic('description', 's32')}</div><div style="flex:1;min-width:0"><div class="title-l" style="overflow:hidden;text-overflow:ellipsis">${esc(modelName(f.name))}</div><div class="body-s muted">${gib(f.size)} GB · ${esc(f.name)}</div></div>${running ? '<span class="badge pri">Running</span>' : ''}</div>
+    <div class="body">
+      <div><div class="title-s" style="margin-bottom:8px">On ${plural(f.on.length, 'device')}</div><div class="list">${f.on.map(d => `<div class="item">${ic(devIcon(nodes[d]), 'lead-icon')}<div class="text"><span class="h">${esc(dn(d))}</span></div>${admin && !running ? `<button class="btn danger st" onclick='deleteModel(${js(id)}, ${js(d)})'>Delete</button>` : ''}</div>`).join('')}</div></div>
+      <div class="body-s muted">Other devices only keep the parts they ran, in their cache. ${f.on.length > 1 ? 'One copy is enough for the whole swarm.' : ''}</div>
+      ${blocked && admin ? `<div class="banner warn">${ic('info')}<div class="text">${blocked}</div></div>` : ''}
+      <div class="acts">${admin && !running ? `<button class="btn danger st" onclick='deleteModel(${js(id)}, null)'>${ic('delete')}Delete from all devices</button>` : ''}<button class="btn text st" onclick="closeOverlay()">Close</button>${admin && !running ? `<button class="btn filled st" onclick='closeOverlay();startModel(${js(f.name)})'>Start</button>` : ''}</div>
+    </div>`);
+};
+window.deleteModel = async (id, device) => {
+  const f = modelFiles[id]; closeOverlay();
+  const where = device ? `from ${dn(device)}` : 'from every device';
+  const text = device ? `The file is deleted ${where}${f.on.length > 1 ? '; the other copies stay' : ', and it was the only copy: download it again to use it'}.` : 'The file and every cached part of it are deleted, on every device. Download it again to use it.';
+  if (!await confirmDialog(`Delete ${modelName(f.name)} ${where}?`, text, 'Delete', true)) return;
+  try {
+    const r = await api('/api/models/delete', 'POST', { id, device });
+    snack(r.skipped && r.skipped.length ? `Deleted; not on ${r.skipped.map(s => dn(s.device) + ' (' + s.why + ')').join(', ')}` : 'Deleted');
+    refresh(); if (cat) loadCatalog(true);
+  } catch (e) { snack(String(e.message || e)); }
+};
 function renderPlan() {
   if (!plan) return;
   const wide = innerWidth >= 840;
@@ -822,7 +848,7 @@ window.modelSheet = id => {
         <a class="item st" href="https://huggingface.co/${esc(m.repo)}" target="_blank" rel="noopener" style="text-decoration:none;color:inherit">${ic('open_in_new', 'lead-icon')}<div class="text"><span class="h">Source</span><span class="s">huggingface.co/${esc(m.repo)} · SHA-256 ${esc(m.file.sha256.slice(0, 12))}…</span></div></a>
       </div>
       ${busy ? `<div><div class="body-s muted">${d.state === 'verifying' ? 'Checking the file…' : `Downloading: ${(d.done / 1e9).toFixed(2)} of ${(d.total / 1e9).toFixed(2)} GB`}</div><div class="pbar"><i style="width:${(d.done / d.total * 100).toFixed(1)}%"></i></div></div>` : ''}
-      <div class="acts">${busy && admin ? `<button class="btn text st" onclick='cancelDownload(${js(d.file)})'>Cancel download</button>` : ''}<button class="btn text st" onclick="closeOverlay()">Close</button>${!busy && admin && m.runs ? (m.have.length ? `<button class="btn filled st" onclick='closeOverlay();startModel(${js((m.have.find(h => h.quant === m.file.quant) || m.have[0]).file)})'>Start</button>` : `<button class="btn filled st" onclick='closeOverlay();downloadModel(${js(m.id)})'>${ic('download')}Download ${(m.file.size / 1e9).toFixed(1)} GB</button>`) : ''}</div>
+      <div class="acts">${!busy && admin && m.have.length ? `<button class="btn danger st" onclick='closeOverlay();modelFileSheet(${js(Object.values(modelFiles).find(x => m.have.some(h => h.file === x.name))?.id || '')})'>${ic('delete')}Manage files</button>` : ''}${busy && admin ? `<button class="btn text st" onclick='cancelDownload(${js(d.file)})'>Cancel download</button>` : ''}<button class="btn text st" onclick="closeOverlay()">Close</button>${!busy && admin && m.runs ? (m.have.length ? `<button class="btn filled st" onclick='closeOverlay();startModel(${js((m.have.find(h => h.quant === m.file.quant) || m.have[0]).file)})'>Start</button>` : `<button class="btn filled st" onclick='closeOverlay();downloadModel(${js(m.id)})'>${ic('download')}Download ${(m.file.size / 1e9).toFixed(1)} GB</button>`) : ''}</div>
     </div>`);
 };
 window.downloadModel = id => act(async () => { const r = await api('/api/models/download', 'POST', { id, quant: catQuant }); loadCatalog(true); return r; }, 'Downloading… it continues if you close this page');

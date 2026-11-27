@@ -425,6 +425,22 @@ fn a_model_on_one_device_is_shared_with_the_others() {
     std::thread::sleep(Duration::from_millis(1100));
     start();
     assert_eq!(std::fs::metadata(&a_slice).unwrap().modified().unwrap(), before, "cached slice reused");
+
+    // Deleting the model: not while it runs; then everywhere: b's file, and the slices a and
+    // the coordinator cached of it.
+    let (_, r) = http(portal, "GET", "/api/roster", None);
+    let id = r["nodes"].as_array().unwrap().iter().find(|n| n["id"] == "b").unwrap()["models"][0]["id"].as_str().unwrap().to_string();
+    assert_eq!(http(portal, "POST", "/api/models/delete", Some(json!({ "id": id }))).0, 409, "running");
+    assert_eq!(http(portal, "DELETE", "/api/pipeline", None).0, 200);
+    let (st, r) = http(portal, "POST", "/api/models/delete", Some(json!({ "id": id })));
+    assert_eq!(st, 200, "{r}");
+    assert!(r["deleted_on"].as_array().unwrap().iter().any(|d| d == "b"), "{r}");
+    wait_for("the model to be deleted everywhere", Duration::from_secs(20), &all, || !Path::new(&b_models).join("tiny.gguf").exists() && files(&a_cache).is_empty() && files(&coord_cache).is_empty());
+    wait_for("b to report it", Duration::from_secs(20), &all, || {
+        let (_, r) = http(portal, "GET", "/api/roster", None);
+        r["nodes"].as_array().unwrap().iter().all(|n| n["models"].as_array().is_none_or(|m| m.is_empty()))
+    });
+    assert_eq!(http(portal, "POST", "/api/models/delete", Some(json!({ "id": id }))).0, 404, "gone");
     drop((a, b));
 }
 

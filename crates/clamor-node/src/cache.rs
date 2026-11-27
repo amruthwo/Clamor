@@ -125,6 +125,28 @@ pub fn purge(cache_dir: &Path, swarm: &str) -> (usize, u64) {
     (n, bytes)
 }
 
+/// Delete every cached slice of one model (its folder is the model id's first 16 characters).
+/// Returns (files, bytes) deleted.
+pub fn purge_model(cache_dir: &Path, model_id: &str) -> (usize, u64) {
+    let _g = LOCK.lock().unwrap();
+    let short = &model_id[..model_id.len().min(16)];
+    if short.is_empty() || short.contains(['/', '\\', '.']) {
+        return (0, 0);
+    }
+    let mut idx = load(cache_dir);
+    let (mut n, mut bytes) = (0, 0);
+    for (r, size, _) in files(cache_dir) {
+        if r.starts_with(&format!("{short}/")) && std::fs::remove_file(cache_dir.join(&r)).is_ok() {
+            idx.remove(&r);
+            n += 1;
+            bytes += size;
+        }
+    }
+    let _ = std::fs::remove_dir(cache_dir.join(short));
+    save(cache_dir, &idx);
+    (n, bytes)
+}
+
 /// Total size of the cache in bytes.
 pub fn size(cache_dir: &Path) -> u64 {
     files(cache_dir).iter().map(|f| f.1).sum()

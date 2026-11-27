@@ -34,6 +34,7 @@ pub async fn serve(bind: String, tls_bind: String, shared: Shared) -> anyhow::Re
         .route("/api/nodes/{id}/remove", post(remove))
         .route("/api/invite", post(invite))
         .route("/api/nodes/{id}/policy", post(set_policy))
+        .route("/api/nodes/{id}/name", post(set_device_name))
         .route("/api/pipeline", get(pipeline_status).post(pipeline_start).delete(pipeline_stop))
         .route("/api/generate", post(generate))
         .route("/api/chat", post(chat))
@@ -150,6 +151,8 @@ struct RosterRow {
     report: NodeReport,
     /// The person the device belongs to (id, name).
     person: Option<(String, String)>,
+    /// The name someone gave it (shown instead of the id).
+    label: Option<String>,
 }
 
 fn row(entry: &NodeEntry, id: &NodeId, coordinator: &NodeId, sw: &crate::coordinator::Swarm) -> RosterRow {
@@ -170,6 +173,7 @@ fn row(entry: &NodeEntry, id: &NodeId, coordinator: &NodeId, sw: &crate::coordin
         settings_note: entry.settings_note.clone(),
         report: entry.report.clone(),
         person,
+        label: sw.auth.profile.device_names.get(&id.0).cloned(),
     }
 }
 
@@ -324,6 +328,33 @@ async fn remove(State(shared): State<Shared>, Path(id): Path<String>) -> ApiResu
 
 /// Change a device's settings. Pausing, battery and priority take effect within a heartbeat;
 /// RAM and CPU shares apply from the next pipeline.
+#[derive(Deserialize)]
+struct NameReq {
+    name: String,
+}
+
+/// Give a device a name to show (its owner, or an admin). An empty name goes back to the id.
+async fn set_device_name(State(shared): State<Shared>, Extension(caller): Extension<Caller>, Path(id): Path<String>, Json(req): Json<NameReq>) -> ApiResult {
+    let name: String = req.name.trim().chars().filter(|c| !c.is_control()).collect();
+    if name.chars().count() > 40 {
+        return Err((StatusCode::BAD_REQUEST, "a device name is at most 40 characters".into()));
+    }
+    let id = NodeId(id);
+    let mut sw = shared.lock().unwrap();
+    let entry = sw.nodes.get(&id).ok_or((StatusCode::NOT_FOUND, format!("unknown device {id}")))?;
+    if caller.role < Role::Admin && device_person(&sw, &id, entry).as_deref() != Some(caller.person.as_str()) {
+        return Err((StatusCode::FORBIDDEN, "only the device's owner (or an admin) can rename it".into()));
+    }
+    let names = &mut sw.auth.profile.device_names;
+    if name.is_empty() || name == id.0 {
+        names.remove(&id.0);
+    } else {
+        names.insert(id.0.clone(), name.clone());
+    }
+    sw.auth.save();
+    Ok(Json(json!({ "ok": true, "name": if name.is_empty() { id.0.clone() } else { name } })))
+}
+
 async fn set_policy(State(shared): State<Shared>, Extension(caller): Extension<Caller>, Path(id): Path<String>, Json(policy): Json<Policy>) -> ApiResult {
     crate::neighbour::validate(&policy).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let id = NodeId(id);

@@ -784,6 +784,17 @@ fn people_roles_and_signing_in() {
     let own = json!({ "participation": "full", "max_ram_fraction": 0.4, "max_cpu_fraction": 0.5, "require_plugged_in": false });
     assert_eq!(http(dash, "POST", "/api/nodes/m/policy", Some(own.clone())).0, 200, "their own device's settings");
     assert_eq!(http(dash, "POST", "/api/nodes/coord/policy", Some(own)).0, 403, "not someone else's");
+    // /api/me says which device is asking (the app's own device), for "This device".
+    assert_eq!(me["device"], "m", "{me}");
+    // Renaming: Bea names her own device, not someone else's; the id stays, the roster shows the name.
+    let (st, r) = http(dash, "POST", "/api/nodes/m/name", Some(json!({ "name": "  Bea's laptop " })));
+    assert_eq!((st, r["name"].as_str()), (200, Some("Bea's laptop")), "{r}");
+    assert_eq!(http(dash, "POST", "/api/nodes/coord/name", Some(json!({ "name": "mine now" }))).0, 403, "not someone else's");
+    assert_eq!(http(dash, "POST", "/api/nodes/m/name", Some(json!({ "name": "x".repeat(41) }))).0, 400, "too long");
+    let label = |dash| http(dash, "GET", "/api/roster", None).1["nodes"].as_array().unwrap().iter().find(|n| n["id"] == "m").unwrap()["label"].clone();
+    assert_eq!(label(dash), "Bea's laptop");
+    assert_eq!(http(dash, "POST", "/api/nodes/m/name", Some(json!({ "name": "" }))).0, 200, "empty: back to the id");
+    assert!(label(dash).is_null());
     assert_eq!(http(dash, "POST", "/api/invite", Some(json!({ "kind": "person" }))).0, 403, "members cannot invite people");
     let (st, inv) = http(dash, "POST", "/api/invite", Some(json!({ "kind": "device" })));
     assert_eq!(st, 200, "but can add their own devices: {inv}");

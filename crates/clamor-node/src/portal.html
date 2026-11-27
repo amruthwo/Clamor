@@ -521,6 +521,8 @@ addEventListener('hashchange', route);
 const KIND_ICON = { laptop: 'laptop_mac', desktop: 'desktop_windows', phone: 'mobile', tablet: 'mobile', server: 'dns', sbc: 'memory' };
 const devIcon = n => KIND_ICON[String(n?.report?.info?.class || '').toLowerCase()] || 'computer';
 const isMine = n => !!(me && n.person && n.person[0] === me.id);
+// A device's shown name: the one someone gave it, else its id.
+const dn = id => (nodes[id] && nodes[id].label) || id;
 const canEdit = n => !!me && (me.role !== 'member' || isMine(n));
 function devState(n) {
   if (n.state === 'away') return ['Away', 'neutral', n.note || 'offline'];
@@ -532,7 +534,7 @@ function devState(n) {
 }
 function deviceItem(n, sub) {
   const [label, tone] = devState(n);
-  return `<button class="item st" onclick='deviceSheet(${js(n.id)})'><div class="tile-icon${n.is_coordinator ? ' pri' : ''}">${ic(devIcon(n))}</div><div class="text"><span class="h">${esc(n.id)}</span><span class="s">${esc(sub)}</span></div><div class="trail"><span class="badge ${tone}">${label}</span></div></button>`;
+  return `<button class="item st" onclick='deviceSheet(${js(n.id)})'><div class="tile-icon${n.is_coordinator ? ' pri' : ''}">${ic(devIcon(n))}</div><div class="text"><span class="h">${esc(dn(n.id))}</span><span class="s">${esc(sub)}</span></div><div class="trail"><span class="badge ${tone}">${label}</span></div></button>`;
 }
 const PART_HELP = {
   full: 'Always takes work when the swarm needs it.',
@@ -585,7 +587,7 @@ window.deviceSheet = id => {
   const removable = me.role !== 'member' && !n.is_coordinator && n.state !== 'away';
   const pausable = canEdit(n) && !n.is_coordinator && n.state !== 'away';
   const paused = n.report.policy.participation === 'paused';
-  overlay(`<div class="row" style="padding:0 24px 12px;gap:16px;flex-wrap:nowrap"><div class="tile-icon big pri">${ic(devIcon(n), 's32')}</div><div style="flex:1;min-width:0"><div class="title-l" style="overflow:hidden;text-overflow:ellipsis">${esc(n.id)}</div><div class="body-s muted">${esc(whose)} · ${esc(info.class)} · ${esc(info.os)}/${esc(info.arch)}${n.is_coordinator ? ' · coordinator' : ''}</div></div><span class="badge ${tone}">${label}</span></div>
+  overlay(`<div class="row" style="padding:0 24px 12px;gap:16px;flex-wrap:nowrap"><div class="tile-icon big pri">${ic(devIcon(n), 's32')}</div><div style="flex:1;min-width:0"><div class="row" style="flex-wrap:nowrap;gap:4px"><div class="title-l" style="overflow:hidden;text-overflow:ellipsis">${esc(dn(n.id))}</div>${canEdit(n) ? `<button class="icon-btn st" title="Rename" onclick='renameSheet(${js(n.id)})'>${ic('edit', 's18')}</button>` : ''}</div><div class="body-s muted">${esc(whose)} · ${esc(info.class)} · ${esc(info.os)}/${esc(info.arch)}${n.is_coordinator ? ' · coordinator' : ''}${n.label ? ' · id ' + esc(n.id) : ''}</div></div><span class="badge ${tone}">${label}</span></div>
     <div class="body">
       <div class="stats" style="margin:0"><div class="stat"><b>${gib(info.ram_available_bytes)}</b><span>GB free of ${gib(info.ram_total_bytes)}</span></div><div class="stat"><b>${b ? b.mem_bw_gbps.toFixed(0) : '–'}</b><span>GB/s memory</span></div><div class="stat"><b>${info.power ? (info.power.battery_pct ?? '?') + '%' : '–'}</b><span>${info.power ? (info.power.on_battery ? 'on battery' : 'charging') : 'no battery'}</span></div></div>
       ${n.settings_note ? `<div class="banner">${ic('warning')}<div class="text">${esc(n.settings_note)}</div></div>` : ''}
@@ -599,14 +601,28 @@ window.deviceSheet = id => {
     </div>`);
   bindDeviceSettings(n, 'ds');
 };
+window.renameSheet = id => {
+  const n = nodes[id]; if (!n) return;
+  overlay(`<h2>Rename device</h2><div class="body">
+    <div class="field"><input id="rn-name" maxlength="40" placeholder=" " value="${esc(n.label || '')}"><label>Name shown in the swarm</label></div>
+    <div class="body-s muted">Leave it empty to show its id, ${esc(n.id)}. Everyone in the swarm sees this name.</div>
+    <div class="acts"><button class="btn text st" onclick="deviceSheet(${esc(JSON.stringify(id))})">Cancel</button><button class="btn filled st" id="rn-save">Save</button></div></div>`);
+  const f = $('rn-name'); f.focus(); f.select();
+  const save = async () => {
+    try { const r = await api('/api/nodes/' + encodeURIComponent(id) + '/name', 'POST', { name: f.value }); nodes[id].label = r.name === id ? null : r.name; closeOverlay(); snack('Renamed to ' + r.name); refresh(); }
+    catch (e) { snack(String(e.message || e)); }
+  };
+  $('rn-save').onclick = save;
+  f.onkeydown = e => { if (e.key === 'Enter') save(); };
+};
 window.togglePause = id => {
   const n = nodes[id], p = n.report.policy, paused = p.participation === 'paused';
   act(() => api('/api/nodes/' + encodeURIComponent(id) + '/policy', 'POST', { ...p, participation: paused ? 'full' : 'paused' }), paused ? 'Resumed' : 'Paused');
 };
 window.removeDevice = async id => {
   closeOverlay();
-  if (await confirmDialog('Remove ' + id + '?', 'It finishes its current work and leaves the swarm. To come back it needs a new invitation.', 'Remove', true))
-    act(() => api('/api/nodes/' + encodeURIComponent(id) + '/remove', 'POST'), 'Removing ' + id);
+  if (await confirmDialog('Remove ' + dn(id) + '?', 'It finishes its current work and leaves the swarm. To come back it needs a new invitation.', 'Remove', true))
+    act(() => api('/api/nodes/' + encodeURIComponent(id) + '/remove', 'POST'), 'Removing ' + dn(id));
 };
 
 // ------------------------------------------------------------------ Invites ("Add device")
@@ -683,7 +699,7 @@ function renderModels() {
   if (m) {
     const tone = { ready: 'ok', loading: 'warn', failed: 'bad' }[m.state] || 'neutral';
     const path = sparkPath(o.speeds, 200, 40);
-    $('running').innerHTML = `<div class="row" style="gap:12px;flex-wrap:nowrap"><div class="tile-icon big pri">${ic('neurology-fill', 's32')}</div><div style="flex:1;min-width:0"><div class="label-m" style="color:var(--primary)">RUNNING NOW</div><div class="title-m" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(modelName(m.name))}</div><div class="body-s muted">${esc(m.devices.join(' → '))}</div></div><span class="badge ${tone}">${esc(m.state)}</span></div>
+    $('running').innerHTML = `<div class="row" style="gap:12px;flex-wrap:nowrap"><div class="tile-icon big pri">${ic('neurology-fill', 's32')}</div><div style="flex:1;min-width:0"><div class="label-m" style="color:var(--primary)">RUNNING NOW</div><div class="title-m" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(modelName(m.name))}</div><div class="body-s muted">${esc(m.devices.map(dn).join(' → '))}</div></div><span class="badge ${tone}">${esc(m.state)}</span></div>
       ${path ? `<svg class="spark" viewBox="0 0 200 40" preserveAspectRatio="none" style="margin-top:12px"><path d="${path}" fill="none" stroke="var(--primary)" stroke-width="2" vector-effect="non-scaling-stroke"/><path d="${path} L200 40 L0 40Z" fill="var(--primary)" opacity=".12"/></svg>` : ''}
       ${m.failure ? `<p class="err" style="margin:8px 0 0">${esc(m.failure)}</p>` : ''}
       <div class="row" style="margin-top:8px"><span class="body-s muted">${last ? last.toFixed(1) + ' tok/s on the last reply' : 'No replies yet'} · ${gib(m.need_bytes)} GB</span><span class="spacer"></span>${admin ? '<button class="btn outlined st" onclick="stopModel()">Stop</button>' : ''}</div>`;
@@ -695,7 +711,7 @@ function renderModels() {
   const list = Object.values(files).sort((a, b) => a.name.localeCompare(b.name));
   $('model-files').innerHTML = list.map(f => {
     const running = m && m.name === f.name;
-    return `<div class="item">${ic('description', 'lead-icon')}<div class="text"><span class="h">${esc(modelName(f.name))}</span><span class="s">${gib(f.size)} GB · on ${esc(f.on.join(', '))}</span></div><div class="trail">${running ? '<span class="badge pri">Running</span>' : admin ? `<button class="btn tonal sm st" onclick='startModel(${js(f.name)})'>Start</button>` : ''}</div></div>`;
+    return `<div class="item">${ic('description', 'lead-icon')}<div class="text"><span class="h">${esc(modelName(f.name))}</span><span class="s">${gib(f.size)} GB · on ${esc(f.on.map(dn).join(', '))}</span></div><div class="trail">${running ? '<span class="badge pri">Running</span>' : admin ? `<button class="btn tonal sm st" onclick='startModel(${js(f.name)})'>Start</button>` : ''}</div></div>`;
   }).join('') || '<div class="empty">No model files yet.</div>';
 }
 function renderPlan() {
@@ -704,7 +720,7 @@ function renderPlan() {
   const rows = plan.plans.map((p, i) => ({ p, rec: i === plan.recommended }));
   if (wide) {
     $('plans').innerHTML = `<div class="table-wrap" style="background:transparent"><table class="data"><thead><tr><th>Model size</th><th class="num">Needs</th><th class="num">Decode</th><th class="num">Prefill</th><th>Layout</th><th>Limited by</th></tr></thead><tbody>${rows.map(({ p, rec }) => p.feasible
-      ? `<tr><td>${esc(p.model)} ${rec ? '<span class="badge pri">best fit</span>' : ''}</td><td class="num">${gib(p.need_bytes)} GB</td><td class="num">${p.decode_tok_s.toFixed(1)} tok/s</td><td class="num">${p.prefill_tok_s.toFixed(0)} tok/s</td><td class="wrap">${p.stages.map(s => `${esc(s.node)} [${s.layer_start}–${s.layer_end})`).join(' → ')}</td><td class="wrap">${esc(p.bottleneck)}</td></tr>`
+      ? `<tr><td>${esc(p.model)} ${rec ? '<span class="badge pri">best fit</span>' : ''}</td><td class="num">${gib(p.need_bytes)} GB</td><td class="num">${p.decode_tok_s.toFixed(1)} tok/s</td><td class="num">${p.prefill_tok_s.toFixed(0)} tok/s</td><td class="wrap">${p.stages.map(s => `${esc(dn(s.node))} [${s.layer_start}–${s.layer_end})`).join(' → ')}</td><td class="wrap">${esc(p.bottleneck)}</td></tr>`
       : `<tr><td>${esc(p.model)}</td><td class="num">${gib(p.need_bytes)} GB</td><td colspan="4" class="muted" style="white-space:normal">doesn't fit: ${esc(p.notes.join('; ').replace(/GiB/g, 'GB'))}</td></tr>`).join('')}</tbody></table></div>`;
   } else {
     $('plans').innerHTML = `<div class="list" style="background:transparent">${rows.map(({ p, rec }) => `<div class="item" style="padding-left:0;padding-right:0">${ic(p.feasible ? 'check_circle' : 'cloud_off', 'lead-icon')}<div class="text"><span class="h">${esc(p.model)} ${rec ? '<span class="badge pri">best fit</span>' : ''}</span><span class="s">${p.feasible ? `${gib(p.need_bytes)} GB · ~${p.decode_tok_s.toFixed(1)} tok/s · ${plural(p.stages.length, 'device')}` : `Doesn't fit: needs ${gib(p.need_bytes)} GB`}</span></div></div>`).join('')}</div>`;
@@ -717,7 +733,7 @@ window.stopModel = async () => { if (await confirmDialog('Stop the model?', 'Cha
 // ------------------------------------------------------------------ Coord. screen
 function renderCoord() {
   const coord = roster.nodes.find(n => n.is_coordinator);
-  $('coord-hero').innerHTML = `<div class="row" style="gap:16px;flex-wrap:nowrap"><div class="tile-icon big pri">${ic('crab-fill', 's32')}</div><div style="flex:1;min-width:0"><div class="title-m">${esc(o.swarm)}</div><div class="body-s muted">Coordinated by ${esc(coord ? coord.id : '?')} · you are ${me.role === 'owner' ? 'the owner' : 'an admin'}</div></div></div>
+  $('coord-hero').innerHTML = `<div class="row" style="gap:16px;flex-wrap:nowrap"><div class="tile-icon big pri">${ic('crab-fill', 's32')}</div><div style="flex:1;min-width:0"><div class="title-m">${esc(o.swarm)}</div><div class="body-s muted">Coordinated by ${esc(coord ? dn(coord.id) : '?')} · you are ${me.role === 'owner' ? 'the owner' : 'an admin'}</div></div></div>
     <div class="row" style="margin-top:16px"><span class="badge ok">${ic('lock', 's16')}Encrypted</span>${coord?.build ? `<span class="badge neutral">Clamor ${esc(coord.build.version)}</span>` : ''}<span class="badge neutral">${plural(roster.nodes.length, 'device')}</span><span class="badge neutral">${plural(people.length, 'person', 'people')}</span></div>`;
   $('coord-name').textContent = o.swarm;
   $('needs').innerHTML = joins.map(j => `<div class="card" style="display:grid;gap:12px"><div class="row" style="gap:16px;flex-wrap:nowrap"><div class="tile-icon">${ic('how_to_reg')}</div><div style="flex:1;min-width:0"><div class="title-s">${esc(j.device)} asks to join${j.person_name !== j.device ? ' as ' + esc(j.person_name) : ''}</div><div class="body-s muted">From ${esc(j.from)}. Approve only if its screen shows this code:</div></div></div>
@@ -735,7 +751,7 @@ function renderCoord() {
   }
   $('measure').innerHTML = roster.nodes.map(n => {
     const r = n.report, b = r.bench, l = r.link;
-    return `<tr><td>${esc(n.id)}${n.is_coordinator ? ' <span class="muted">(coordinator)</span>' : ''}</td><td>${devState(n)[0]}</td><td>${esc(r.info.class)} · ${esc(r.info.os)}/${esc(r.info.arch)}</td><td>${n.build ? esc(n.build.version) + (n.build.variant !== 'cpu' ? ' · ' + esc(n.build.variant) : '') : 'older'}</td>
+    return `<tr><td>${esc(dn(n.id))}${n.is_coordinator ? ' <span class="muted">(coordinator)</span>' : ''}</td><td>${devState(n)[0]}</td><td>${esc(r.info.class)} · ${esc(r.info.os)}/${esc(r.info.arch)}</td><td>${n.build ? esc(n.build.version) + (n.build.variant !== 'cpu' ? ' · ' + esc(n.build.variant) : '') : 'older'}</td>
       <td class="num">${gib(r.info.ram_available_bytes)} / ${gib(r.info.ram_total_bytes)} GB</td><td class="num">${b ? b.mem_bw_gbps.toFixed(1) + ' GB/s' : '–'}</td><td class="num">${b ? b.cpu_gflops_mt.toFixed(0) : '–'}</td>
       <td class="num">${l ? l.rtt_ms_p50.toFixed(1) + ' ms' : (n.is_coordinator ? 'local' : '–')}</td><td class="num">${l && l.up_mbps ? Math.min(l.up_mbps, l.down_mbps).toFixed(0) + ' Mbit/s' : '–'}</td></tr>`;
   }).join('');
@@ -767,7 +783,7 @@ function renderSettings() {
   const here = me.device && nodes[me.device];
   $('this-device-wrap').hidden = !here;
   if (here && !$('this-device').contains(document.activeElement) && !draggingSettings) {
-    $('this-device-title').textContent = `This device · ${here.id}`;
+    $('this-device-title').textContent = `This device · ${dn(here.id)}`;
     $('this-device').innerHTML = deviceSettingsHtml(here, 'td');
     bindDeviceSettings(here, 'td');
   }
@@ -961,7 +977,7 @@ function renderChatHeader() {
     <button class="pill-w st" onclick="go('swarm')" title="Swarm health"><span class="dot" style="background:${tone}"></span><b>${esc(head)}</b> · ${h.online}/${h.total} devices</button>
     <button class="pill-w st" onclick="go('swarm')" title="Memory the model uses, of what the swarm pools">${ic('memory', 's16')}<span class="mini-meter"><i style="width:${(used / pooled * 100).toFixed(0)}%"></i></span><b>${gib(used)}</b>/${gib(pooled)} GB</button>
     <button class="pill-w st" onclick="go('swarm')" title="${esc(o.people.here.join(', '))}"><span class="avs">${o.people.here.slice(0, 3).map(n => `<span style="background:${colorOf(n)}">${esc(initials(n)[0])}</span>`).join('')}</span><b>${o.people.here.length}</b> here</button>
-    ${here ? `<button class="pill-w st" onclick='deviceSheet(${js(here.id)})' title="${esc(here.id)}">${ic(devIcon(here), 's16')}This device · <b>${devState(here)[0]}</b></button>` : ''}`;
+    ${here ? `<button class="pill-w st" onclick='deviceSheet(${js(here.id)})' title="${esc(dn(here.id))}">${ic(devIcon(here), 's16')}This device · <b>${devState(here)[0]}</b></button>` : ''}`;
 }
 
 // ------------------------------------------------------------------ Banners (things that need you)
@@ -1011,7 +1027,7 @@ async function refresh() {
     nodes = Object.fromEntries(roster.nodes.map(n => [n.id, n]));
     // A new device joined since the last look: a small celebration.
     const ids = new Set(roster.nodes.map(n => n.id));
-    if (knownNodes) for (const id of ids) if (!knownNodes.has(id)) celebrate(`${id} joined the swarm 🎉`);
+    if (knownNodes) for (const id of ids) if (!knownNodes.has(id)) celebrate(`${dn(id)} joined the swarm 🎉`);
     knownNodes = ids;
     route();
     renderChatHeader(); renderSwarm(); renderModels(); renderPlan(); renderSettings(); renderBanners();

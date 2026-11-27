@@ -5,8 +5,32 @@ use clamor_proto::*;
 use std::process::Command;
 use sysinfo::{Disks, System};
 
+/// This device's name in a swarm: `CLAMOR_DEVICE_NAME` (the Android app sets the phone's name from
+/// its settings), else the host name. Android's host name is "localhost" for every phone, so there
+/// the model is used instead.
 pub fn default_node_id() -> NodeId {
-    NodeId(System::host_name().unwrap_or_else(|_| "unknown-host".into()))
+    let from_env = std::env::var("CLAMOR_DEVICE_NAME").ok().map(|n| device_name(&n)).filter(|n| !n.is_empty());
+    let host = System::host_name().ok().map(|h| device_name(&h)).filter(|h| !h.is_empty() && h != "localhost");
+    let model = || {
+        if cfg!(target_os = "android") {
+            Command::new("/system/bin/getprop").arg("ro.product.model").output().ok().map(|o| device_name(&String::from_utf8_lossy(&o.stdout))).filter(|m| !m.is_empty())
+        } else {
+            None
+        }
+    };
+    NodeId(from_env.or(host).or_else(model).unwrap_or_else(|| "unknown-host".into()))
+}
+
+/// A device name as an id: letters, digits, '.', '_' and '-' (anything else becomes '-'), at most 48.
+pub fn device_name(raw: &str) -> String {
+    let mut out = String::new();
+    for c in raw.trim().chars() {
+        let c = if c.is_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '-' };
+        if !(c == '-' && out.ends_with('-')) {
+            out.push(c);
+        }
+    }
+    out.trim_matches('-').chars().take(48).collect()
 }
 
 pub fn probe_node(id: NodeId) -> NodeInfo {
@@ -291,6 +315,15 @@ mod tests {
         let info = probe_node(NodeId("t".into()));
         assert!(info.cpu_threads >= 1);
         assert!(info.ram_total_bytes > 0);
+    }
+
+    #[test]
+    fn device_names_are_tidy_ids() {
+        assert_eq!(device_name("  Galaxy S24 Ultra "), "Galaxy-S24-Ultra");
+        assert_eq!(device_name("Bea's laptop"), "Bea-s-laptop");
+        assert_eq!(device_name("ryzen-mini.local"), "ryzen-mini.local");
+        assert_eq!(device_name("SM-S928U1\n"), "SM-S928U1");
+        assert_eq!(device_name("   "), "");
     }
 
     #[test]

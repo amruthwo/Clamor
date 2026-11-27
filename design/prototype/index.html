@@ -1,0 +1,806 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Clamor prototype</title>
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<!-- Prototype only: the real app ships the icon font inside Clamor (works offline on a LAN). -->
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,400,0..1,0&display=block">
+<style>
+/* ------------------------------------------------------------------ Material 3 tokens
+   Seed: the icon's coral (#fd5453) for primary; neutral greys for surfaces (the current dark
+   theme). Names follow M3's color roles, so components map 1:1 to the M3 guidelines. */
+:root {
+  color-scheme: light;
+  --primary:#ad3229; --on-primary:#ffffff; --primary-container:#ffdad5; --on-primary-container:#410001;
+  --secondary:#6f5b58; --secondary-container:#f8ddd9; --on-secondary-container:#291816;
+  --tertiary:#6d5e0f; --tertiary-container:#f8e287; --on-tertiary-container:#211b00;
+  --error:#ba1a1a; --error-container:#ffdad6; --on-error-container:#410002;
+  --ok:#1e6b45; --ok-container:#c2f0d2; --on-ok-container:#002111;
+  --warn:#8a5100; --warn-container:#ffdcbd; --on-warn-container:#2c1600;
+  --surface:#f9f9fc; --surface-dim:#d9dadd;
+  --surface-container-lowest:#ffffff; --surface-container-low:#f3f3f6; --surface-container:#edeef1;
+  --surface-container-high:#e7e8eb; --surface-container-highest:#e1e2e5;
+  --on-surface:#191c1e; --on-surface-variant:#43474e; --outline:#73777f; --outline-variant:#c3c6cf;
+  --inverse-surface:#2e3133; --inverse-on-surface:#eff0f3; --inverse-primary:#ffb4a9;
+  --scrim:rgb(0 0 0 / .32);
+  --brand:linear-gradient(180deg,#fc8b61,#fd5453);
+  --shadow-1:0 1px 2px rgb(0 0 0 / .3), 0 1px 3px 1px rgb(0 0 0 / .15);
+  --shadow-3:0 4px 8px 3px rgb(0 0 0 / .15), 0 1px 3px rgb(0 0 0 / .3);
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --dark:1; } }
+:root[data-theme="dark"], :root:not([data-theme="light"]):where(.auto-dark) { --dark:1; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  color-scheme: dark;
+  --primary:#ffb4a9; --on-primary:#690003; --primary-container:#8c1d18; --on-primary-container:#ffdad5;
+  --secondary:#e7bdb7; --secondary-container:#5d3f3b; --on-secondary-container:#ffdad5;
+  --tertiary:#dbc66e; --tertiary-container:#534600; --on-tertiary-container:#f8e287;
+  --error:#ffb4ab; --error-container:#93000a; --on-error-container:#ffdad6;
+  --ok:#8fd9ad; --ok-container:#005232; --on-ok-container:#abf5c8;
+  --warn:#ffb871; --warn-container:#693c00; --on-warn-container:#ffdcbd;
+  --surface:#111318; --surface-dim:#111318;
+  --surface-container-lowest:#0c0e12; --surface-container-low:#171b21; --surface-container:#1b1f26;
+  --surface-container-high:#262a31; --surface-container-highest:#31353c;
+  --on-surface:#e2e2e9; --on-surface-variant:#c3c6cf; --outline:#8d9199; --outline-variant:#43474e;
+  --inverse-surface:#e2e2e9; --inverse-on-surface:#2e3036; --inverse-primary:#ad3229;
+  --scrim:rgb(0 0 0 / .55);
+} }
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --primary:#ffb4a9; --on-primary:#690003; --primary-container:#8c1d18; --on-primary-container:#ffdad5;
+  --secondary:#e7bdb7; --secondary-container:#5d3f3b; --on-secondary-container:#ffdad5;
+  --tertiary:#dbc66e; --tertiary-container:#534600; --on-tertiary-container:#f8e287;
+  --error:#ffb4ab; --error-container:#93000a; --on-error-container:#ffdad6;
+  --ok:#8fd9ad; --ok-container:#005232; --on-ok-container:#abf5c8;
+  --warn:#ffb871; --warn-container:#693c00; --on-warn-container:#ffdcbd;
+  --surface:#111318; --surface-dim:#111318;
+  --surface-container-lowest:#0c0e12; --surface-container-low:#171b21; --surface-container:#1b1f26;
+  --surface-container-high:#262a31; --surface-container-highest:#31353c;
+  --on-surface:#e2e2e9; --on-surface-variant:#c3c6cf; --outline:#8d9199; --outline-variant:#43474e;
+  --inverse-surface:#e2e2e9; --inverse-on-surface:#2e3036; --inverse-primary:#ad3229;
+  --scrim:rgb(0 0 0 / .55);
+}
+
+/* ------------------------------------------------------------------ Base + M3 type scale */
+* { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+html, body { height:100%; margin:0; }
+body { background:var(--surface); color:var(--on-surface); font:400 14px/20px Roboto, "Google Sans Text", system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing:.25px; overflow:hidden; }
+button, input, textarea { font:inherit; color:inherit; letter-spacing:inherit; }
+.title-l { font-size:22px; line-height:28px; font-weight:400; letter-spacing:0; }
+.title-m { font-size:16px; line-height:24px; font-weight:500; letter-spacing:.15px; }
+.title-s { font-size:14px; line-height:20px; font-weight:500; letter-spacing:.1px; }
+.label-l { font-size:14px; line-height:20px; font-weight:500; letter-spacing:.1px; }
+.label-m { font-size:12px; line-height:16px; font-weight:500; letter-spacing:.5px; }
+.body-l { font-size:16px; line-height:24px; letter-spacing:.5px; }
+.body-s { font-size:12px; line-height:16px; letter-spacing:.4px; }
+.headline-s { font-size:24px; line-height:32px; font-weight:400; }
+.display-s { font-size:36px; line-height:44px; font-weight:400; }
+.muted { color:var(--on-surface-variant); }
+[hidden] { display:none !important; }
+.icon { font-family:"Material Symbols Rounded"; font-weight:normal; font-style:normal; font-size:24px; line-height:1; display:inline-block; white-space:nowrap; direction:ltr; -webkit-font-smoothing:antialiased; font-variation-settings:"FILL" 0, "wght" 400, "GRAD" 0, "opsz" 24; user-select:none; }
+.icon.fill { font-variation-settings:"FILL" 1, "wght" 400, "GRAD" 0, "opsz" 24; }
+
+/* State layer: M3's hover/press feedback. */
+.st { position:relative; overflow:hidden; cursor:pointer; }
+.st::after { content:""; position:absolute; inset:0; background:currentColor; opacity:0; transition:opacity .15s; pointer-events:none; border-radius:inherit; }
+.st:hover::after { opacity:.08; } .st:active::after { opacity:.12; }
+
+/* ------------------------------------------------------------------ Buttons, chips, fields */
+.btn { display:inline-flex; align-items:center; justify-content:center; gap:8px; height:40px; padding:0 24px; border-radius:20px; border:0; font-size:14px; font-weight:500; letter-spacing:.1px; white-space:nowrap; }
+.btn .icon { font-size:18px; margin-left:-8px; }
+.btn.filled { background:var(--primary); color:var(--on-primary); }
+.btn.tonal { background:var(--secondary-container); color:var(--on-secondary-container); }
+.btn.outlined { background:transparent; color:var(--primary); box-shadow:inset 0 0 0 1px var(--outline); }
+.btn.text { background:transparent; color:var(--primary); padding:0 12px; }
+.btn.text .icon { margin-left:-4px; }
+.btn:disabled { opacity:.38; cursor:default; }
+.icon-btn { width:40px; height:40px; border-radius:20px; border:0; background:transparent; color:var(--on-surface-variant); display:inline-grid; place-items:center; flex:none; }
+.icon-btn.filled { background:var(--primary); color:var(--on-primary); }
+.icon-btn.tonal { background:var(--secondary-container); color:var(--on-secondary-container); }
+.chip { flex:none; display:inline-flex; align-items:center; gap:8px; height:32px; padding:0 16px; border-radius:8px; border:1px solid var(--outline); background:transparent; color:var(--on-surface-variant); font-size:14px; font-weight:500; white-space:nowrap; }
+.chip .icon { font-size:18px; margin-left:-8px; }
+.chip[aria-pressed="true"] { background:var(--secondary-container); color:var(--on-secondary-container); border-color:transparent; }
+.chip.assist { color:var(--on-surface); }
+.chips { display:flex; gap:8px; overflow-x:auto; scrollbar-width:none; padding:2px 16px; margin:0 -16px; }
+.chips::-webkit-scrollbar { display:none; }
+.badge { display:inline-flex; align-items:center; height:20px; padding:0 8px; border-radius:10px; font-size:11px; font-weight:500; letter-spacing:.5px; }
+.badge.ok { background:var(--ok-container); color:var(--on-ok-container); }
+.badge.warn { background:var(--warn-container); color:var(--on-warn-container); }
+.badge.pri { background:var(--primary-container); color:var(--on-primary-container); }
+.badge.neutral { background:var(--surface-container-highest); color:var(--on-surface-variant); }
+.seg { display:flex; border:1px solid var(--outline); border-radius:20px; overflow:hidden; height:40px; }
+.seg button { white-space:nowrap; flex:1; border:0; background:transparent; padding:0 12px; font-weight:500; display:flex; align-items:center; justify-content:center; gap:6px; min-width:0; }
+.seg button + button { border-left:1px solid var(--outline); }
+.seg button[aria-pressed="true"] { background:var(--secondary-container); color:var(--on-secondary-container); }
+@media (min-width:600px) { .seg button[aria-pressed="true"]::before { content:"check"; font-family:"Material Symbols Rounded"; font-size:18px; } }
+.switch { position:relative; width:52px; height:32px; flex:none; }
+.switch input { appearance:none; margin:0; width:52px; height:32px; border-radius:16px; background:var(--surface-container-highest); box-shadow:inset 0 0 0 2px var(--outline); cursor:pointer; transition:background .2s; }
+.switch input::after { content:""; position:absolute; left:8px; top:8px; width:16px; height:16px; border-radius:50%; background:var(--outline); transition:all .2s; }
+.switch input:checked { background:var(--primary); box-shadow:none; }
+.switch input:checked::after { left:24px; top:4px; width:24px; height:24px; background:var(--on-primary); }
+input[type=range] { width:100%; accent-color:var(--primary); }
+.field { position:relative; }
+.field input { width:100%; height:56px; padding:20px 16px 6px; border:0; border-radius:4px 4px 0 0; background:var(--surface-container-highest); border-bottom:1px solid var(--on-surface-variant); outline:none; font-size:16px; }
+.field input:focus { border-bottom:2px solid var(--primary); }
+.field label { position:absolute; left:16px; top:8px; font-size:12px; color:var(--on-surface-variant); pointer-events:none; }
+.field input:focus + label { color:var(--primary); }
+
+/* ------------------------------------------------------------------ App shell
+   Compact (<600 px): bottom navigation bar. Medium (600-1199): navigation rail.
+   Expanded (>=1200): rail + list-detail panes (chat list beside the conversation). */
+.app { height:100dvh; display:grid; grid-template-columns:1fr; grid-template-rows:1fr auto; grid-template-areas:"main" "nav"; }
+.nav { grid-area:nav; display:flex; justify-content:space-around; background:var(--surface-container); padding:12px 8px calc(16px + env(safe-area-inset-bottom)); }
+.nav .fab-slot { display:none; }
+.nav a { flex:1; max-width:120px; display:flex; flex-direction:column; align-items:center; gap:4px; color:var(--on-surface-variant); text-decoration:none; font-size:12px; font-weight:500; letter-spacing:.5px; }
+.nav a .pill { width:64px; height:32px; border-radius:16px; display:grid; place-items:center; transition:background .2s; position:relative; }
+.nav a[aria-current="page"] { color:var(--on-surface); }
+.nav a[aria-current="page"] .pill { background:var(--secondary-container); color:var(--on-secondary-container); }
+.nav a[aria-current="page"] .icon { font-variation-settings:"FILL" 1, "wght" 400, "GRAD" 0, "opsz" 24; }
+.nav .dotbadge { position:absolute; top:2px; right:16px; width:8px; height:8px; border-radius:50%; background:var(--error); }
+main { grid-area:main; min-height:0; position:relative; }
+.screen { position:absolute; inset:0; display:flex; flex-direction:column; min-height:0; animation:fadein .2s ease; }
+@keyframes fadein { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:none; } }
+.topbar { display:flex; align-items:center; gap:4px; min-height:64px; padding:calc(8px + env(safe-area-inset-top)) 4px 8px 16px; background:var(--surface); flex:none; }
+.topbar .title-l { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.topbar.lead { padding-left:4px; }
+.scroll { flex:1; min-height:0; overflow-y:auto; padding:0 16px 24px; }
+.wrap { max-width:840px; margin:0 auto; display:grid; gap:16px; grid-template-columns:minmax(0,1fr); }
+.scroll { overflow-x:hidden; }
+.brand-mark { width:32px; height:32px; border-radius:9px; flex:none; }
+.avatar { width:40px; height:40px; border-radius:50%; display:grid; place-items:center; font-weight:500; flex:none; }
+.avatar.sm { width:32px; height:32px; font-size:13px; }
+.avatar.a { background:var(--primary-container); color:var(--on-primary-container); }
+.avatar.b { background:var(--tertiary-container); color:var(--on-tertiary-container); }
+.avatar.c { background:var(--ok-container); color:var(--on-ok-container); }
+
+@media (min-width:600px) {
+  .app { grid-template-columns:80px 1fr; grid-template-rows:1fr; grid-template-areas:"nav main"; }
+  .nav { flex-direction:column; justify-content:flex-start; gap:12px; padding:calc(12px + env(safe-area-inset-top)) 0 16px; background:var(--surface); }
+  .nav .fab-slot { display:grid; place-items:center; margin-bottom:28px; }
+  .nav a { flex:none; max-width:none; }
+  .nav a .pill { width:56px; }
+  .nav .dotbadge { right:12px; }
+  .scroll { padding:0 24px 24px; }
+}
+
+/* Cards and lists */
+.card { background:var(--surface-container-low); border-radius:12px; padding:16px; }
+.card.filled { background:var(--surface-container-highest); }
+.card.outlined { background:var(--surface); box-shadow:inset 0 0 0 1px var(--outline-variant); }
+.card.hero { background:var(--surface-container); border-radius:28px; padding:20px; }
+.section-title { color:var(--primary); padding:16px 16px 8px; font-size:14px; font-weight:500; letter-spacing:.1px; }
+.list { background:var(--surface-container-low); border-radius:16px; overflow:hidden; }
+.item { display:flex; align-items:center; gap:16px; min-height:56px; padding:8px 16px 8px 16px; text-align:left; width:100%; border:0; background:transparent; }
+.item + .item { border-top:1px solid var(--outline-variant); }
+.item .lead-icon { color:var(--on-surface-variant); width:24px; flex:none; }
+.item .text { flex:1; min-width:0; display:grid; gap:2px; }
+.item .text .h { font-size:16px; line-height:24px; letter-spacing:.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.item .text .s { font-size:14px; line-height:20px; color:var(--on-surface-variant); }
+.item .trail { color:var(--on-surface-variant); flex:none; display:flex; align-items:center; gap:8px; }
+.item.three .text .s { display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+.tile-icon { width:40px; height:40px; border-radius:12px; display:grid; place-items:center; background:var(--secondary-container); color:var(--on-secondary-container); flex:none; }
+.tile-icon.pri { background:var(--primary-container); color:var(--on-primary-container); }
+
+/* ------------------------------------------------------------------ Chat */
+.chat-layout { flex:1; min-height:0; display:grid; grid-template-columns:1fr; }
+.chat-list-pane { display:none; }
+.conv { display:flex; flex-direction:column; min-height:0; }
+.msgs { flex:1; min-height:0; overflow-y:auto; padding:8px 16px 16px; display:flex; flex-direction:column; gap:16px; }
+.msgs .inner { max-width:760px; width:100%; margin:0 auto; display:flex; flex-direction:column; gap:18px; }
+.day { align-self:center; font-size:12px; color:var(--on-surface-variant); }
+.m { display:flex; gap:10px; max-width:100%; }
+.m.me { flex-direction:row-reverse; }
+.m > div:not(.body) { max-width:min(85%, 560px); min-width:0; }
+.m .bubble { padding:10px 16px; border-radius:20px; width:fit-content; font-size:16px; line-height:24px; letter-spacing:.2px; overflow-wrap:anywhere; }
+.m.me > div { display:flex; justify-content:flex-end; }
+.m.me .bubble { background:var(--primary-container); color:var(--on-primary-container); border-bottom-right-radius:6px; }
+.m.other .bubble { background:var(--surface-container-high); border-bottom-left-radius:6px; }
+.m.bot .body { flex:1; min-width:0; font-size:16px; line-height:24px; letter-spacing:.2px; }
+.m .who { font-size:12px; color:var(--on-surface-variant); margin-bottom:2px; font-weight:500; }
+.m.bot .who { display:flex; gap:6px; align-items:center; }
+.bot-avatar { width:32px; height:32px; border-radius:10px; flex:none; }
+.bot-avatar.thinking { animation:breathe 1.4s ease-in-out infinite; }
+@keyframes breathe { 0%,100% { transform:scale(1); filter:saturate(1); } 50% { transform:scale(.88); filter:saturate(1.4) brightness(1.1); } }
+.typing { display:inline-flex; gap:4px; padding:8px 0; }
+.typing i { width:8px; height:8px; border-radius:50%; background:var(--on-surface-variant); opacity:.4; animation:dot 1.2s infinite; }
+.typing i:nth-child(2) { animation-delay:.15s; } .typing i:nth-child(3) { animation-delay:.3s; }
+@keyframes dot { 0%,60%,100% { opacity:.3; transform:none; } 30% { opacity:1; transform:translateY(-3px); } }
+.msg-actions { display:flex; gap:0; margin-top:4px; margin-left:-8px; }
+.msg-actions .icon-btn { width:32px; height:32px; } .msg-actions .icon { font-size:18px; }
+.composer { flex:none; padding:8px 12px calc(12px + env(safe-area-inset-bottom)); }
+.composer .box { max-width:760px; margin:0 auto; display:flex; align-items:flex-end; gap:4px; background:var(--surface-container-high); border-radius:28px; padding:4px; }
+.composer textarea { flex:1; min-width:0; border:0; background:transparent; outline:none; resize:none; font-size:16px; line-height:24px; padding:8px 4px; max-height:144px; }
+.composer .icon-btn { width:48px; height:48px; border-radius:24px; }
+.model-chip { flex:none; max-width:46vw; display:inline-flex; align-items:center; gap:6px; height:32px; padding:0 12px 0 8px; border-radius:16px; background:var(--surface-container-high); border:0; font-size:12px; font-weight:500; color:var(--on-surface-variant); }
+.model-chip .live { width:8px; height:8px; border-radius:50%; background:var(--ok); box-shadow:0 0 0 3px color-mix(in srgb, var(--ok) 25%, transparent); flex:none; }
+.model-chip span.t { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.private-note { display:flex; gap:8px; align-items:center; justify-content:center; font-size:12px; color:var(--on-surface-variant); padding:4px 0 0; }
+.drawer-list .item { border-radius:28px; min-height:56px; border-top:0 !important; padding:0 16px; }
+.drawer-list .item[aria-current="true"] { background:var(--secondary-container); color:var(--on-secondary-container); }
+.drawer-list .item[aria-current="true"] .s, .drawer-list .item[aria-current="true"] .lead-icon { color:var(--on-secondary-container); }
+.drawer-head { padding:16px 28px 8px; color:var(--on-surface-variant); font-size:14px; font-weight:500; }
+@media (min-width:1200px) {
+  .chat-layout { grid-template-columns:320px 1fr; }
+  .chat-list-pane { display:flex; flex-direction:column; min-height:0; background:var(--surface-container-low); border-radius:16px 0 0 0; padding:12px; overflow-y:auto; gap:4px; }
+  .chat-only-compact { display:none !important; }
+}
+
+/* ------------------------------------------------------------------ Swarm */
+.health { display:flex; gap:20px; align-items:center; }
+.ring { width:88px; height:88px; flex:none; position:relative; }
+.ring svg { width:100%; height:100%; transform:rotate(-90deg); }
+.ring b { position:absolute; inset:0; display:grid; place-items:center; font-size:20px; font-weight:500; }
+.stats { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin-top:16px; }
+.stat { background:var(--surface-container-highest); border-radius:16px; padding:12px; min-width:0; }
+.stat b { display:block; font-size:22px; line-height:28px; font-weight:400; }
+.stat span { font-size:12px; color:var(--on-surface-variant); }
+.meter { height:8px; border-radius:4px; background:var(--surface-container-highest); overflow:hidden; display:flex; gap:2px; }
+.meter i { display:block; height:100%; }
+.spark { width:100%; height:40px; }
+
+/* ------------------------------------------------------------------ Sheets, dialogs, snackbar */
+.scrim { position:fixed; inset:0; background:var(--scrim); z-index:20; animation:fade .2s; }
+@keyframes fade { from { opacity:0; } }
+.sheet { position:fixed; left:0; right:0; bottom:0; z-index:21; background:var(--surface-container-low); border-radius:28px 28px 0 0; max-height:88dvh; overflow-y:auto; padding:0 0 calc(16px + env(safe-area-inset-bottom)); animation:up .25s cubic-bezier(.2,0,0,1); margin:0 auto; max-width:640px; }
+@keyframes up { from { transform:translateY(100%); } }
+.sheet .grab { width:32px; height:4px; border-radius:2px; background:var(--on-surface-variant); opacity:.4; margin:22px auto 14px; }
+.sheet h2 { margin:0; padding:0 24px 8px; }
+.sheet .body { padding:0 24px; display:grid; gap:16px; }
+.drawer { position:fixed; left:0; top:0; bottom:0; width:min(360px, 86vw); z-index:21; background:var(--surface-container-low); border-radius:0 16px 16px 0; padding:calc(12px + env(safe-area-inset-top)) 12px 12px; overflow-y:auto; animation:right .25s cubic-bezier(.2,0,0,1); display:flex; flex-direction:column; gap:4px; }
+@keyframes right { from { transform:translateX(-100%); } }
+.snackbar { position:fixed; left:50%; transform:translateX(-50%); bottom:calc(96px + env(safe-area-inset-bottom)); z-index:30; background:var(--inverse-surface); color:var(--inverse-on-surface); border-radius:4px; min-height:48px; padding:4px 8px 4px 16px; display:flex; align-items:center; gap:8px; box-shadow:var(--shadow-3); width:max-content; max-width:calc(100vw - 32px); animation:snack .25s cubic-bezier(.2,0,0,1); }
+.snackbar .btn.text { color:var(--inverse-primary); }
+@keyframes snack { from { opacity:0; transform:translate(-50%, 16px); } }
+@media (min-width:600px) { .snackbar { bottom:24px; } }
+.fab { height:56px; border-radius:16px; border:0; background:var(--primary-container); color:var(--on-primary-container); display:inline-flex; align-items:center; gap:12px; padding:0 20px 0 16px; font-weight:500; box-shadow:var(--shadow-3); }
+.fab.square { width:56px; padding:0; justify-content:center; }
+.fab-float { position:absolute; right:16px; bottom:16px; z-index:5; }
+.confetti { position:fixed; inset:0; pointer-events:none; z-index:40; overflow:hidden; }
+.confetti i { position:absolute; top:-12px; width:8px; height:14px; border-radius:2px; animation:fall 1.6s cubic-bezier(.3,.6,.4,1) forwards; }
+@keyframes fall { to { transform:translateY(105vh) rotate(540deg); opacity:.2; } }
+
+/* ------------------------------------------------------------------ Setup flow */
+.setup { position:fixed; inset:0; z-index:25; background:var(--surface); display:flex; flex-direction:column; animation:fadein .25s; }
+.setup .scroll { display:flex; flex-direction:column; }
+.setup .wrap { max-width:480px; width:100%; }
+.steps { display:flex; gap:6px; justify-content:center; padding:8px 0 0; }
+.steps i { width:24px; height:4px; border-radius:2px; background:var(--surface-container-highest); }
+.steps i.on { background:var(--primary); }
+.choice { display:flex; gap:16px; align-items:center; text-align:left; padding:20px; border-radius:24px; border:0; background:var(--surface-container-low); width:100%; }
+.choice .tile-icon { width:56px; height:56px; border-radius:16px; }
+.choice .tile-icon .icon { font-size:28px; }
+.code-boxes { display:flex; gap:8px; justify-content:center; }
+.code-boxes input { width:44px; height:56px; text-align:center; font-size:24px; border:0; border-radius:12px; background:var(--surface-container-highest); outline:none; }
+.code-boxes input:focus { box-shadow:inset 0 0 0 2px var(--primary); }
+.code-boxes .dash { align-self:center; color:var(--on-surface-variant); }
+.hero-mark { width:96px; height:96px; border-radius:28px; margin:24px auto 8px; display:block; box-shadow:0 12px 32px rgb(253 84 83 / .35); }
+.big-check { width:96px; height:96px; border-radius:50%; background:var(--ok-container); color:var(--on-ok-container); display:grid; place-items:center; margin:32px auto 8px; animation:pop .5s cubic-bezier(.2,1.6,.4,1); }
+.big-check .icon { font-size:56px; }
+@keyframes pop { from { transform:scale(.3); opacity:0; } }
+.spinner { width:48px; height:48px; border-radius:50%; border:4px solid var(--surface-container-highest); border-top-color:var(--primary); animation:spin 1s linear infinite; margin:24px auto; }
+@keyframes spin { to { transform:rotate(360deg); } }
+.center { text-align:center; }
+.row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+.spacer { flex:1; }
+.crab { width:24px; height:24px; --crab-fill:none; }
+.nav a[aria-current="page"] .crab { --crab-fill:currentColor; }
+.desk-pills { display:none; gap:8px; align-items:center; flex:none; }
+@media (min-width:1200px) { .desk-pills { display:flex; } }
+.pill-w { display:inline-flex; align-items:center; gap:8px; height:32px; padding:0 12px; border-radius:16px; background:var(--surface-container-high); border:0; font-size:12px; font-weight:500; color:var(--on-surface-variant); white-space:nowrap; }
+.pill-w .icon { font-size:16px; }
+.pill-w b { color:var(--on-surface); font-weight:500; }
+.pill-w .mini-meter { width:36px; height:6px; border-radius:3px; background:var(--surface-container-highest); overflow:hidden; }
+.pill-w .mini-meter i { display:block; height:100%; background:var(--primary); }
+.pill-w svg.mini-spark { width:40px; height:16px; }
+.pill-w .ok-dot { width:8px; height:8px; border-radius:50%; background:var(--ok); }
+.pill-w .avs { display:flex; } .pill-w .avs span { width:18px; height:18px; border-radius:50%; font-size:10px; display:grid; place-items:center; margin-left:-5px; box-shadow:0 0 0 2px var(--surface-container-high); }
+.pill-w .avs span:first-child { margin-left:0; }
+.chat-head-text { flex:1; min-width:0; display:grid; }
+@media (min-width:1200px) { .chat-head-text { flex:1 1 140px; min-width:140px; } .model-chip .tps { display:none; } }
+.check-code { font:500 22px/28px ui-monospace, "Roboto Mono", monospace; letter-spacing:3px; }
+.proto-note { position:fixed; right:8px; top:calc(8px + env(safe-area-inset-top)); z-index:50; }
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="crab" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+    <ellipse cx="12" cy="14.5" rx="5.6" ry="3.9" style="fill:var(--crab-fill)"/>
+    <path d="M10.2 10.7 9.6 8.4M13.8 10.7l.6-2.3"/>
+    <circle cx="9.4" cy="7.4" r=".9" fill="currentColor" stroke="none"/><circle cx="14.6" cy="7.4" r=".9" fill="currentColor" stroke="none"/>
+    <path d="M6.9 12.6 4.6 9.6M17.1 12.6l2.3-3"/>
+    <path d="M4.6 9.6C2.9 8.9 2.5 6.4 3.9 4.9c.3 1.3 1.1 1.9 2.2 1.8-.2 1.3-.7 2.3-1.5 2.9Z" style="fill:var(--crab-fill)"/>
+    <path d="M19.4 9.6c1.7-.7 2.1-3.2.7-4.7-.3 1.3-1.1 1.9-2.2 1.8.2 1.3.7 2.3 1.5 2.9Z" style="fill:var(--crab-fill)"/>
+    <path d="M6.6 15.6 3.8 16.8M7.4 17.5l-2.2 2M17.4 15.6l2.8 1.2M16.6 17.5l2.2 2"/>
+  </symbol>
+</svg>
+<div class="app" id="app">
+  <nav class="nav" aria-label="Main">
+    <div class="fab-slot"><button class="fab square st" title="New chat" onclick="go('chat'); newChat()"><span class="icon">edit_square</span></button></div>
+    <a href="#chat" data-nav="chat" class="st-host"><span class="pill st"><span class="icon">chat_bubble</span></span>Chat</a>
+    <a href="#swarm" data-nav="swarm"><span class="pill st"><span class="icon">hub</span></span>Swarm</a>
+    <a href="#models" data-nav="models"><span class="pill st"><span class="icon">neurology</span></span>Models</a>
+    <a href="#coord" data-nav="coord" title="Coordinator: for the swarm's owner and admins"><span class="pill st"><svg class="crab"><use href="#crab"/></svg><i class="dotbadge"></i></span>Coord.</a>
+    <a href="#settings" data-nav="settings"><span class="pill st"><span class="icon">settings</span></span>Settings</a>
+  </nav>
+
+  <main>
+    <!-- ============================================================ CHAT -->
+    <section class="screen" id="s-chat">
+      <div class="chat-layout">
+        <aside class="chat-list-pane" id="chat-pane"></aside>
+        <div class="conv">
+          <header class="topbar lead">
+            <button class="icon-btn st chat-only-compact" title="Conversations" onclick="openDrawer()"><span class="icon">menu</span></button>
+            <div class="chat-head-text">
+              <span class="title-m" id="chat-title" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Group</span>
+              <span class="body-s muted" id="chat-sub" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Everyone in the swarm · 2 people</span>
+            </div>
+            <button class="model-chip st" onclick="go('models')" title="Running model"><span class="live"></span><span class="t">Llama 3.2 3B<span class="tps"> · 16 tok/s</span></span></button>
+            <div class="desk-pills">
+              <button class="pill-w st" onclick="go('models')" title="Speed, last 10 minutes"><svg class="mini-spark" viewBox="0 0 40 16" preserveAspectRatio="none"><path d="M0 12 L6 10 L12 9 L18 10 L24 5 L30 6 L36 4 L40 5" fill="none" stroke="var(--primary)" stroke-width="1.6"/></svg><b>16</b> tok/s</button>
+              <button class="pill-w st" onclick="go('swarm')" title="Swarm health"><span class="ok-dot"></span><b>All good</b> · 2/3 devices</button>
+              <button class="pill-w st" onclick="go('swarm')" title="Memory the model uses, of what the swarm pools"><span class="icon">memory</span><span class="mini-meter"><i style="width:16%"></i></span><b>3.4</b>/21 GB</button>
+              <button class="pill-w st" onclick="go('swarm')" title="People here"><span class="avs"><span class="avatar a">A</span><span class="avatar b">B</span></span><b>2</b> here</button>
+              <button class="pill-w st" onclick="deviceSheet('macbook')" title="This computer"><span class="icon">laptop_mac</span>This laptop · <b>38%</b></button>
+            </div>
+            <button class="icon-btn st" title="Light or dark" onclick="toggleTheme()"><span class="icon">contrast</span></button>
+          </header>
+          <div class="msgs" id="msgs"><div class="inner" id="msgs-inner"></div></div>
+          <div class="composer">
+            <div class="box">
+              <button class="icon-btn st" title="Add a file" onclick="attachSheet()"><span class="icon">add_circle</span></button>
+              <textarea id="input" rows="1" placeholder="Message Clamor" oninput="grow(this)" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();send()}"></textarea>
+              <button class="icon-btn filled st" id="send-btn" title="Send" onclick="sendOrStop()"><span class="icon fill" id="send-icon">arrow_upward</span></button>
+            </div>
+            <div class="private-note" id="private-note" hidden><span class="icon" style="font-size:16px">lock</span>Private: words stay on this phone</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================================================ SWARM -->
+    <section class="screen" id="s-swarm" hidden>
+      <header class="topbar">
+        <img class="brand-mark" src="icon.svg" alt="">
+        <span class="title-l" style="margin-left:12px">Home swarm</span>
+        <button class="icon-btn st" title="Light or dark" onclick="toggleTheme()"><span class="icon">contrast</span></button>
+      </header>
+      <div class="scroll"><div class="wrap">
+        <div class="card hero">
+          <div class="health">
+            <div class="ring"><svg viewBox="0 0 36 36"><circle cx="18" cy="18" r="15.5" fill="none" stroke="var(--surface-container-highest)" stroke-width="4"/><circle cx="18" cy="18" r="15.5" fill="none" stroke="var(--ok)" stroke-width="4" stroke-linecap="round" stroke-dasharray="65 100" pathLength="97.4"/></svg><b>2/3</b></div>
+            <div style="min-width:0">
+              <div class="headline-s">All good</div>
+              <div class="muted">2 devices working · 1 paused on battery</div>
+            </div>
+          </div>
+          <div class="stats">
+            <div class="stat"><b>16</b><span>tok/s now</span></div>
+            <div class="stat"><b>2</b><span>people</span></div>
+            <div class="stat"><b>21 GB</b><span>pooled</span></div>
+          </div>
+          <div style="margin-top:16px">
+            <div class="row body-s muted" style="margin-bottom:6px"><span>Memory: model uses 3.4 of 21 GB</span></div>
+            <div class="meter"><i style="width:16%;background:var(--primary)"></i><i style="width:84%;background:transparent"></i></div>
+          </div>
+        </div>
+
+        <div>
+          <div class="section-title">Devices</div>
+          <div class="list">
+            <button class="item st" onclick="deviceSheet('macbook')"><div class="tile-icon pri"><span class="icon">laptop_mac</span></div><div class="text"><span class="h">amruthwo-macbookair</span><span class="s">Coordinator · layers 0–14 · 38% busy</span></div><div class="trail"><span class="badge ok">Working</span></div></button>
+            <button class="item st" onclick="deviceSheet('ryzen')"><div class="tile-icon"><span class="icon">desktop_windows</span></div><div class="text"><span class="h">ryzen-mini</span><span class="s">Layers 14–28 · 52% busy</span></div><div class="trail"><span class="badge ok">Working</span></div></button>
+            <button class="item st" onclick="deviceSheet('phone')"><div class="tile-icon"><span class="icon">smartphone</span></div><div class="text"><span class="h">Galaxy S24 Ultra</span><span class="s">This phone · plug in to help</span></div><div class="trail"><span class="badge warn">On battery</span></div></button>
+          </div>
+        </div>
+
+        <div>
+          <div class="section-title">People</div>
+          <div class="list">
+            <div class="item"><div class="avatar a">A</div><div class="text"><span class="h">Amruth</span><span class="s">Owner · 2 devices</span></div><div class="trail body-s">online</div></div>
+            <div class="item"><div class="avatar b">B</div><div class="text"><span class="h">Bea</span><span class="s">Member · 1 device</span></div><div class="trail body-s">online</div></div>
+          </div>
+        </div>
+        <div style="height:72px"></div>
+      </div></div>
+      <button class="fab fab-float st" onclick="addDeviceSheet()"><span class="icon">add</span>Add device</button>
+    </section>
+
+    <!-- ============================================================ MODELS -->
+    <section class="screen" id="s-models" hidden>
+      <header class="topbar">
+        <span class="title-l">Models</span>
+        <button class="icon-btn st" title="Light or dark" onclick="toggleTheme()"><span class="icon">contrast</span></button>
+      </header>
+      <div class="scroll"><div class="wrap">
+        <div class="card hero">
+          <div class="row" style="gap:12px;flex-wrap:nowrap">
+            <div class="tile-icon pri" style="width:48px;height:48px;border-radius:14px"><span class="icon">neurology</span></div>
+            <div style="flex:1;min-width:0">
+              <div class="label-m" style="color:var(--primary)">RUNNING NOW</div>
+              <div class="title-m" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Llama 3.2 3B Instruct</div>
+              <div class="body-s muted">Split over 2 devices · 8k context</div>
+            </div>
+          </div>
+          <svg class="spark" viewBox="0 0 200 40" preserveAspectRatio="none" style="margin-top:12px"><path d="M0 30 L20 26 L40 22 L60 24 L80 14 L100 16 L120 12 L140 15 L160 10 L180 13 L200 11" fill="none" stroke="var(--primary)" stroke-width="2" vector-effect="non-scaling-stroke"/><path d="M0 30 L20 26 L40 22 L60 24 L80 14 L100 16 L120 12 L140 15 L160 10 L180 13 L200 11 L200 40 L0 40Z" fill="var(--primary)" opacity=".12"/></svg>
+          <div class="row" style="margin-top:8px">
+            <span class="body-s muted">16 tok/s · first words in 0.8 s</span><span class="spacer"></span>
+            <button class="btn outlined st" onclick="snack('Model stopped (prototype)')">Stop</button>
+          </div>
+        </div>
+
+        <div>
+          <div class="section-title">Find a model</div>
+          <div class="chips" id="cap-chips" style="margin-top:0">
+            <button class="chip st" aria-pressed="true" data-cap="fits"><span class="icon">check</span>Fits this swarm</button>
+            <button class="chip st" data-cap="tools"><span class="icon">build</span>Tools</button>
+            <button class="chip st" data-cap="thinking"><span class="icon">psychology</span>Thinking</button>
+            <button class="chip st" data-cap="vision"><span class="icon">visibility</span>Vision</button>
+            <button class="chip st" data-cap="embed"><span class="icon">data_array</span>Embedding</button>
+          </div>
+          <div class="list" style="margin-top:12px" id="catalog"></div>
+          <p class="body-s muted" style="padding:8px 16px 0">Speeds are predicted from this swarm's measurements. One click downloads a model to one device; the others fetch only the parts they run.</p>
+        </div>
+        <div>
+          <div class="section-title">On your devices</div>
+          <div class="list">
+            <div class="item"><div class="tile-icon"><span class="icon">description</span></div><div class="text"><span class="h">Llama-3.2-3B-Instruct-Q8_0</span><span class="s">3.4 GB · on amruthwo-macbookair</span></div><div class="trail"><span class="badge pri">Running</span></div></div>
+            <div class="item"><div class="tile-icon"><span class="icon">description</span></div><div class="text"><span class="h">SmolLM2-360M-Instruct-Q8_0</span><span class="s">0.4 GB · on ryzen-mini</span></div><div class="trail"><button class="btn text st">Start</button></div></div>
+          </div>
+        </div>
+      </div></div>
+    </section>
+
+    <!-- ============================================================ COORD. (owner and admins) -->
+    <section class="screen" id="s-coord" hidden>
+      <header class="topbar">
+        <span class="title-l">Coordinator</span>
+        <button class="icon-btn st" title="Light or dark" onclick="toggleTheme()"><span class="icon">contrast</span></button>
+      </header>
+      <div class="scroll"><div class="wrap">
+        <div class="card hero">
+          <div class="row" style="gap:16px;flex-wrap:nowrap">
+            <div class="tile-icon pri" style="width:56px;height:56px;border-radius:16px"><svg class="crab" style="width:32px;height:32px;--crab-fill:currentColor"><use href="#crab"/></svg></div>
+            <div style="flex:1;min-width:0"><div class="title-m">Home swarm</div><div class="body-s muted">Coordinated by amruthwo-macbookair · up 3 h · you are the owner</div></div>
+          </div>
+          <div class="row" style="margin-top:16px">
+            <span class="badge ok">Encrypted</span><span class="badge neutral">Protocol v6</span><span class="badge neutral">Seen on the network</span>
+          </div>
+        </div>
+
+        <div>
+          <div class="section-title">Needs you</div>
+          <div class="card" style="display:grid;gap:12px">
+            <div class="row" style="gap:16px;flex-wrap:nowrap"><div class="tile-icon"><span class="icon">laptop_chromebook</span></div><div style="flex:1;min-width:0"><div class="title-s">"Cal's laptop" asks to join</div><div class="body-s muted">Approve only if Cal's screen shows the same code</div></div></div>
+            <div class="check-code center">7 4 1 – 2 9 0</div>
+            <div class="row" style="justify-content:flex-end"><button class="btn text st" onclick="snack('Declined')">Decline</button><button class="btn filled st" onclick="snack('Approved: Cal\'s laptop is joining');celebrateJoin()">Approve</button></div>
+          </div>
+        </div>
+
+        <div>
+          <div class="section-title">People</div>
+          <div class="list">
+            <button class="item st" onclick="personSheet('Amruth','Owner')"><div class="avatar a">A</div><div class="text"><span class="h">Amruth</span><span class="s">Owner · 2 devices · PIN set</span></div><span class="icon trail">chevron_right</span></button>
+            <button class="item st" onclick="personSheet('Bea','Member')"><div class="avatar b">B</div><div class="text"><span class="h">Bea</span><span class="s">Member · 1 device</span></div><span class="icon trail">chevron_right</span></button>
+            <button class="item st" onclick="addDeviceSheet()"><span class="icon lead-icon" style="width:40px;text-align:center">person_add</span><div class="text"><span class="h">Invite a person</span><span class="s">They join with their own name and devices</span></div></button>
+          </div>
+        </div>
+
+        <div>
+          <div class="section-title">Devices</div>
+          <div class="list">
+            <button class="item st" onclick="snack('Updating 2 devices, one at a time (prototype)')"><span class="icon lead-icon" style="width:40px;text-align:center">system_update</span><div class="text"><span class="h">2 can update</span><span class="s">To 0.7.0, each while idle</span></div><span class="trail"><span class="btn tonal" style="height:32px;padding:0 16px">Update all</span></span></button>
+            <button class="item st" onclick="deviceSheet('ryzen')"><div class="tile-icon"><span class="icon">desktop_windows</span></div><div class="text"><span class="h">ryzen-mini</span><span class="s">Amruth · 0.6.0 · 32 GB</span></div><span class="icon trail">chevron_right</span></button>
+            <button class="item st" onclick="deviceSheet('phone')"><div class="tile-icon"><span class="icon">smartphone</span></div><div class="text"><span class="h">Galaxy S24 Ultra</span><span class="s">Amruth · 0.6.0 · paused on battery</span></div><span class="icon trail">chevron_right</span></button>
+          </div>
+        </div>
+
+        <div>
+          <div class="section-title">Swarm</div>
+          <div class="list">
+            <button class="item st" onclick="snack('Rename (prototype)')"><span class="icon lead-icon">badge</span><div class="text"><span class="h">Name</span><span class="s">Home</span></div><span class="icon trail">edit</span></button>
+            <button class="item st" onclick="snack('poplar-blog-hazelnut-caboose-parlor')"><span class="icon lead-icon">key</span><div class="text"><span class="h">Passphrase</span><span class="s">•••••-•••••-••••• · tap to show</span></div><span class="icon trail">visibility</span></button>
+            <button class="item st" onclick="snack('Browser sign-in: PINs and sign-in codes (prototype)')"><span class="icon lead-icon">login</span><div class="text"><span class="h">Signing in from a browser</span><span class="s">PINs and sign-in codes</span></div><span class="icon trail">chevron_right</span></button>
+            <button class="item st" disabled style="opacity:.55"><span class="icon lead-icon">move_up</span><div class="text"><span class="h">Move coordinator to…</span><span class="s">Coming later</span></div></button>
+          </div>
+        </div>
+
+        <div>
+          <div class="section-title">Diagnostics</div>
+          <div class="list">
+            <button class="item st" onclick="snack('Measuring every device again…')"><span class="icon lead-icon">speed</span><div class="text"><span class="h">Re-run the muster</span><span class="s">Measure every device again (about a minute)</span></div></button>
+            <button class="item st" onclick="snack('Measurements: GFLOP/s, memory bandwidth (prototype)')"><span class="icon lead-icon">monitoring</span><div class="text"><span class="h">Measurements</span><span class="s">Compute and memory speed per device</span></div><span class="icon trail">chevron_right</span></button>
+            <button class="item st" onclick="snack('Links between devices, RTT (prototype)')"><span class="icon lead-icon">lan</span><div class="text"><span class="h">Links</span><span class="s">How fast devices reach each other</span></div><span class="icon trail">chevron_right</span></button>
+            <button class="item st" onclick="snack('Coordinator log (prototype)')"><span class="icon lead-icon">article</span><div class="text"><span class="h">Coordinator log</span></div><span class="icon trail">chevron_right</span></button>
+          </div>
+        </div>
+      </div></div>
+    </section>
+
+    <!-- ============================================================ SETTINGS -->
+    <section class="screen" id="s-settings" hidden>
+      <header class="topbar">
+        <span class="title-l">Settings</span>
+        <button class="icon-btn st" title="Light or dark" onclick="toggleTheme()"><span class="icon">contrast</span></button>
+      </header>
+      <div class="scroll"><div class="wrap">
+        <div class="card hero row" style="gap:16px;flex-wrap:nowrap">
+          <div class="avatar a" style="width:56px;height:56px;font-size:22px">A</div>
+          <div style="flex:1;min-width:0"><div class="title-m">Amruth</div><div class="body-s muted">Owner of Home swarm</div></div>
+          <button class="btn tonal st" onclick="prefsSheet()">Edit</button>
+        </div>
+
+        <div>
+          <div class="section-title">This phone</div>
+          <div class="list">
+            <div class="item"><span class="icon lead-icon">volunteer_activism</span><div class="text"><span class="h">Help the swarm</span><span class="s">When the phone is idle and charging</span></div></div>
+            <div class="item" style="padding-top:0"><span class="lead-icon"></span><div class="seg" style="flex:1" id="seg-part"><button aria-pressed="false" class="st">Off</button><button aria-pressed="true" class="st">When idle</button><button aria-pressed="false" class="st">Always</button></div></div>
+            <label class="item st"><span class="icon lead-icon">battery_charging_full</span><div class="text"><span class="h">Help on battery</span><span class="s">Uses battery faster</span></div><span class="switch"><input type="checkbox"></span></label>
+            <div class="item"><span class="icon lead-icon">memory</span><div class="text"><span class="h">Memory Clamor may use</span><span class="s"><input type="range" min="5" max="95" value="50" oninput="this.closest('.item').querySelector('.trail').textContent=this.value+'%'"></span></div><span class="trail">50%</span></div>
+            <div class="item"><span class="icon lead-icon">speed</span><div class="text"><span class="h">Processor Clamor may use</span><span class="s"><input type="range" min="5" max="100" value="75" oninput="this.closest('.item').querySelector('.trail').textContent=this.value+'%'"></span></div><span class="trail">75%</span></div>
+            <label class="item st"><span class="icon lead-icon">low_priority</span><div class="text"><span class="h">Stay in the background</span><span class="s">Your own apps always come first</span></div><span class="switch"><input type="checkbox" checked></span></label>
+          </div>
+        </div>
+
+        <div>
+          <div class="section-title">Swarm</div>
+          <div class="list">
+            <button class="item st" onclick="addDeviceSheet()"><span class="icon lead-icon">add_to_home_screen</span><div class="text"><span class="h">Add one of my devices</span><span class="s">A one-time code or QR, linked to you</span></div><span class="icon trail">chevron_right</span></button>
+            <button class="item st" onclick="openSetup()"><span class="icon lead-icon">swap_horiz</span><div class="text"><span class="h">Change swarm</span><span class="s">Leave, or join another (shows the setup flow)</span></div><span class="icon trail">chevron_right</span></button>
+          </div>
+        </div>
+
+        <div>
+          <div class="section-title">Clamor</div>
+          <div class="list">
+            <button class="item st" onclick="updateSheet()"><span class="icon lead-icon">system_update</span><div class="text"><span class="h">Update available</span><span class="s">Clamor 0.7.0</span></div><span class="trail"><span class="badge pri">New</span><span class="icon">chevron_right</span></span></button>
+            <button class="item st" onclick="snack('Diagnostics: muster numbers, links, logs (prototype)')"><span class="icon lead-icon">monitoring</span><div class="text"><span class="h">Diagnostics</span><span class="s">Measurements, links and the log</span></div><span class="icon trail">chevron_right</span></button>
+            <div class="item"><span class="icon lead-icon">info</span><div class="text"><span class="h">Version 0.6.0</span><span class="s">Free software, GPL-3.0</span></div></div>
+          </div>
+        </div>
+      </div></div>
+    </section>
+  </main>
+</div>
+
+<div id="overlays"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+// ------------------------------------------------------------------ Navigation
+function go(name) { location.hash = name; }
+function route() {
+  const name = (location.hash.slice(1) || 'chat').split('=')[0];
+  for (const s of document.querySelectorAll('.screen')) s.hidden = s.id !== 's-' + name;
+  for (const a of document.querySelectorAll('[data-nav]')) a.dataset.nav === name ? a.setAttribute('aria-current', 'page') : a.removeAttribute('aria-current');
+  if (name === 'setup') openSetup();
+}
+addEventListener('hashchange', route);
+
+function toggleTheme() {
+  const r = document.documentElement;
+  const dark = r.dataset.theme ? r.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+  r.dataset.theme = dark ? 'light' : 'dark';
+}
+
+// ------------------------------------------------------------------ Overlays
+function closeOverlay() { $('#overlays').innerHTML = ''; }
+function overlay(html, kind = 'sheet') {
+  $('#overlays').innerHTML = `<div class="scrim" onclick="closeOverlay()"></div><div class="${kind}" role="dialog">${kind === 'sheet' ? '<div class="grab"></div>' : ''}${html}</div>`;
+}
+let snackTimer;
+function snack(text, action) {
+  document.querySelector('.snackbar')?.remove();
+  const d = document.createElement('div');
+  d.className = 'snackbar body-l';
+  d.innerHTML = `<span style="font-size:14px">${esc(text)}</span>` + (action ? `<button class="btn text st">${esc(action)}</button>` : '');
+  document.body.append(d);
+  clearTimeout(snackTimer); snackTimer = setTimeout(() => d.remove(), 4000);
+}
+
+// ------------------------------------------------------------------ Chat
+const chats = [
+  { id:'group', kind:'group', title:'Group', sub:'Everyone in the swarm · 2 people', icon:'groups', preview:'Bea: what should we cook tonight?' },
+  { id:'p1', kind:'personal', title:'Trip ideas', sub:'Only you, on any of your devices', icon:'person', preview:'Three days in Lisbon…' },
+  { id:'x1', kind:'private', title:'Health question', sub:'Private · stays on this phone', icon:'lock', preview:'Private chat' },
+];
+let current = 'group';
+const history = {
+  group: [
+    { who:'Bea', kind:'other', text:'What should we cook tonight? We have chickpeas, spinach and a lemon.' },
+    { who:'Clamor', kind:'bot', text:'A quick chickpea and spinach stew: fry garlic and cumin, add the chickpeas and a splash of stock, wilt the spinach in, and finish with lemon juice and zest. About 20 minutes, and good with bread or rice.' },
+    { who:'Amruth', kind:'me', text:'Can it be spicier?' },
+  ],
+  p1: [ { who:'Amruth', kind:'me', text:'Three days in Lisbon: what should I not miss?' }, { who:'Clamor', kind:'bot', text:'Alfama at sunset, the tram 28 early in the morning, and pastéis de nata in Belém. Take a day trip to Sintra if the weather is good.' } ],
+  x1: [],
+};
+function chatListHtml() {
+  const groups = [['Shared', c => c.kind === 'group'], ['Your chats', c => c.kind === 'personal'], ['Private · this phone', c => c.kind === 'private']];
+  return `<div class="row" style="padding:4px 8px 8px"><img class="brand-mark" src="icon.svg" alt=""><span class="title-m" style="margin-left:4px">Clamor</span></div>
+    <button class="fab st" style="margin:4px 4px 12px;box-shadow:none" onclick="newChat()"><span class="icon">edit_square</span>New chat</button>
+    <div class="drawer-list">` + groups.map(([h, f]) => `<div class="drawer-head">${h}</div>` + chats.filter(f).map(c =>
+      `<button class="item st" aria-current="${c.id === current}" onclick="openChat('${c.id}')"><span class="icon lead-icon">${c.icon}</span><div class="text"><span class="h" style="font-size:14px;font-weight:500">${esc(c.title)}</span><span class="s" style="font-size:12px;line-height:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(c.preview)}</span></div></button>`).join('')).join('') +
+    `</div><button class="btn text st" style="margin:8px 8px 0;justify-content:flex-start" onclick="newPrivate()"><span class="icon">lock</span>New private chat</button>`;
+}
+function openDrawer() { overlay(chatListHtml(), 'drawer'); }
+function renderPane() { $('#chat-pane').innerHTML = chatListHtml(); }
+function openChat(id) {
+  current = id; closeOverlay();
+  const c = chats.find(c => c.id === id);
+  $('#chat-title').textContent = c.title; $('#chat-sub').textContent = c.sub;
+  $('#private-note').hidden = c.kind !== 'private';
+  $('#input').placeholder = c.kind === 'private' ? 'Message privately' : 'Message Clamor';
+  renderMsgs(); renderPane();
+}
+function newChat() {
+  const id = 'p' + Date.now();
+  chats.splice(1, 0, { id, kind:'personal', title:'New chat', sub:'Only you, on any of your devices', icon:'person', preview:'' });
+  history[id] = []; openChat(id); $('#input').focus();
+}
+function newPrivate() {
+  overlay(`<h2 class="headline-s">A private chat</h2><div class="body">
+    <p class="body-l" style="margin:0">Your phone runs the first and last part of the model itself, so your words never leave it. The other devices only see numbers in between.</p>
+    <div class="list"><div class="item"><span class="icon lead-icon">check_circle</span><div class="text"><span class="h">Protected</span><span class="s">What you write and what the model answers</span></div></div>
+    <div class="item"><span class="icon lead-icon">visibility</span><div class="text"><span class="h">Not hidden</span><span class="s">That you chatted, when, and roughly how long the messages were</span></div></div></div>
+    <div class="row" style="justify-content:flex-end"><button class="btn text st" onclick="closeOverlay()">Not now</button><button class="btn filled st" onclick="closeOverlay();openChat('x1')">Start private chat</button></div></div>`);
+}
+function bubble(m) {
+  if (m.kind === 'bot') return `<div class="m bot"><img class="bot-avatar${m.thinking ? ' thinking' : ''}" src="icon.svg" alt=""><div class="body"><div class="who">Clamor${m.stopped ? ' · stopped' : ''}</div>${m.text ? esc(m.text) : '<span class="typing"><i></i><i></i><i></i></span>'}${m.text && !m.thinking ? `<div class="msg-actions"><button class="icon-btn st" title="Copy"><span class="icon">content_copy</span></button><button class="icon-btn st" title="Good answer"><span class="icon">thumb_up</span></button><button class="icon-btn st" title="Not good"><span class="icon">thumb_down</span></button></div>` : ''}</div></div>`;
+  const av = m.kind === 'me' ? '' : `<div class="avatar sm b">${esc(m.who[0])}</div>`;
+  const who = m.kind === 'other' ? `<div class="who">${esc(m.who)}</div>` : '';
+  return `<div class="m ${m.kind}">${av}<div>${who}<div class="bubble">${esc(m.text)}</div></div></div>`;
+}
+function renderMsgs() {
+  const h = history[current];
+  const empty = current === 'x1' && !h.length
+    ? `<div class="center" style="margin:auto;padding:32px 8px"><div class="tile-icon pri" style="width:64px;height:64px;border-radius:20px;margin:0 auto 12px"><span class="icon" style="font-size:32px">lock</span></div><div class="title-m">Just you and the model</div><p class="muted">Nothing you write here leaves this phone.</p></div>`
+    : !h.length ? `<div class="center" style="margin:auto;padding:32px 8px"><img src="icon.svg" alt="" style="width:64px;height:64px;border-radius:20px"><div class="title-m" style="margin-top:12px">What's on your mind?</div><div class="chips" style="justify-content:center;flex-wrap:wrap;margin-top:12px"><button class="chip assist st" onclick="suggest(this)">Plan a dinner</button><button class="chip assist st" onclick="suggest(this)">Explain a topic</button><button class="chip assist st" onclick="suggest(this)">Write an email</button></div></div>` : '';
+  $('#msgs-inner').innerHTML = (h.length ? '<div class="day">Today</div>' : '') + h.map(bubble).join('') + empty;
+  if (!h.length) $('#msgs-inner').style.minHeight = '100%'; else $('#msgs-inner').style.minHeight = '';
+  $('#msgs').scrollTop = 1e9;
+}
+function suggest(b) { $('#input').value = b.textContent; send(); }
+function grow(t) { t.style.height = 'auto'; t.style.height = Math.min(t.scrollHeight, 144) + 'px'; }
+let writing = null;
+function sendOrStop() { writing ? stop() : send(); }
+function send() {
+  const t = $('#input').value.trim(); if (!t || writing) return;
+  history[current].push({ who:'Amruth', kind:'me', text:t });
+  $('#input').value = ''; grow($('#input'));
+  const reply = { who:'Clamor', kind:'bot', text:'', thinking:true };
+  history[current].push(reply); renderMsgs();
+  const words = 'Sure! Add a chopped chili with the garlic, a spoon of harissa or smoked paprika with the cumin, and finish with chili flakes on top. Taste as you go: chickpeas soak up heat, so it is easy to add more at the end.'.split(' ');
+  let i = 0;
+  $('#send-icon').textContent = 'stop';
+  writing = setTimeout(function tick() {
+    if (i >= words.length) { reply.thinking = false; writing = null; $('#send-icon').textContent = 'arrow_upward'; renderMsgs(); return; }
+    reply.text += (i ? ' ' : '') + words[i++]; renderMsgs();
+    writing = setTimeout(tick, 70);
+  }, 900);
+}
+function stop() { clearTimeout(writing); writing = null; const r = history[current].at(-1); r.thinking = false; r.stopped = true; $('#send-icon').textContent = 'arrow_upward'; renderMsgs(); }
+function attachSheet() {
+  overlay(`<h2 class="headline-s">Add to the chat</h2><div class="body"><div class="list">
+    <button class="item st" onclick="closeOverlay();snack('Added notes.pdf (12 pages)')"><div class="tile-icon"><span class="icon">description</span></div><div class="text"><span class="h">Document</span><span class="s">Text, PDF or code: the model reads it</span></div></button>
+    <button class="item st" disabled style="opacity:.5"><div class="tile-icon"><span class="icon">image</span></div><div class="text"><span class="h">Photo</span><span class="s">Needs a model with Vision</span></div></button>
+    <button class="item st" disabled style="opacity:.5"><div class="tile-icon"><span class="icon">photo_camera</span></div><div class="text"><span class="h">Camera</span><span class="s">Needs a model with Vision</span></div></button>
+  </div><p class="body-s muted" style="margin:0">On a computer you can also drop files onto the chat.</p></div>`);
+}
+
+// ------------------------------------------------------------------ Models
+const catalog = [
+  { name:'Llama 3.2 3B Instruct', size:'3.4 GB', speed:'16 tok/s', caps:['tools'], fit:'Fits easily', fits:true },
+  { name:'Qwen3 8B', size:'8.7 GB', speed:'7 tok/s', caps:['tools','thinking'], fit:'Fits, split over 2 devices', fits:true },
+  { name:'Gemma 3 12B', size:'12.5 GB', speed:'4 tok/s', caps:['vision'], fit:'Fits, split over 3 devices', fits:true },
+  { name:'Nomic Embed v1.5', size:'0.3 GB', speed:'fast', caps:['embed'], fit:'Fits easily', fits:true },
+  { name:'Qwen3 32B', size:'34 GB', speed:'—', caps:['tools','thinking'], fit:'Too big: needs 13 GB more', fits:false },
+];
+const capIcon = { tools:'build', thinking:'psychology', vision:'visibility', embed:'data_array' };
+const capName = { tools:'Tools', thinking:'Thinking', vision:'Vision', embed:'Embedding' };
+function renderCatalog() {
+  const on = [...document.querySelectorAll('#cap-chips .chip[aria-pressed="true"]')].map(c => c.dataset.cap);
+  const list = catalog.filter(m => on.every(c => c === 'fits' ? m.fits : m.caps.includes(c)));
+  $('#catalog').innerHTML = list.map(m => `<div class="item three"><div class="tile-icon${m.fits ? '' : ''}"><span class="icon">neurology</span></div><div class="text"><span class="h">${esc(m.name)}</span><span class="s">${esc(m.size)} · ${esc(m.fit)}${m.fits ? ' · ~' + esc(m.speed) : ''}</span><span class="row" style="gap:4px;margin-top:4px">${m.caps.map(c => `<span class="badge neutral"><span class="icon" style="font-size:14px;margin-right:4px">${capIcon[c]}</span>${capName[c]}</span>`).join('')}</span></div><div class="trail">${m.fits ? `<button class="icon-btn tonal st" title="Download and run" onclick="snack('Downloading ${esc(m.name)}…','Hide')"><span class="icon">download</span></button>` : ''}</div></div>`).join('')
+    || `<div class="item"><div class="text center"><span class="s">No model matches all of these. Try fewer filters.</span></div></div>`;
+}
+document.querySelectorAll('#cap-chips .chip').forEach(c => c.onclick = () => {
+  const on = c.getAttribute('aria-pressed') !== 'true';
+  c.setAttribute('aria-pressed', on); c.querySelector('.icon').textContent = on ? 'check' : capIcon[c.dataset.cap] || 'check';
+  renderCatalog();
+});
+document.querySelectorAll('.seg').forEach(s => s.querySelectorAll('button').forEach(b => b.onclick = () => s.querySelectorAll('button').forEach(x => x.setAttribute('aria-pressed', x === b))));
+
+// ------------------------------------------------------------------ Swarm sheets
+function deviceSheet(id) {
+  const d = { macbook:['laptop_mac','amruthwo-macbookair','Coordinator · Apple M1, 16 GB','Working','ok'], ryzen:['desktop_windows','ryzen-mini','Ryzen 7 · 32 GB','Working','ok'], phone:['smartphone','Galaxy S24 Ultra','This phone · 12 GB','On battery','warn'] }[id];
+  overlay(`<div class="row" style="padding:0 24px 12px;gap:16px;flex-wrap:nowrap"><div class="tile-icon pri" style="width:56px;height:56px;border-radius:16px"><span class="icon" style="font-size:28px">${d[0]}</span></div><div style="flex:1;min-width:0"><div class="title-l">${d[1]}</div><div class="body-s muted">${d[2]}</div></div><span class="badge ${d[4]}">${d[3]}</span></div>
+    <div class="body"><div class="stats" style="margin:0"><div class="stat"><b>14</b><span>layers</span></div><div class="stat"><b>38%</b><span>busy</span></div><div class="stat"><b>1.8 GB</b><span>memory</span></div></div>
+    <div class="list"><button class="item st" onclick="go('settings');closeOverlay()"><span class="icon lead-icon">tune</span><div class="text"><span class="h">Device settings</span><span class="s">When it helps, memory and processor share</span></div><span class="icon trail">chevron_right</span></button>
+    <button class="item st" onclick="closeOverlay();snack('Paused for 1 hour','Undo')"><span class="icon lead-icon">pause_circle</span><div class="text"><span class="h">Pause for an hour</span><span class="s">The swarm carries on without it</span></div></button>
+    <button class="item st" onclick="closeOverlay();snack('Device removed (prototype)','Undo')" style="color:var(--error)"><span class="icon lead-icon" style="color:var(--error)">remove_circle</span><div class="text"><span class="h">Remove from swarm</span></div></button></div></div>`);
+}
+function addDeviceSheet() {
+  overlay(`<h2 class="headline-s">Add a device</h2><div class="body">
+    <p class="body-l" style="margin:0">On the new device, open Clamor and choose <b>Join a swarm</b>. When it asks, type this code:</p>
+    <div class="center" style="font-size:44px;line-height:52px;letter-spacing:6px;font-weight:400;padding:12px 0;background:var(--surface-container-highest);border-radius:16px">482&nbsp;913</div>
+    <div class="row muted body-s" style="justify-content:center"><span class="icon" style="font-size:16px">timer</span>Works once, for the next 10 minutes</div>
+    <div class="row" style="justify-content:flex-end"><button class="btn text st" onclick="closeOverlay()">Done</button><button class="btn tonal st" onclick="closeOverlay();celebrateJoin()"><span class="icon">qr_code_2</span>Show QR</button></div></div>`);
+}
+function personSheet(name, role) {
+  overlay(`<div class="row" style="padding:0 24px 12px;gap:16px;flex-wrap:nowrap"><div class="avatar ${name === 'Bea' ? 'b' : 'a'}" style="width:56px;height:56px;font-size:22px">${name[0]}</div><div style="flex:1"><div class="title-l">${name}</div><div class="body-s muted">${role}</div></div></div>
+    <div class="body"><div><div class="label-l" style="margin-bottom:8px">Role</div><div class="seg"><button class="st" aria-pressed="${role === 'Member'}">Member</button><button class="st" aria-pressed="false">Admin</button><button class="st" aria-pressed="${role === 'Owner'}" ${role === 'Owner' ? '' : 'disabled'}>Owner</button></div></div>
+    <div class="list"><button class="item st"><span class="icon lead-icon">pin</span><div class="text"><span class="h">Browser PIN</span><span class="s">For signing in without the app</span></div><span class="icon trail">chevron_right</span></button>
+    ${role === 'Owner' ? '' : '<button class="item st" style="color:var(--error)" onclick="closeOverlay();snack(\'Removed (prototype)\',\'Undo\')"><span class="icon lead-icon" style="color:var(--error)">person_remove</span><div class="text"><span class="h">Remove from swarm</span><span class="s" style="color:inherit;opacity:.8">Their devices leave too</span></div></button>'}</div></div>`);
+  document.querySelectorAll('.sheet .seg').forEach(s => s.querySelectorAll('button').forEach(b => b.onclick = () => s.querySelectorAll('button').forEach(x => x.setAttribute('aria-pressed', x === b))));
+}
+function prefsSheet() {
+  overlay(`<h2 class="headline-s">Your preferences</h2><div class="body">
+    <div class="field"><input value="Amruth"><label>Your name</label></div>
+    <div><div class="label-l" style="margin-bottom:8px">Replies</div><div class="seg"><button class="st" aria-pressed="true">As they're written</button><button class="st" aria-pressed="false">All at once</button></div></div>
+    <div class="row" style="justify-content:flex-end"><button class="btn filled st" onclick="closeOverlay();snack('Saved')">Save</button></div></div>`);
+  document.querySelectorAll('.sheet .seg').forEach(s => s.querySelectorAll('button').forEach(b => b.onclick = () => s.querySelectorAll('button').forEach(x => x.setAttribute('aria-pressed', x === b))));
+}
+function updateSheet() {
+  overlay(`<h2 class="headline-s">Clamor 0.7.0</h2><div class="body">
+    <div class="list"><div class="item"><span class="icon lead-icon">auto_awesome</span><div class="text"><span class="h">A fresh look</span><span class="s">Material You design, made for phones first</span></div></div>
+    <div class="item"><span class="icon lead-icon">neurology</span><div class="text"><span class="h">Find a model</span><span class="s">Filter by what models can do, see how fast they'd run</span></div></div></div>
+    <p class="body-s muted" style="margin:0">Android will ask whether to update Clamor: tap Update. 36 MB.</p>
+    <div class="row" style="justify-content:flex-end"><button class="btn text st" onclick="closeOverlay()">Later</button><button class="btn filled st" onclick="closeOverlay();snack('Downloading 0.7.0…')">Update now</button></div></div>`);
+}
+
+// ------------------------------------------------------------------ Delight
+function celebrateJoin() {
+  const c = document.createElement('div'); c.className = 'confetti';
+  const colors = ['#fd5453','#fc8b61','#ffb4a9','#f8e287','#8fd9ad'];
+  for (let i = 0; i < 60; i++) { const p = document.createElement('i'); p.style.left = Math.random() * 100 + 'vw'; p.style.background = colors[i % colors.length]; p.style.animationDelay = Math.random() * .4 + 's'; p.style.transform = `rotate(${Math.random()*360}deg)`; c.append(p); }
+  document.body.append(c); setTimeout(() => c.remove(), 2400);
+  snack('Bea\'s laptop joined the swarm 🎉', 'See');
+  if (navigator.vibrate) navigator.vibrate(30);
+}
+
+// ------------------------------------------------------------------ Setup flow (first run)
+let step = 0;
+function openSetup() {
+  step = 0; renderSetup();
+}
+function setupShell(inner, back = true) {
+  const dots = [0,1,2,3].map(i => `<i class="${i <= step ? 'on' : ''}"></i>`).join('');
+  return `<div class="setup"><header class="topbar lead">${back ? `<button class="icon-btn st" onclick="${step ? 'step--;renderSetup()' : 'closeSetup()'}" title="Back"><span class="icon">arrow_back</span></button>` : ''}<span class="spacer"></span></header>
+    <div class="steps">${dots}</div><div class="scroll"><div class="wrap" style="flex:1;align-content:start;padding-top:16px">${inner}</div></div></div>`;
+}
+function closeSetup() { document.querySelector('.setup')?.remove(); if (location.hash === '#setup') go('settings'); }
+function renderSetup() {
+  document.querySelector('.setup')?.remove();
+  const steps = [
+    () => setupShell(`<img class="hero-mark" src="icon.svg" alt=""><div class="center"><div class="headline-s">Welcome to Clamor</div><p class="body-l muted" style="margin:8px 0 8px">Team up the computers and phones around you to run AI models too big for any one of them.</p></div>
+      <button class="choice st" onclick="step=1;renderSetup()"><div class="tile-icon pri"><span class="icon">login</span></div><div><div class="title-m">Join a swarm</div><div class="muted">Someone nearby already runs Clamor</div></div></button>
+      <button class="choice st" onclick="snack('Start a swarm (prototype)')"><div class="tile-icon"><span class="icon">hub</span></div><div><div class="title-m">Start a swarm</div><div class="muted">This device becomes the coordinator</div></div></button>`),
+    () => setupShell(`<div class="headline-s">Swarms nearby</div><p class="muted" style="margin:0">Found on this Wi-Fi network.</p>
+      <div class="list"><button class="item st" onclick="step=2;renderSetup()"><div class="tile-icon pri"><span class="icon">hub</span></div><div class="text"><span class="h">Home</span><span class="s">amruthwo-macbookair · 2 devices</span></div><span class="icon trail">chevron_right</span></button></div>
+      <div class="row muted body-s"><div class="spinner" style="width:16px;height:16px;border-width:2px;margin:0"></div>Still looking…</div>
+      <button class="btn text st" style="justify-self:start" onclick="snack('Type an address (prototype)')"><span class="icon">edit</span>Type its address instead</button>`),
+    () => setupShell(`<div class="headline-s">Join Home</div><p class="muted" style="margin:0">On a device already in the swarm, open <b>Add a device</b> and type the code it shows.</p>
+      <div class="code-boxes" id="code">${[0,1,2].map(() => '<input inputmode="numeric" maxlength="1">').join('')}<span class="dash">–</span>${[0,1,2].map(() => '<input inputmode="numeric" maxlength="1">').join('')}</div>
+      <div class="field"><input id="setup-name" value=""><label>Your name (shown to the others)</label></div>
+      <button class="btn filled st" onclick="step=3;renderSetup()">Join</button>
+      <button class="btn text st" onclick="step=3;renderSetup()">No code? Ask to join instead</button>`),
+    () => setupShell(`<div class="big-check"><span class="icon">check</span></div><div class="center"><div class="headline-s">You're in!</div><p class="body-l muted" style="margin:8px 0 0">This phone joined <b>Home</b>. It helps while it is idle and charging, and you can chat from it any time.</p></div>
+      <button class="btn filled st" onclick="closeSetup();go('chat');celebrateJoin()">Start chatting</button>`, false),
+  ];
+  document.body.insertAdjacentHTML('beforeend', steps[step]());
+  if (step === 2) {
+    const boxes = [...document.querySelectorAll('#code input')];
+    boxes.forEach((b, i) => b.oninput = () => { b.value = b.value.replace(/\D/g, ''); if (b.value && boxes[i + 1]) boxes[i + 1].focus(); });
+    boxes[0].focus();
+  }
+}
+
+// ------------------------------------------------------------------ Start
+renderPane(); renderMsgs(); renderCatalog(); route();
+</script>
+</body>
+</html>

@@ -17,6 +17,11 @@ import java.io.File
 
 class MainActivity : TauriActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
+    // The phone's name as the person set it ("Galaxy S24 Ultra"), for its name in the swarm
+    // (Android's host name is "localhost" on every phone). Read by clamor-node at start.
+    val name = android.provider.Settings.Global.getString(contentResolver, "device_name")
+      ?: android.provider.Settings.Secure.getString(contentResolver, "bluetooth_name")
+    if (!name.isNullOrBlank()) android.system.Os.setenv("CLAMOR_DEVICE_NAME", name, true)
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
     keepClearOfSystemBars()

@@ -175,7 +175,9 @@ table.data { width:100%; border-collapse:collapse; font-size:14px; }
 table.data th { text-align:left; font-weight:500; font-size:12px; color:var(--on-surface-variant); padding:8px 12px; white-space:nowrap; }
 table.data td { padding:10px 12px; border-top:1px solid var(--outline-variant); white-space:nowrap; }
 table.data .num { text-align:right; font-variant-numeric:tabular-nums; }
-.table-wrap { overflow-x:auto; background:var(--surface-container-low); border-radius:16px; }
+.table-wrap { overflow-x:auto; background:var(--surface-container-low); border-radius:16px; max-width:100%; }
+.card > * { min-width:0; }
+table.data td.wrap { white-space:normal; min-width:180px; }
 
 /* Chat */
 .chat-layout { flex:1; min-height:0; display:grid; grid-template-columns:1fr; }
@@ -702,8 +704,8 @@ function renderPlan() {
   const rows = plan.plans.map((p, i) => ({ p, rec: i === plan.recommended }));
   if (wide) {
     $('plans').innerHTML = `<div class="table-wrap" style="background:transparent"><table class="data"><thead><tr><th>Model size</th><th class="num">Needs</th><th class="num">Decode</th><th class="num">Prefill</th><th>Layout</th><th>Limited by</th></tr></thead><tbody>${rows.map(({ p, rec }) => p.feasible
-      ? `<tr><td>${esc(p.model)} ${rec ? '<span class="badge pri">best fit</span>' : ''}</td><td class="num">${gib(p.need_bytes)} GB</td><td class="num">${p.decode_tok_s.toFixed(1)} tok/s</td><td class="num">${p.prefill_tok_s.toFixed(0)} tok/s</td><td>${p.stages.map(s => `${esc(s.node)} [${s.layer_start}–${s.layer_end})`).join(' → ')}</td><td>${esc(p.bottleneck)}</td></tr>`
-      : `<tr><td>${esc(p.model)}</td><td class="num">${gib(p.need_bytes)} GB</td><td colspan="4" class="muted" style="white-space:normal">doesn't fit: ${esc(p.notes.join('; '))}</td></tr>`).join('')}</tbody></table></div>`;
+      ? `<tr><td>${esc(p.model)} ${rec ? '<span class="badge pri">best fit</span>' : ''}</td><td class="num">${gib(p.need_bytes)} GB</td><td class="num">${p.decode_tok_s.toFixed(1)} tok/s</td><td class="num">${p.prefill_tok_s.toFixed(0)} tok/s</td><td class="wrap">${p.stages.map(s => `${esc(s.node)} [${s.layer_start}–${s.layer_end})`).join(' → ')}</td><td class="wrap">${esc(p.bottleneck)}</td></tr>`
+      : `<tr><td>${esc(p.model)}</td><td class="num">${gib(p.need_bytes)} GB</td><td colspan="4" class="muted" style="white-space:normal">doesn't fit: ${esc(p.notes.join('; ').replace(/GiB/g, 'GB'))}</td></tr>`).join('')}</tbody></table></div>`;
   } else {
     $('plans').innerHTML = `<div class="list" style="background:transparent">${rows.map(({ p, rec }) => `<div class="item" style="padding-left:0;padding-right:0">${ic(p.feasible ? 'check_circle' : 'cloud_off', 'lead-icon')}<div class="text"><span class="h">${esc(p.model)} ${rec ? '<span class="badge pri">best fit</span>' : ''}</span><span class="s">${p.feasible ? `${gib(p.need_bytes)} GB · ~${p.decode_tok_s.toFixed(1)} tok/s · ${plural(p.stages.length, 'device')}` : `Doesn't fit: needs ${gib(p.need_bytes)} GB`}</span></div></div>`).join('')}</div>`;
   }

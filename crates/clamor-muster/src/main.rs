@@ -147,7 +147,7 @@ fn cmd_plan(files: Vec<String>, coordinator: Option<String>, ctx: u32, quant: &s
         Some(p) => vec![serde_json::from_str::<plan::ModelSpec>(&std::fs::read_to_string(&p)?)?],
         None => plan::catalog(q),
     };
-    let summary = plan::summarize(&reports);
+    let summary = plan::summarize(&reports, coord.as_ref());
     let topo = plan::Topology::parse(topology).context("topology must be ring or hub")?;
     let (plans, pick) = plan::recommend_with(&models, ctx, &nodes, target, topo);
 

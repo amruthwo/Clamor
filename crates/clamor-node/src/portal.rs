@@ -219,7 +219,7 @@ async fn plan_handler(State(shared): State<Shared>, Query(q): Query<PlanQuery>) 
     let nodes = plan::plan_nodes(&reports, Some(&coordinator));
     let (plans, pick) = plan::recommend_with(&plan::catalog(quant), ctx, &nodes, target, topo);
     Ok(Json(json!({
-        "summary": plan::summarize(&reports),
+        "summary": plan::summarize(&reports, Some(&coordinator)),
         "plans": plans,
         "recommended": pick,
         "ctx": ctx,

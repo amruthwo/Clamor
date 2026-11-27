@@ -64,6 +64,17 @@ pub fn normalize_passphrase(p: &str) -> String {
     p.split(|c: char| c.is_whitespace() || c == '-' || c == '_' || c == '.').filter(|w| !w.is_empty()).map(|w| w.to_lowercase()).collect::<Vec<_>>().join("-")
 }
 
+/// A one-time code as the coordinator writes it ("123-456"), however it was typed: six digits
+/// with or without a hyphen or space. Anything else is left as typed (and will not match).
+pub fn normalize_code(c: &str) -> String {
+    let digits: String = c.chars().filter(|c| c.is_ascii_digit()).collect();
+    if digits.len() == 6 && c.chars().all(|c| c.is_ascii_digit() || c == '-' || c.is_whitespace()) {
+        format!("{}-{}", &digits[..3], &digits[3..])
+    } else {
+        c.trim().to_string()
+    }
+}
+
 // ---------------------------------------------------------------- MAC and key derivation
 
 /// HMAC-SHA256 (RFC 2104).
@@ -476,6 +487,14 @@ pub fn verify_share_request(header: &str, path: &str, allowed: impl Fn(&str) -> 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn codes_match_with_or_without_the_hyphen() {
+        for typed in ["123456", "123-456", " 123 456 ", "123-456\n"] {
+            assert_eq!(super::normalize_code(typed), "123-456", "{typed:?}");
+        }
+        assert_eq!(super::normalize_code("12345"), "12345");
+    }
+
     use super::*;
 
     #[test]

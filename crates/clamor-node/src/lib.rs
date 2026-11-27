@@ -420,6 +420,8 @@ async fn run(cmd: Cmd, priority: Option<Priority>) -> Result<()> {
             };
             let engine = engine.config(None, None); // the key is per swarm: set once joined
             engine.validate()?;
+            // "123456", "123 456" and "123-456" are the same one-time code.
+            let code = code.map(|c| auth::normalize_code(&c));
             let creds = member::Credentials { device: auth::Device::load_or_create(&config_dir)?, passphrase, code, person_name: name, ask, dashboard: (dashboard != "off").then_some(dashboard), config_dir };
             member::join(addr, creds, id, engine, updates.policy(), policy.overrides(priority), !no_mdns).await
         }

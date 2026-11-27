@@ -107,8 +107,24 @@ jobs:
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
         shell: bash
         run: |
-          # Maven Central sometimes answers GitHub's runners "429 Too Many Requests" while Gradle
-          # fetches its plugins: try again after a pause (Rust work is not redone).
+          # Maven Central often answers GitHub's runners "429 Too Many Requests": fetch from Google's
+          # mirror of it first (all builds, buildSrc and plugins included), and retry after a pause.
+          mkdir -p ~/.gradle/init.d
+          cat > ~/.gradle/init.d/maven-mirror.gradle <<'GRADLE'
+          def mirror = 'https://maven-central.storage-download.googleapis.com/maven2/'
+          def first = { RepositoryHandler repos ->
+            def m = repos.maven { url mirror; name 'MavenCentralMirror' }
+            repos.remove(m)
+            repos.addFirst(m)
+          }
+          beforeSettings { settings ->
+            settings.pluginManagement.repositories { maven { url mirror }; gradlePluginPortal() }
+          }
+          allprojects {
+            first(buildscript.repositories)
+            first(repositories)
+          }
+          GRADLE
           for i in 1 2 3 4; do
             cargo tauri android build --apk --target aarch64 && exit 0
             echo "::warning::APK build attempt $i failed; retrying in $((i * 90)) s"

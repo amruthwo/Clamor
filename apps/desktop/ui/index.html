@@ -39,10 +39,33 @@
   iframe { flex:1; border:0; width:100%; background:var(--bg); }
   #setup-log { max-height:260px; border:1px solid var(--line); border-radius:8px; margin-top:8px; }
   .log { flex:1; margin:0; padding:12px 14px; overflow:auto; font:12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space:pre-wrap; }
+  /* A newer version: a quiet strip, and the release notes in a dialog. */
+  .update { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:7px 14px; background:color-mix(in srgb, var(--accent) 12%, var(--card)); border-bottom:1px solid var(--line); font-size:14px; }
+  .update .spacer { flex:1; }
+  dialog { background:var(--card); color:var(--ink); border:1px solid var(--line); border-radius:12px; padding:0; width:min(560px, calc(100vw - 32px)); }
+  dialog::backdrop { background:rgb(0 0 0 / .45); }
+  dialog .body { padding:18px; display:grid; gap:12px; }
+  dialog h2 { margin:0; font-size:19px; }
+  .notes { max-height:50vh; overflow:auto; border:1px solid var(--line); border-radius:8px; padding:4px 14px; font-size:14px; }
+  .notes h3 { font-size:15px; margin:12px 0 4px; } .notes ul { padding-left:20px; margin:4px 0; }
   .waiting { flex:1; display:grid; place-items:center; text-align:center; padding:24px; }
 </style>
 </head>
 <body>
+<div class="update" id="upd" hidden>
+  <span id="upd-text"></span><span class="spacer"></span>
+  <button id="upd-later">Later</button>
+  <button class="primary" id="upd-open">Update…</button>
+</div>
+<dialog id="upd-dlg">
+  <div class="body">
+    <h2 id="upd-title"></h2>
+    <div class="notes" id="upd-notes"></div>
+    <div class="mute" id="upd-how"></div>
+    <div class="err" id="upd-err"></div>
+    <div class="row" style="justify-content:flex-end"><button id="upd-cancel">Not now</button><button class="primary" id="upd-go">Update now</button></div>
+  </div>
+</dialog>
 
 <section class="setup" id="setup" hidden>
   <h1>Welcome to Clamor</h1>
@@ -163,6 +186,75 @@ $('autostart').onchange = e => invoke('set_autostart', { on: e.target.checked })
 
 // Phones have no "start when I log in": the app's service keeps Clamor in the swarm.
 if (/Android/i.test(navigator.userAgent)) $('autostart-row').hidden = true;
+
+// Updates: checked a little after starting and then daily; nothing installs until the person
+// presses "Update now" (the app downloads the installer for how it is installed here, checks it
+// against the signed release manifest, and installs it).
+let upd = null;
+const HOW = {
+  rpm: 'Clamor downloads the new package and installs it; your computer asks for your password. Then Clamor restarts.',
+  deb: 'Clamor downloads the new package and installs it; your computer asks for your password. Then Clamor restarts.',
+  appimage: 'Clamor downloads the new version, replaces this AppImage and restarts.',
+  flatpak: 'Clamor downloads the new version and opens it in your software app (Discover, GNOME Software), where you install it.',
+  dmg: 'Clamor downloads the new version, replaces the app and restarts.',
+  nsis: 'Clamor downloads the new installer and runs it; Clamor closes while it installs and starts again afterwards.',
+  apk: 'Clamor downloads the new version; Android then asks whether to update the app: tap Update.',
+};
+function md(t) {
+  // Release notes: headings, bullets, bold and links, as plain text otherwise.
+  const out = []; let list = false, para = false;
+  for (const raw of String(t || '').split('\n')) {
+    let l = esc(raw).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>').replace(/`(.+?)`/g, '<code>$1</code>').replace(/\[(.+?)\]\((.+?)\)/g, '$1');
+    const li = /^\s*[-*] /.test(raw);
+    if (li && !list) { out.push('<ul>'); list = true; }
+    if (!li && list && !/^\s{2,}\S/.test(raw)) { out.push('</ul>'); list = false; }
+    if (/^#{1,6} /.test(raw)) { out.push('<h3>' + l.replace(/^#+ /, '') + '</h3>'); para = false; }
+    else if (li) { out.push('<li>' + l.replace(/^\s*[-*] /, '')); para = false; }
+    else if (raw.trim()) { out.push((list || para ? ' ' : '<p>') + l.trim()); para = !list; }
+    else para = false;
+  }
+  if (list) out.push('</ul>');
+  return out.join('\n');
+}
+const store = { get: k => { try { return localStorage.getItem(k); } catch { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch {} } };
+async function checkUpdate() {
+  try {
+    const v = await invoke('update_check');
+    upd = v.update ? { ...v.update, kind: v.kind } : null;
+  } catch (e) { console.warn('update check:', e); return; }
+  $('upd').hidden = !upd || store.get('clamor-update-later') === upd.version;
+  if (upd) $('upd-text').textContent = `Clamor ${upd.version} is available.`;
+}
+$('upd-later').onclick = () => { if (upd) store.set('clamor-update-later', upd.version); $('upd').hidden = true; };
+$('upd-open').onclick = () => {
+  $('upd-title').textContent = `Update to Clamor ${upd.version}`;
+  $('upd-notes').innerHTML = md(upd.notes) || '<p class="mute">No release notes.</p>';
+  $('upd-how').textContent = (HOW[upd.kind] || '') + ` Download: ${Math.round(upd.asset.size / 1e6)} MB.`;
+  $('upd-err').textContent = '';
+  $('upd-dlg').showModal();
+};
+$('upd-cancel').onclick = () => $('upd-dlg').close();
+$('upd-go').onclick = async () => {
+  const b = $('upd-go'); b.disabled = true; b.textContent = 'Downloading…'; $('upd-err').textContent = '';
+  try {
+    const r = await invoke('update_install');
+    if (r.then === 'open') {
+      if (window.ClamorAndroid) {
+        const err = window.ClamorAndroid.installApk(r.file);
+        if (err) throw err;
+      }
+      $('upd-how').textContent = r.message;
+      b.textContent = 'Opened';
+    } else {
+      b.textContent = r.then === 'restart' ? 'Restarting…' : 'Installing…';
+    }
+  } catch (e) {
+    $('upd-err').textContent = String(e);
+    b.disabled = false; b.textContent = 'Try again';
+  }
+};
+setTimeout(checkUpdate, 8000);
+setInterval(checkUpdate, 24 * 3600 * 1000);
 
 (async () => {
   await refresh();

@@ -26,6 +26,8 @@ fn node_cmd() -> Result<Command, String> {
     let p = node_path().ok_or("clamor-node was not found next to the app or on the PATH")?;
     #[allow(unused_mut)] // changed on Windows
     let mut c = Command::new(p);
+    // The app updates clamor-node together with itself.
+    c.env("CLAMOR_APP_MANAGED", "1");
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -123,5 +125,16 @@ pub fn swarms_json(scan: bool, _config_dir: &Path) -> Result<Value, String> {
         c.arg("--scan");
     }
     let out = c.output().map_err(|e| e.to_string())?;
+    serde_json::from_slice(&out.stdout).map_err(|e| format!("{e}: {}", String::from_utf8_lossy(&out.stderr)))
+}
+
+/// `clamor-node app-update ARGS...` (check / download), its JSON.
+pub fn app_update(args: &[&str]) -> Result<Value, String> {
+    let mut c = node_cmd()?;
+    c.arg("app-update").args(args);
+    let out = c.output().map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().trim_start_matches("Error: ").to_string());
+    }
     serde_json::from_slice(&out.stdout).map_err(|e| format!("{e}: {}", String::from_utf8_lossy(&out.stderr)))
 }

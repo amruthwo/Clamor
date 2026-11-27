@@ -18,7 +18,7 @@ mod portal;
 mod private;
 mod share;
 mod stage;
-mod update;
+pub mod update;
 mod wire;
 
 use anyhow::Result;
@@ -41,6 +41,28 @@ struct Cli {
     /// ~/.config/clamor).
     #[arg(long, global = true)]
     config_dir: Option<std::path::PathBuf>,
+}
+
+#[derive(Subcommand)]
+enum AppUpdateCmd {
+    /// Print `{"update": null}` or `{"update": {version, notes, asset, ...}}`.
+    Check {
+        /// How the app is installed: deb, rpm, appimage, flatpak, dmg, nsis or apk.
+        #[arg(long)]
+        kind: String,
+        /// The app's version (default: this clamor-node's).
+        #[arg(long)]
+        current: Option<String>,
+    },
+    /// Download the newer installer into `--dir`, verified; print `{"file": path, ...}`.
+    Download {
+        #[arg(long)]
+        kind: String,
+        #[arg(long)]
+        current: Option<String>,
+        #[arg(long)]
+        dir: std::path::PathBuf,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -162,6 +184,12 @@ enum Cmd {
         /// The coordinator's web portal on this machine.
         #[arg(long, default_value_t = format!("127.0.0.1:{DEFAULT_PORTAL_PORT}"))]
         portal: String,
+    },
+    /// For the Clamor apps: is there a newer app, installed as `--kind`, and download it
+    /// (checked against the signed release manifest). Prints JSON.
+    AppUpdate {
+        #[command(subcommand)]
+        what: AppUpdateCmd,
     },
     /// List the swarms this device coordinates or has joined.
     Swarms {
@@ -331,6 +359,9 @@ async fn run(cmd: Cmd, priority: Option<Priority>) -> Result<()> {
         }
         Cmd::Update { check, rollback } => {
             let exe = std::env::current_exe()?;
+            if !check && update::app_managed() {
+                anyhow::bail!("{}", update::APP_MANAGED);
+            }
             if rollback {
                 update::rollback(&exe)?;
                 println!("rolled back {}", exe.display());
@@ -424,6 +455,28 @@ async fn run(cmd: Cmd, priority: Option<Priority>) -> Result<()> {
             let code = code.map(|c| auth::normalize_code(&c));
             let creds = member::Credentials { device: auth::Device::load_or_create(&config_dir)?, passphrase, code, person_name: name, ask, dashboard: (dashboard != "off").then_some(dashboard), config_dir };
             member::join(addr, creds, id, engine, updates.policy(), policy.overrides(priority), !no_mdns).await
+        }
+        Cmd::AppUpdate { what } => {
+            let target = build_info::current().target;
+            let (kind, current, dir) = match &what {
+                AppUpdateCmd::Check { kind, current } => (kind.clone(), current.clone(), None),
+                AppUpdateCmd::Download { kind, current, dir } => (kind.clone(), current.clone(), Some(dir.clone())),
+            };
+            let current = current.unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+            let out = tokio::task::spawn_blocking(move || -> Result<serde_json::Value> {
+                let u = update::app_check(&update::Source::github(), &kind, &target, &current)?;
+                match (u, dir) {
+                    (None, _) => Ok(serde_json::json!({ "update": null })),
+                    (Some(u), None) => Ok(serde_json::json!({ "update": u })),
+                    (Some(u), Some(dir)) => {
+                        let file = update::app_download(&u, &dir)?;
+                        Ok(serde_json::json!({ "update": u, "file": file }))
+                    }
+                }
+            })
+            .await??;
+            println!("{}", serde_json::to_string(&out)?);
+            Ok(())
         }
         Cmd::Leave { swarm, purge, delete_swarm, cache_dir } => {
             let config_dir = neighbour::config_dir();
@@ -590,4 +643,14 @@ pub fn swarms_json(config_dir: &std::path::Path, scan: bool) -> Result<serde_jso
         "on_network": found.iter().map(|f| serde_json::json!({ "id": f.swarm_id, "name": f.name, "addresses": f.addrs.iter().map(|a| a.to_string()).collect::<Vec<_>>(), "known": remembered.contains(&f.swarm_id.as_str()) })).collect::<Vec<_>>(),
         "cache_bytes": cache::size(&default_cache_dir()),
     }))
+}
+
+/// For the Android app (which has no separate clamor-node program): the update check and
+/// download of `clamor-node app-update`.
+pub fn app_update_check(kind: &str, current: &str) -> Result<Option<update::AppUpdate>> {
+    update::app_check(&update::Source::github(), kind, &build_info::current().target, current)
+}
+
+pub fn app_update_download(u: &update::AppUpdate, dir: &std::path::Path) -> Result<std::path::PathBuf> {
+    update::app_download(u, dir)
 }

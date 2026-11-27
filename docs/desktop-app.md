@@ -49,6 +49,8 @@ joined are remembered, so rejoining needs no passphrase).
 - **Settings and keys:** the same config folder as the command-line `clamor-node` (see
   [joining](joining.md)), so the app and the command line share swarms.
 - **The log:** the **Log** button at the top of the window.
+- **Updates:** the app offers new versions itself and installs them when you agree; see
+  [updating](updating.md).
 
 ## Known limits
 

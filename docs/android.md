@@ -11,7 +11,8 @@ dashboard, chat, and lend the phone's memory and computing power to the swarm.
 Download `Clamor-<version>-android-arm64.apk` from the
 [latest release](https://github.com/amruthwo/Clamor/releases/latest) on the phone, open it, and
 allow your browser or file manager to install apps when Android asks ("Install unknown apps").
-Clamor is not in the Play Store yet.
+Clamor is not in the Play Store yet. Later versions are offered by the app itself (see
+[updating](updating.md)).
 
 ## First start
 

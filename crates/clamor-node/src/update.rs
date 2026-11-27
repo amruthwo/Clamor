@@ -43,6 +43,9 @@ impl Source {
 struct GhRelease {
     tag_name: String,
     html_url: Option<String>,
+    /// The release notes (Markdown).
+    #[serde(default)]
+    body: Option<String>,
     assets: Vec<GhAsset>,
 }
 #[derive(Deserialize)]
@@ -65,6 +68,17 @@ pub struct ManifestAsset {
     pub file: String,
     pub sha256: String,
     pub size: u64,
+    /// What the file is: a command-line archive ("cli", the default: older manifests do not
+    /// say), or an app installer: "deb", "rpm", "appimage", "flatpak", "dmg", "nsis", "apk".
+    #[serde(default = "cli_kind", skip_serializing_if = "is_cli")]
+    pub kind: String,
+}
+
+fn cli_kind() -> String {
+    "cli".into()
+}
+fn is_cli(k: &String) -> bool {
+    k == "cli"
 }
 
 #[derive(Clone, Debug)]
@@ -115,32 +129,94 @@ pub fn verify_signature(pubkey: &[u8; 32], message: &[u8], sig: &[u8]) -> Result
     key.verify_strict(message, &Signature::from_bytes(&sig)).map_err(|_| anyhow!("manifest signature is not valid for the Clamor release key"))
 }
 
-/// Is there a newer release with a build for `me`?
-pub fn check(src: &Source, me: &BuildInfo) -> Result<Check> {
-    let agent = agent();
-    let listing = match get(&agent, &src.latest_release_api) {
+/// The latest release, its signed manifest (verified), and the download URL of each file.
+struct Latest {
+    version: String,
+    manifest: Manifest,
+    urls: Vec<(String, String)>,
+    page: Option<String>,
+    notes: Option<String>,
+}
+
+/// None: nothing published yet.
+fn latest(src: &Source, agent: &ureq::Agent, newer_than: &str) -> Result<Option<Result<Latest, String>>> {
+    let listing = match get(agent, &src.latest_release_api) {
         Ok(b) => b,
-        Err(e) if e.chain().any(|c| matches!(c.downcast_ref::<ureq::Error>(), Some(ureq::Error::StatusCode(404)))) => return Ok(Check::NoReleases),
+        Err(e) if e.chain().any(|c| matches!(c.downcast_ref::<ureq::Error>(), Some(ureq::Error::StatusCode(404)))) => return Ok(None),
         Err(e) => return Err(e),
     };
     let rel: GhRelease = serde_json::from_slice(&listing).context("parsing the release listing")?;
-    let latest = rel.tag_name.trim_start_matches('v').to_string();
-    if !is_newer(&latest, &me.version) {
-        return Ok(Check::UpToDate { latest });
+    let version = rel.tag_name.trim_start_matches('v').to_string();
+    if !is_newer(&version, newer_than) {
+        return Ok(Some(Err(version)));
     }
     let url_of = |name: &str| rel.assets.iter().find(|a| a.name == name).map(|a| a.browser_download_url.clone());
-    let manifest_bytes = get(&agent, &url_of("manifest.json").ok_or_else(|| anyhow!("release {latest} has no manifest.json"))?)?;
-    let sig = get(&agent, &url_of("manifest.json.sig").ok_or_else(|| anyhow!("release {latest} has no manifest.json.sig"))?)?;
+    let manifest_bytes = get(agent, &url_of("manifest.json").ok_or_else(|| anyhow!("release {version} has no manifest.json"))?)?;
+    let sig = get(agent, &url_of("manifest.json.sig").ok_or_else(|| anyhow!("release {version} has no manifest.json.sig"))?)?;
     verify_signature(&src.pubkey, &manifest_bytes, &sig)?;
     let manifest: Manifest = serde_json::from_slice(&manifest_bytes).context("parsing manifest.json")?;
-    if manifest.version != latest {
-        bail!("release {latest} carries a manifest for {} (refusing a mismatched manifest)", manifest.version);
+    if manifest.version != version {
+        bail!("release {version} carries a manifest for {} (refusing a mismatched manifest)", manifest.version);
     }
-    let Some(asset) = manifest.assets.iter().find(|a| a.target == me.target && a.variant == me.variant).cloned() else {
-        return Ok(Check::NoMatchingBuild { latest });
+    let urls = rel.assets.iter().map(|a| (a.name.clone(), a.browser_download_url.clone())).collect();
+    Ok(Some(Ok(Latest { version, manifest, urls, page: rel.html_url, notes: rel.body })))
+}
+
+/// A newer version of an app, ready to download.
+#[derive(Clone, Debug, Serialize)]
+pub struct AppUpdate {
+    pub version: String,
+    pub asset: ManifestAsset,
+    pub url: String,
+    pub notes: Option<String>,
+    pub release_page: Option<String>,
+}
+
+/// Is there a newer release of the app installed as `kind` for `target`, than `current`?
+/// Ok(None): up to date, nothing published yet, or no build of that kind for this machine.
+pub fn app_check(src: &Source, kind: &str, target: &str, current: &str) -> Result<Option<AppUpdate>> {
+    let agent = agent();
+    let Some(Ok(l)) = latest(src, &agent, current)? else { return Ok(None) };
+    let Some(asset) = l.manifest.assets.iter().find(|a| a.kind == kind && a.target == target).cloned() else { return Ok(None) };
+    let url = l.urls.iter().find(|(n, _)| *n == asset.file).map(|(_, u)| u.clone()).ok_or_else(|| anyhow!("manifest lists {} but the release has no such file", asset.file))?;
+    Ok(Some(AppUpdate { version: l.version, asset, url, notes: l.notes, release_page: l.page }))
+}
+
+/// Download an app update into `dir`, checking its size and SHA-256 against the signed
+/// manifest. Returns the file (named as in the release).
+pub fn app_download(u: &AppUpdate, dir: &Path) -> Result<PathBuf> {
+    let bytes = get(&agent(), &u.url)?;
+    if bytes.len() as u64 != u.asset.size {
+        bail!("{}: got {} bytes, the signed manifest says {}", u.asset.file, bytes.len(), u.asset.size);
+    }
+    let sha = hex::encode(Sha256::digest(&bytes));
+    if !sha.eq_ignore_ascii_case(&u.asset.sha256) {
+        bail!("{}: SHA-256 {sha} does not match the signed manifest", u.asset.file);
+    }
+    if u.asset.file.contains(['/', '\\']) || u.asset.file.starts_with('.') {
+        bail!("refusing the file name {:?}", u.asset.file);
+    }
+    std::fs::create_dir_all(dir)?;
+    let dest = dir.join(&u.asset.file);
+    let part = dir.join(format!("{}.part", u.asset.file));
+    std::fs::write(&part, &bytes)?;
+    std::fs::rename(&part, &dest)?;
+    Ok(dest)
+}
+
+/// Is there a newer release with a build for `me`?
+pub fn check(src: &Source, me: &BuildInfo) -> Result<Check> {
+    let agent = agent();
+    let l = match latest(src, &agent, &me.version)? {
+        None => return Ok(Check::NoReleases),
+        Some(Err(latest)) => return Ok(Check::UpToDate { latest }),
+        Some(Ok(l)) => l,
     };
-    let url = url_of(&asset.file).ok_or_else(|| anyhow!("manifest lists {} but the release has no such file", asset.file))?;
-    Ok(Check::Available(Available { version: latest, asset, url, release_page: rel.html_url }))
+    let Some(asset) = l.manifest.assets.iter().find(|a| a.kind == "cli" && a.target == me.target && a.variant == me.variant).cloned() else {
+        return Ok(Check::NoMatchingBuild { latest: l.version });
+    };
+    let url = l.urls.iter().find(|(n, _)| *n == asset.file).map(|(_, u)| u.clone()).ok_or_else(|| anyhow!("manifest lists {} but the release has no such file", asset.file))?;
+    Ok(Check::Available(Available { version: l.version, asset, url, release_page: l.page }))
 }
 
 fn backup_path(exe: &Path) -> PathBuf {
@@ -332,8 +408,8 @@ mod tests {
             version: version.into(),
             commit: "abc".into(),
             assets: vec![
-                ManifestAsset { target: "aarch64-apple-darwin".into(), variant: "metal".into(), cpu: "generic".into(), file: "other.tar.gz".into(), sha256: "00".into(), size: 1 },
-                ManifestAsset { target: m.target, variant: m.variant, cpu: m.cpu, file: "build.tar.gz".into(), sha256: hex::encode(Sha256::digest(archive)), size: archive.len() as u64 },
+                ManifestAsset { target: "aarch64-apple-darwin".into(), variant: "metal".into(), cpu: "generic".into(), file: "other.tar.gz".into(), sha256: "00".into(), size: 1, kind: "cli".into() },
+                ManifestAsset { target: m.target, variant: m.variant, cpu: m.cpu, file: "build.tar.gz".into(), sha256: hex::encode(Sha256::digest(archive)), size: archive.len() as u64, kind: "cli".into() },
             ],
         }
     }
@@ -384,6 +460,51 @@ mod tests {
         std::fs::write(&exe, b"old node").unwrap();
         std::fs::write(dir.join("clamor-muster"), b"old muster").unwrap();
         (dir, exe)
+    }
+
+    /// The apps: an update is the installer for how the app is installed here (an .rpm for an
+    /// rpm-installed app on this CPU), checked against the signed manifest; the command-line
+    /// updater never picks an app installer, and a file that does not match is refused.
+    #[test]
+    fn apps_get_the_installer_for_how_they_are_installed() {
+        let signer = key(7);
+        let rpm = b"pretend rpm".to_vec();
+        let cli = tar_gz(&[("clamor-node", b"new node")]);
+        let mut m = manifest_for("0.9.0", &cli);
+        m.assets.push(ManifestAsset { target: "x86_64-unknown-linux-gnu".into(), variant: "app".into(), cpu: "x86-64-v3".into(), file: "Clamor-0.9.0-1.x86_64.rpm".into(), sha256: hex::encode(Sha256::digest(&rpm)), size: rpm.len() as u64, kind: "rpm".into() });
+        m.assets.push(ManifestAsset { target: "aarch64-unknown-linux-gnu".into(), variant: "app".into(), cpu: "x".into(), file: "Clamor-0.9.0-1.aarch64.rpm".into(), sha256: "00".into(), size: 1, kind: "rpm".into() });
+        let body = serde_json::to_vec(&m).unwrap();
+        let sig = signer.sign(&body).to_bytes().to_vec();
+        let base = serve(move |base| {
+            let listing = serde_json::json!({
+                "tag_name": "v0.9.0", "html_url": "https://example.invalid/r", "body": "## New\n- things",
+                "assets": [
+                    { "name": "manifest.json", "browser_download_url": format!("{base}/manifest.json") },
+                    { "name": "manifest.json.sig", "browser_download_url": format!("{base}/manifest.json.sig") },
+                    { "name": "Clamor-0.9.0-1.x86_64.rpm", "browser_download_url": format!("{base}/rpm") },
+                    { "name": "build.tar.gz", "browser_download_url": format!("{base}/build.tar.gz") },
+                ]
+            });
+            vec![("/latest".into(), listing.to_string().into_bytes()), ("/manifest.json".into(), body), ("/manifest.json.sig".into(), sig), ("/rpm".into(), rpm), ("/build.tar.gz".into(), cli)]
+        });
+        let src = source(format!("{base}/latest"), &signer);
+        let u = app_check(&src, "rpm", "x86_64-unknown-linux-gnu", "0.6.0").unwrap().expect("an update");
+        assert_eq!((u.version.as_str(), u.asset.file.as_str(), u.notes.as_deref()), ("0.9.0", "Clamor-0.9.0-1.x86_64.rpm", Some("## New\n- things")));
+        let dir = std::env::temp_dir().join(format!("clamor-appupd-{}", std::process::id()));
+        let f = app_download(&u, &dir).unwrap();
+        assert_eq!(std::fs::read(&f).unwrap(), b"pretend rpm");
+        assert!(app_check(&src, "rpm", "x86_64-unknown-linux-gnu", "0.9.0").unwrap().is_none(), "up to date");
+        assert!(app_check(&src, "dmg", "x86_64-unknown-linux-gnu", "0.6.0").unwrap().is_none(), "no build of that kind");
+        // The command-line updater still picks its archive, never the rpm.
+        match check(&src, &me()).unwrap() {
+            Check::Available(a) => assert_eq!(a.asset.file, "build.tar.gz"),
+            other => panic!("{other:?}"),
+        }
+        // A file that differs from the manifest is refused.
+        let mut bad = u.clone();
+        bad.asset.sha256 = "00".repeat(32);
+        assert!(app_download(&bad, &dir).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -472,6 +593,16 @@ pub struct Policy {
     pub auto: bool,
 }
 
+/// This clamor-node came with the Clamor app (the app sets `CLAMOR_APP_MANAGED`, and an installed
+/// app puts its `clamor-desktop` program next to it, also when started by hand from a shell). The
+/// app updates itself and its clamor-node together, through the system's package manager where
+/// it was installed by one, so clamor-node never replaces itself there.
+pub fn app_managed() -> bool {
+    std::env::var_os("CLAMOR_APP_MANAGED").is_some() || std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("clamor-desktop").exists() || d.join("clamor-desktop.exe").exists())).unwrap_or(false)
+}
+
+pub const APP_MANAGED: &str = "this clamor-node is part of the Clamor app: update the app instead (it offers new versions itself)";
+
 /// Shared "is there a newer release?" state, filled in by `spawn_checker`.
 pub type UpdateFlag = std::sync::Arc<std::sync::Mutex<Option<String>>>;
 
@@ -486,7 +617,8 @@ pub fn spawn_checker(state: UpdateFlag) {
                 Ok(Ok(Check::Available(av))) => {
                     let mut s = state.lock().unwrap();
                     if s.as_deref() != Some(av.version.as_str()) {
-                        println!("update available: clamor {} (run `clamor-node update`)", av.version);
+                        let how = if app_managed() { "update the Clamor app" } else { "run `clamor-node update`" };
+                        println!("update available: clamor {} ({how})", av.version);
                     }
                     *s = Some(av.version);
                 }
@@ -502,6 +634,9 @@ pub fn spawn_checker(state: UpdateFlag) {
 /// Install the latest release over the running binary, then restart with the same arguments.
 /// Returns only on failure.
 pub async fn update_and_restart() -> Result<()> {
+    if app_managed() {
+        bail!("{APP_MANAGED}");
+    }
     let me = crate::build_info::current();
     let exe = std::env::current_exe()?;
     let exe2 = exe.clone();

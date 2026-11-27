@@ -1,11 +1,13 @@
 name: desktop
-# The desktop app's installers: .deb/.rpm/AppImage and Flatpak on Linux, .dmg on macOS, a setup
-# .exe on Windows. Each bundles clamor-node. Unsigned (macOS and Windows will warn on first open).
+# The app's installers: .deb/.rpm/AppImage and Flatpak on Linux, .dmg on macOS, a setup .exe on
+# Windows (each bundles clamor-node; unsigned, so macOS and Windows warn on first open), and an
+# Android APK (clamor-node runs inside it), signed with the Clamor Android key when the
+# ANDROID_KEYSTORE_* secrets are set.
 #  - Pull requests that touch the app build everything (artifacts only).
-#  - A tag vX.Y.Z also uploads the installers to that release (the release workflow creates it).
+#  - Releases call this from release.yml, which lists every installer in the signed manifest
+#    (each file comes with a .json description) and uploads them.
 on:
-  push:
-    tags: ["v*"]
+  workflow_call:
   workflow_dispatch:
   pull_request:
     paths: ["apps/desktop/**", ".github/workflows/desktop.yml"]
@@ -39,6 +41,8 @@ jobs:
       - name: System libraries (Linux)
         if: runner.os == 'Linux'
         run: |
+          # GitHub's runners list Microsoft's package server, which now refuses requests (403); we use nothing from it.
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/microsoft-prod.sources
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf \
             libvulkan-dev glslc spirv-headers flatpak
@@ -67,16 +71,89 @@ jobs:
           find apps/desktop/target/${{ matrix.target }}/release/bundle -maxdepth 2 -type f \
             \( -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' -o -name '*.dmg' -o -name '*-setup.exe' \) -exec cp {} out/ \;
           cp apps/desktop/flatpak/*.flatpak out/ 2>/dev/null || true
+          scripts/describe-installers.sh out "${{ matrix.target }}" "${{ matrix.cpu }}"
           ls -l out
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-${{ matrix.target }}
           path: out/*
-      - name: Attach to the release
-        if: startsWith(github.ref, 'refs/tags/v')
+
+  android:
+    name: android (apk)
+    runs-on: ubuntu-24.04
+    env:
+      # Phones: ARMv8.2 with dot product and fp16 (every 64-bit phone of recent years).
+      CLAMOR_GGML_CPU: armv8.2-a+dotprod+fp16
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: "17", cache: gradle }
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: aarch64-linux-android }
+      - uses: nttld/setup-ndk@v1
+        id: ndk
+        with: { ndk-version: r27c, add-to-path: false }
+      - name: Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+      - name: APK
+        working-directory: apps/desktop
+        env:
+          NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
         shell: bash
-        env: { GH_TOKEN: "${{ github.token }}" }
         run: |
-          # The release workflow creates the (draft) release; wait for it.
-          for i in $(seq 1 60); do gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 && break; sleep 30; done
-          gh release upload "$GITHUB_REF_NAME" out/* --clobber
+          # Maven Central often answers GitHub's runners "429 Too Many Requests": fetch from Google's
+          # mirror of it first (all builds, buildSrc and plugins included), and retry after a pause.
+          mkdir -p ~/.gradle/init.d
+          cat > ~/.gradle/init.d/maven-mirror.gradle <<'GRADLE'
+          def mirror = 'https://maven-central.storage-download.googleapis.com/maven2/'
+          def first = { RepositoryHandler repos ->
+            def m = repos.maven { url mirror; name 'MavenCentralMirror' }
+            repos.remove(m)
+            repos.addFirst(m)
+          }
+          beforeSettings { settings ->
+            settings.pluginManagement.repositories { maven { url mirror }; gradlePluginPortal() }
+          }
+          allprojects {
+            first(buildscript.repositories)
+            first(repositories)
+          }
+          GRADLE
+          for i in 1 2 3 4; do
+            cargo tauri android build --apk --target aarch64 && exit 0
+            echo "::warning::APK build attempt $i failed; retrying in $((i * 90)) s"
+            sleep $((i * 90))
+          done
+          exit 1
+      - name: Sign
+        shell: bash
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          apk=$(find apps/desktop/gen/android/app/build/outputs/apk -name '*-release-unsigned.apk' | head -1)
+          bt=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          mkdir -p out
+          "$bt/zipalign" -f -p 4 "$apk" aligned.apk
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > release.jks
+            "$bt/apksigner" sign --ks release.jks --ks-key-alias clamor --ks-pass env:KEYSTORE_PASSWORD --out "out/Clamor-$version-android-arm64.apk" aligned.apk
+            rm -f release.jks
+          else
+            # No release key here (a fork, or before the secrets are set): a throwaway key, so
+            # the APK can still be installed for testing. Updates to it will not install over.
+            echo "::warning::ANDROID_KEYSTORE_B64 is not set: signing with a throwaway key"
+            keytool -genkeypair -keystore test.jks -alias clamor -keyalg RSA -keysize 3072 -validity 365 -storepass testtest -keypass testtest -dname "CN=Clamor test build"
+            "$bt/apksigner" sign --ks test.jks --ks-key-alias clamor --ks-pass pass:testtest --out "out/Clamor-$version-android-arm64-test.apk" aligned.apk
+          fi
+          "$bt/apksigner" verify --print-certs out/*.apk | head -3
+          rm -f out/*.idsig
+          scripts/describe-installers.sh out aarch64-linux-android "$CLAMOR_GGML_CPU"
+          ls -l out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-arm64
+          path: out/*

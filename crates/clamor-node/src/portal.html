@@ -2,635 +2,940 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Clamor</title>
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
 <style>
-  :root { color-scheme: light dark; --bg:#f6f7f9; --card:#fff; --ink:#15181d; --mute:#667085; --line:#e4e7ec; --accent:#2f6fed; --ok:#12805c; --warn:#b54708; --bad:#b42318; }
-  @media (prefers-color-scheme: dark) { :root { --bg:#0f1216; --card:#171b21; --ink:#e8ebf0; --mute:#98a2b3; --line:#262c35; --accent:#6b9bff; --ok:#3ccf9a; --warn:#f5a65b; --bad:#ff7a6e; } }
-  * { box-sizing: border-box; }
-  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.45 system-ui,-apple-system,Segoe UI,sans-serif; }
-  header { display:flex; align-items:center; gap:12px; flex-wrap:wrap; padding:14px 18px; border-bottom:1px solid var(--line); background:var(--card); position:sticky; top:0; }
-  header h1 { margin:0; font-size:20px; letter-spacing:.5px; }
-  header .sub { color:var(--mute); flex:1; }
-  [hidden] { display:none !important; }
-  main { max-width:1100px; margin:0 auto; padding:16px; display:grid; gap:16px; }
-  section { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px; overflow-x:auto; }
-  h2 { margin:0 0 10px; font-size:13px; text-transform:uppercase; letter-spacing:.08em; color:var(--mute); }
-  table { width:100%; border-collapse:collapse; font-size:14px; }
-  th, td { text-align:left; padding:7px 8px; border-bottom:1px solid var(--line); white-space:nowrap; }
-  th { color:var(--mute); font-weight:500; font-size:12px; }
-  td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
-  .dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:7px; background:var(--mute); }
-  .ready .dot { background:var(--ok); } .busy .dot { background:var(--accent); } .benchmarking .dot, .joining .dot, .draining .dot { background:var(--warn); } .away .dot { background:var(--bad); }
-  button, select, input { font:inherit; color:inherit; background:var(--card); border:1px solid var(--line); border-radius:8px; padding:5px 10px; }
-  button { cursor:pointer; } button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
-  button:disabled { opacity:.5; cursor:default; }
-  .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; }
-  .stat b { display:block; font-size:22px; } .stat span { color:var(--mute); font-size:12px; }
-  .warn { color:var(--warn); font-size:13px; margin-top:8px; }
-  .controls { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:10px; color:var(--mute); }
-  .controls input[type=number] { width:80px; }
-  .badge { background:var(--accent); color:#fff; border-radius:999px; padding:1px 9px; font-size:12px; margin-left:6px; }
-  .mute { color:var(--mute); } small { color:var(--mute); }
-  .chat { display:flex; gap:8px; } .chat input { flex:1; }
-  .paused-chip { color:var(--warn); }
-  /* Device settings dialog */
-  dialog { border:1px solid var(--line); border-radius:14px; padding:0; width:min(520px, calc(100vw - 24px)); background:var(--card); color:var(--ink); }
-  dialog::backdrop { background:rgba(0,0,0,.45); }
-  .dlg-head { padding:16px 18px 6px; } .dlg-head h3 { margin:0; font-size:18px; } .dlg-head .mute { font-size:13px; }
-  .dlg-body { padding:6px 18px 4px; display:grid; gap:16px; }
-  .field > label, .field > .label { display:block; font-weight:600; margin-bottom:6px; }
-  .field .help { color:var(--mute); font-size:13px; margin-top:5px; }
-  .seg { display:inline-flex; border:1px solid var(--line); border-radius:9px; overflow:hidden; }
-  .seg button { border:0; border-radius:0; padding:6px 14px; background:transparent; }
-  .seg button + button { border-left:1px solid var(--line); }
-  .seg button[aria-pressed=true] { background:var(--accent); color:#fff; }
-  .row { display:flex; align-items:center; gap:12px; }
-  .row input[type=range] { flex:1; accent-color:var(--accent); }
-  .readout { min-width:150px; text-align:right; font-variant-numeric:tabular-nums; font-size:14px; }
-  .switch { display:inline-flex; align-items:center; gap:10px; cursor:pointer; }
-  .switch input { width:18px; height:18px; accent-color:var(--accent); }
-  .status { display:grid; grid-template-columns:auto 1fr; gap:3px 12px; font-size:13px; color:var(--mute); background:var(--bg); border-radius:10px; padding:10px 12px; }
-  .status b { color:var(--ink); font-weight:500; }
-  .note { color:var(--warn); font-size:13px; }
-  .dlg-foot { display:flex; gap:8px; padding:14px 18px 16px; border-top:1px solid var(--line); margin-top:14px; }
-  .dlg-foot .spacer { flex:1; }
-  button.danger { color:var(--bad); border-color:var(--bad); }
-  dialog { max-height:calc(100dvh - 24px); }
-  dialog form { display:flex; flex-direction:column; max-height:calc(100dvh - 26px); }
-  .dlg-body { overflow-y:auto; }
-  .signin { max-width:520px; margin:40px auto; background:var(--card); border:1px solid var(--line); border-radius:12px; padding:20px; }
-  .approve { background:var(--card); border:1px solid var(--accent); border-radius:12px; padding:12px 16px; display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
-  .err { color:var(--bad); }
-  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
-  .code { font:600 34px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing:.08em; text-align:center; padding:8px 0; }
-  .cmd { margin:0; padding:10px 12px; border:1px solid var(--line); border-radius:8px; white-space:pre-wrap; word-break:break-all; font-size:13px; }
-  /* Navigation */
-  nav.tabs { display:flex; gap:4px; flex-wrap:wrap; }
-  nav.tabs a { color:var(--mute); text-decoration:none; padding:6px 10px; border-radius:8px; font-size:14px; }
-  nav.tabs a[aria-current=page] { color:var(--ink); background:var(--bg); font-weight:600; }
-  .page-title { margin:4px 0 0; font-size:22px; }
-  /* Home widgets */
-  .widgets { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:12px; }
-  .widget { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:12px 14px; display:grid; gap:6px; align-content:start; min-height:118px; min-width:0; }
-  .widget > * { min-width:0; }
-  button.linkish { border:0; background:transparent; color:var(--mute); padding:5px 6px; }
-  button.linkish:hover { color:var(--ink); text-decoration:underline; }
-  .msg.stopped .meta::before { content:'stopped · '; }
-  .widget h3 { margin:0; font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--mute); font-weight:600; }
-  .widget .big { font-size:22px; font-weight:650; line-height:1.1; }
-  .widget .cap { font-size:13px; color:var(--mute); }
-  .widget svg { display:block; }
-  .w-row { display:flex; align-items:center; gap:12px; }
-  .avatars { display:flex; }
-  .avatar { width:30px; height:30px; border-radius:50%; display:grid; place-items:center; color:#fff; font-size:12px; font-weight:650; border:2px solid var(--card); margin-left:-8px; }
-  .avatar:first-child { margin-left:0; }
-  .bar { height:10px; background:var(--bg); border-radius:99px; overflow:hidden; border:1px solid var(--line); }
-  .bar > span { display:block; height:100%; background:var(--accent); border-radius:99px; }
-  .chip { display:inline-block; font-size:12px; padding:1px 8px; border-radius:99px; background:var(--bg); color:var(--mute); }
-  .chip.ok { color:var(--ok); } .chip.warn { color:var(--warn); } .chip.bad { color:var(--bad); }
-  .mydev { display:flex; align-items:center; gap:8px; font-size:13px; }
-  .mydev span.name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  /* Chat */
-  .chatbox { display:grid; grid-template-columns:220px 1fr; min-height:420px; padding:0; overflow:hidden; }
-  .convs { border-right:1px solid var(--line); padding:10px; display:flex; flex-direction:column; gap:4px; overflow-y:auto; max-height:560px; }
-  .convs button { text-align:left; border:0; background:transparent; padding:7px 9px; border-radius:8px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .convs button[aria-current=true] { background:var(--bg); font-weight:600; }
-  .convs .new { color:var(--accent); }
-  .convhead { font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--mute); margin:12px 9px 2px; }
-  .thread { display:flex; flex-direction:column; min-width:0; }
-  .msgs { flex:1; overflow-y:auto; padding:14px; display:flex; flex-direction:column; gap:10px; max-height:520px; }
-  .msg { max-width:min(80%, 640px); padding:9px 12px; border-radius:14px; white-space:pre-wrap; word-wrap:break-word; line-height:1.45; }
-  .msg.user { align-self:flex-end; background:var(--accent); color:#fff; border-bottom-right-radius:4px; }
-  .msg.assistant { align-self:flex-start; background:var(--bg); border-bottom-left-radius:4px; }
-  .msg .who { display:block; font-size:12px; opacity:.8; margin-bottom:2px; }
-  .msg .meta { display:block; font-size:11px; color:var(--mute); margin-top:4px; }
-  .msg.error { color:var(--bad); background:transparent; border:1px solid var(--bad); }
-  .composer { display:flex; gap:8px; padding:10px; border-top:1px solid var(--line); }
-  .composer textarea { flex:1; font:inherit; color:inherit; background:var(--card); border:1px solid var(--line); border-radius:10px; padding:8px 10px; resize:none; min-height:42px; max-height:160px; }
-  .empty { margin:auto; text-align:center; color:var(--mute); padding:24px; max-width:420px; }
-  .typing::after { content:'…'; animation: blink 1s steps(3) infinite; }
-  .caret { animation: blink 1s steps(2) infinite; color:var(--mute); }
-  @keyframes blink { 50% { opacity:.3; } }
-  .convpick { display:none; }
-  @media (max-width: 700px) {
-    .chatbox { grid-template-columns:1fr; }
-    .convs { display:none; }
-    .convpick { display:block; margin:10px 10px 0; }
-  }
-  @media (max-width: 520px) {
-    .row { flex-wrap:wrap; } .row input[type=range] { flex-basis:100%; } .readout { text-align:left; min-width:0; }
-    .dlg-foot { flex-wrap:wrap; } .dlg-foot .spacer { display:none; }
-    .dlg-foot button { flex:1; } .dlg-foot button.danger { order:3; flex-basis:100%; }
-  }
+/* Clamor's UI follows Material 3 (m3.material.io). Colours: primary seeded from the icon's coral
+   (#fd5453), neutral grey surfaces. The role names below are M3's, so components map 1:1 to the
+   guidelines. Layout by window width: compact (<600 px) bottom navigation bar; medium: navigation
+   rail; expanded (>=1200 px): rail + the chat list beside the conversation. */
+:root {
+  color-scheme: light;
+  --primary:#ad3229; --on-primary:#ffffff; --primary-container:#ffdad5; --on-primary-container:#410001;
+  --secondary-container:#f8ddd9; --on-secondary-container:#291816;
+  --tertiary-container:#f8e287; --on-tertiary-container:#211b00;
+  --error:#ba1a1a; --error-container:#ffdad6; --on-error-container:#410002;
+  --ok:#1e6b45; --ok-container:#c2f0d2; --on-ok-container:#002111;
+  --warn:#8a5100; --warn-container:#ffdcbd; --on-warn-container:#2c1600;
+  --surface:#f9f9fc; --surface-container-low:#f3f3f6; --surface-container:#edeef1;
+  --surface-container-high:#e7e8eb; --surface-container-highest:#e1e2e5;
+  --on-surface:#191c1e; --on-surface-variant:#43474e; --outline:#73777f; --outline-variant:#c3c6cf;
+  --inverse-surface:#2e3133; --inverse-on-surface:#eff0f3; --inverse-primary:#ffb4a9;
+  --scrim:rgb(0 0 0 / .32);
+  --shadow-3:0 4px 8px 3px rgb(0 0 0 / .15), 0 1px 3px rgb(0 0 0 / .3);
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  color-scheme: dark;
+  --primary:#ffb4a9; --on-primary:#690003; --primary-container:#8c1d18; --on-primary-container:#ffdad5;
+  --secondary-container:#5d3f3b; --on-secondary-container:#ffdad5;
+  --tertiary-container:#534600; --on-tertiary-container:#f8e287;
+  --error:#ffb4ab; --error-container:#93000a; --on-error-container:#ffdad6;
+  --ok:#8fd9ad; --ok-container:#005232; --on-ok-container:#abf5c8;
+  --warn:#ffb871; --warn-container:#693c00; --on-warn-container:#ffdcbd;
+  --surface:#111318; --surface-container-low:#171b21; --surface-container:#1b1f26;
+  --surface-container-high:#262a31; --surface-container-highest:#31353c;
+  --on-surface:#e2e2e9; --on-surface-variant:#c3c6cf; --outline:#8d9199; --outline-variant:#43474e;
+  --inverse-surface:#e2e2e9; --inverse-on-surface:#2e3036; --inverse-primary:#ad3229;
+  --scrim:rgb(0 0 0 / .55);
+} }
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --primary:#ffb4a9; --on-primary:#690003; --primary-container:#8c1d18; --on-primary-container:#ffdad5;
+  --secondary-container:#5d3f3b; --on-secondary-container:#ffdad5;
+  --tertiary-container:#534600; --on-tertiary-container:#f8e287;
+  --error:#ffb4ab; --error-container:#93000a; --on-error-container:#ffdad6;
+  --ok:#8fd9ad; --ok-container:#005232; --on-ok-container:#abf5c8;
+  --warn:#ffb871; --warn-container:#693c00; --on-warn-container:#ffdcbd;
+  --surface:#111318; --surface-container-low:#171b21; --surface-container:#1b1f26;
+  --surface-container-high:#262a31; --surface-container-highest:#31353c;
+  --on-surface:#e2e2e9; --on-surface-variant:#c3c6cf; --outline:#8d9199; --outline-variant:#43474e;
+  --inverse-surface:#e2e2e9; --inverse-on-surface:#2e3036; --inverse-primary:#ad3229;
+  --scrim:rgb(0 0 0 / .55);
+}
+
+* { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+html, body { height:100%; margin:0; }
+body { background:var(--surface); color:var(--on-surface); font:400 14px/20px Roboto, "Google Sans Text", system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing:.25px; overflow:hidden; }
+button, input, textarea, select { font:inherit; color:inherit; letter-spacing:inherit; }
+a { color:var(--primary); }
+[hidden] { display:none !important; }
+.title-l { font-size:22px; line-height:28px; }
+.title-m { font-size:16px; line-height:24px; font-weight:500; letter-spacing:.15px; }
+.title-s { font-size:14px; line-height:20px; font-weight:500; letter-spacing:.1px; }
+.label-m { font-size:12px; line-height:16px; font-weight:500; letter-spacing:.5px; }
+.body-l { font-size:16px; line-height:24px; letter-spacing:.5px; }
+.body-s { font-size:12px; line-height:16px; letter-spacing:.4px; }
+.headline-s { font-size:24px; line-height:32px; }
+.muted { color:var(--on-surface-variant); }
+.err { color:var(--error); white-space:pre-wrap; }
+.center { text-align:center; }
+.row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+.spacer { flex:1; }
+.i { width:24px; height:24px; fill:currentColor; flex:none; display:inline-block; vertical-align:middle; }
+.i.s18 { width:18px; height:18px; } .i.s16 { width:16px; height:16px; } .i.s32 { width:32px; height:32px; }
+
+/* State layer (hover/press feedback) */
+.st { position:relative; overflow:hidden; cursor:pointer; }
+.st::after { content:""; position:absolute; inset:0; background:currentColor; opacity:0; transition:opacity .15s; pointer-events:none; border-radius:inherit; }
+.st:hover::after { opacity:.08; } .st:active::after { opacity:.12; }
+.st:disabled { cursor:default; } .st:disabled::after { display:none; }
+:focus-visible { outline:2px solid var(--primary); outline-offset:2px; }
+
+/* Buttons, chips, fields */
+.btn { display:inline-flex; align-items:center; justify-content:center; gap:8px; height:40px; padding:0 24px; border-radius:20px; border:0; font-size:14px; font-weight:500; letter-spacing:.1px; white-space:nowrap; text-decoration:none; }
+.btn .i { width:18px; height:18px; margin-left:-8px; }
+.btn.filled { background:var(--primary); color:var(--on-primary); }
+.btn.tonal { background:var(--secondary-container); color:var(--on-secondary-container); }
+.btn.outlined { background:transparent; color:var(--primary); box-shadow:inset 0 0 0 1px var(--outline); }
+.btn.text { background:transparent; color:var(--primary); padding:0 12px; }
+.btn.text .i { margin-left:-4px; }
+.btn.danger { background:transparent; color:var(--error); padding:0 12px; }
+.btn.sm { height:32px; padding:0 16px; }
+.btn:disabled { opacity:.38; }
+.icon-btn { width:40px; height:40px; border-radius:20px; border:0; background:transparent; color:var(--on-surface-variant); display:inline-grid; place-items:center; flex:none; padding:0; }
+.icon-btn.filled { background:var(--primary); color:var(--on-primary); }
+.icon-btn.tonal { background:var(--secondary-container); color:var(--on-secondary-container); }
+.chip { flex:none; display:inline-flex; align-items:center; gap:8px; height:32px; padding:0 16px; border-radius:8px; border:1px solid var(--outline); background:transparent; color:var(--on-surface-variant); font-size:14px; font-weight:500; white-space:nowrap; }
+.chips { display:flex; gap:8px; flex-wrap:wrap; }
+.badge { display:inline-flex; align-items:center; gap:4px; height:20px; padding:0 8px; border-radius:10px; font-size:11px; font-weight:500; letter-spacing:.5px; white-space:nowrap; }
+.badge.ok { background:var(--ok-container); color:var(--on-ok-container); }
+.badge.warn { background:var(--warn-container); color:var(--on-warn-container); }
+.badge.bad { background:var(--error-container); color:var(--on-error-container); }
+.badge.pri { background:var(--primary-container); color:var(--on-primary-container); }
+.badge.neutral { background:var(--surface-container-highest); color:var(--on-surface-variant); }
+.seg { display:flex; border:1px solid var(--outline); border-radius:20px; overflow:hidden; min-height:40px; }
+.seg button { flex:1; border:0; background:transparent; padding:0 12px; font-weight:500; display:flex; align-items:center; justify-content:center; gap:6px; min-width:0; white-space:nowrap; }
+.seg button + button { border-left:1px solid var(--outline); }
+.seg button[aria-pressed="true"] { background:var(--secondary-container); color:var(--on-secondary-container); }
+.seg button:disabled { opacity:.38; }
+.switch { position:relative; width:52px; height:32px; flex:none; display:inline-block; }
+.switch input { appearance:none; margin:0; width:52px; height:32px; border-radius:16px; background:var(--surface-container-highest); box-shadow:inset 0 0 0 2px var(--outline); cursor:pointer; transition:background .2s; }
+.switch input::after { content:""; position:absolute; left:8px; top:8px; width:16px; height:16px; border-radius:50%; background:var(--outline); transition:all .2s; }
+.switch input:checked { background:var(--primary); box-shadow:none; }
+.switch input:checked::after { left:24px; top:4px; width:24px; height:24px; background:var(--on-primary); }
+.switch input:disabled { opacity:.38; cursor:default; }
+input[type=range] { width:100%; accent-color:var(--primary); margin:4px 0 0; }
+.field { position:relative; }
+.field input { width:100%; height:56px; padding:22px 16px 6px; border:0; border-radius:4px 4px 0 0; background:var(--surface-container-highest); border-bottom:1px solid var(--on-surface-variant); outline:none; font-size:16px; }
+.field input:focus { border-bottom:2px solid var(--primary); }
+.field label { position:absolute; left:16px; top:8px; font-size:12px; color:var(--on-surface-variant); pointer-events:none; }
+.select { height:40px; padding:0 32px 0 12px; border-radius:8px; border:1px solid var(--outline); background:var(--surface); appearance:none; background-image:linear-gradient(45deg, transparent 50%, currentColor 50%), linear-gradient(135deg, currentColor 50%, transparent 50%); background-position:calc(100% - 16px) 18px, calc(100% - 11px) 18px; background-size:5px 5px; background-repeat:no-repeat; }
+.num-in { height:40px; width:72px; padding:0 10px; border-radius:8px; border:1px solid var(--outline); background:var(--surface); }
+
+/* Shell */
+.app { height:100dvh; display:grid; grid-template-columns:1fr; grid-template-rows:1fr auto; grid-template-areas:"main" "nav"; }
+.nav { grid-area:nav; display:flex; justify-content:space-around; background:var(--surface-container); padding:12px 4px calc(16px + env(safe-area-inset-bottom)); }
+.nav .fab-slot { display:none; }
+.nav a { flex:1; max-width:110px; display:flex; flex-direction:column; align-items:center; gap:4px; color:var(--on-surface-variant); text-decoration:none; font-size:12px; font-weight:500; letter-spacing:.5px; }
+.nav a .pill { width:56px; height:32px; border-radius:16px; display:grid; place-items:center; transition:background .2s; position:relative; }
+.nav a .on { display:none; }
+.nav a[aria-current="page"] { color:var(--on-surface); }
+.nav a[aria-current="page"] .pill { background:var(--secondary-container); color:var(--on-secondary-container); }
+.nav a[aria-current="page"] .on { display:inline-block; } .nav a[aria-current="page"] .off { display:none; }
+.nav .dotbadge { position:absolute; top:2px; right:12px; width:8px; height:8px; border-radius:50%; background:var(--error); }
+main { grid-area:main; min-height:0; position:relative; }
+.screen { position:absolute; inset:0; display:flex; flex-direction:column; min-height:0; }
+.screen.enter { animation:fadein .2s ease; }
+@keyframes fadein { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:none; } }
+.topbar { display:flex; align-items:center; gap:4px; min-height:64px; padding:calc(8px + env(safe-area-inset-top)) 8px 8px 16px; background:var(--surface); flex:none; }
+.topbar.lead { padding-left:4px; }
+.topbar > .title-l { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.scroll { flex:1; min-height:0; overflow-y:auto; overflow-x:hidden; padding:0 16px 24px; }
+.wrap { max-width:840px; margin:0 auto; display:grid; gap:16px; grid-template-columns:minmax(0,1fr); }
+.brand-mark { width:32px; height:32px; border-radius:9px; flex:none; }
+.avatar { width:40px; height:40px; border-radius:50%; display:grid; place-items:center; font-weight:500; flex:none; color:#fff; }
+.avatar.sm { width:32px; height:32px; font-size:13px; }
+@media (min-width:600px) {
+  .app { grid-template-columns:80px 1fr; grid-template-rows:1fr; grid-template-areas:"nav main"; }
+  .nav { flex-direction:column; justify-content:flex-start; gap:12px; padding:calc(12px + env(safe-area-inset-top)) 0 16px; background:var(--surface); }
+  .nav .fab-slot { display:grid; place-items:center; margin-bottom:28px; }
+  .nav a { flex:none; max-width:none; }
+  .scroll { padding:0 24px 24px; }
+}
+
+/* Cards and lists */
+.card { background:var(--surface-container-low); border-radius:16px; padding:16px; }
+.card.hero { background:var(--surface-container); border-radius:28px; padding:20px; }
+.section-title { color:var(--primary); padding:8px 16px 8px; font-size:14px; font-weight:500; letter-spacing:.1px; display:flex; align-items:center; gap:8px; }
+.list { background:var(--surface-container-low); border-radius:16px; overflow:hidden; }
+.item { display:flex; align-items:center; gap:16px; min-height:56px; padding:8px 16px; text-align:left; width:100%; border:0; background:transparent; color:inherit; }
+.item + .item { border-top:1px solid var(--outline-variant); }
+.item .lead-icon { color:var(--on-surface-variant); }
+.item .text { flex:1; min-width:0; display:grid; gap:2px; }
+.item .text .h { font-size:16px; line-height:24px; letter-spacing:.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.item .text .s { font-size:14px; line-height:20px; color:var(--on-surface-variant); }
+.item .trail { color:var(--on-surface-variant); flex:none; display:flex; align-items:center; gap:8px; }
+.item.danger, .item.danger .lead-icon { color:var(--error); }
+.tile-icon { width:40px; height:40px; border-radius:12px; display:grid; place-items:center; background:var(--secondary-container); color:var(--on-secondary-container); flex:none; }
+.tile-icon.pri { background:var(--primary-container); color:var(--on-primary-container); }
+.tile-icon.big { width:56px; height:56px; border-radius:16px; }
+.empty { padding:16px; color:var(--on-surface-variant); }
+table.data { width:100%; border-collapse:collapse; font-size:14px; }
+table.data th { text-align:left; font-weight:500; font-size:12px; color:var(--on-surface-variant); padding:8px 12px; white-space:nowrap; }
+table.data td { padding:10px 12px; border-top:1px solid var(--outline-variant); white-space:nowrap; }
+table.data .num { text-align:right; font-variant-numeric:tabular-nums; }
+.table-wrap { overflow-x:auto; background:var(--surface-container-low); border-radius:16px; max-width:100%; }
+.card > * { min-width:0; }
+table.data td.wrap { white-space:normal; min-width:180px; }
+
+/* Chat */
+.chat-layout { flex:1; min-height:0; display:grid; grid-template-columns:1fr; }
+.chat-list-pane { display:none; }
+.conv { display:flex; flex-direction:column; min-height:0; }
+.chat-head-text { flex:1; min-width:0; display:grid; }
+.chat-head-text > span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.msgs { flex:1; min-height:0; overflow-y:auto; padding:8px 16px 16px; }
+.msgs .inner { max-width:760px; margin:0 auto; display:flex; flex-direction:column; gap:18px; min-height:100%; }
+.m { display:flex; gap:10px; max-width:100%; }
+.m.me { flex-direction:row-reverse; }
+.m > .col { max-width:min(85%, 560px); min-width:0; display:flex; flex-direction:column; }
+.m.me > .col { align-items:flex-end; }
+.m .bubble { padding:10px 16px; border-radius:20px; width:fit-content; max-width:100%; font-size:16px; line-height:24px; letter-spacing:.2px; overflow-wrap:anywhere; white-space:pre-wrap; }
+.m.me .bubble { background:var(--primary-container); color:var(--on-primary-container); border-bottom-right-radius:6px; }
+.m.other .bubble { background:var(--surface-container-high); border-bottom-left-radius:6px; }
+.m.bot .body { flex:1; min-width:0; font-size:16px; line-height:24px; letter-spacing:.2px; white-space:pre-wrap; overflow-wrap:anywhere; }
+.m .who { font-size:12px; color:var(--on-surface-variant); margin-bottom:2px; font-weight:500; white-space:normal; }
+.m.err .body { color:var(--error); }
+.bot-avatar { width:32px; height:32px; border-radius:10px; flex:none; }
+.bot-avatar.thinking { animation:breathe 1.4s ease-in-out infinite; }
+@keyframes breathe { 0%,100% { transform:scale(1); } 50% { transform:scale(.86); filter:saturate(1.4) brightness(1.1); } }
+.typing { display:inline-flex; gap:4px; padding:8px 0; }
+.typing i { width:8px; height:8px; border-radius:50%; background:var(--on-surface-variant); opacity:.4; animation:dot 1.2s infinite; }
+.typing i:nth-child(2) { animation-delay:.15s; } .typing i:nth-child(3) { animation-delay:.3s; }
+@keyframes dot { 0%,60%,100% { opacity:.3; transform:none; } 30% { opacity:1; transform:translateY(-3px); } }
+.meta { display:block; font-size:12px; color:var(--on-surface-variant); margin-top:4px; white-space:normal; }
+.msg-actions { display:flex; margin:2px 0 0 -8px; }
+.msg-actions .icon-btn { width:32px; height:32px; } .msg-actions .i { width:18px; height:18px; }
+.composer { flex:none; padding:8px 12px calc(12px + env(safe-area-inset-bottom)); }
+.composer .box { max-width:760px; margin:0 auto; display:flex; align-items:flex-end; gap:4px; background:var(--surface-container-high); border-radius:28px; padding:4px 4px 4px 16px; }
+.composer textarea { flex:1; min-width:0; border:0; background:transparent; outline:none; resize:none; font-size:16px; line-height:24px; padding:8px 4px; max-height:144px; }
+.composer .icon-btn { width:48px; height:48px; border-radius:24px; }
+.composer .note { display:flex; gap:6px; align-items:center; justify-content:center; font-size:12px; color:var(--on-surface-variant); padding:6px 0 0; }
+.model-chip { flex:none; max-width:46vw; display:inline-flex; align-items:center; gap:6px; height:32px; padding:0 12px 0 10px; border-radius:16px; background:var(--surface-container-high); border:0; font-size:12px; font-weight:500; color:var(--on-surface-variant); }
+.model-chip .live { width:8px; height:8px; border-radius:50%; background:var(--outline); flex:none; }
+.model-chip .live.ok { background:var(--ok); box-shadow:0 0 0 3px color-mix(in srgb, var(--ok) 25%, transparent); }
+.model-chip .live.warn { background:var(--warn); }
+.model-chip .t { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.desk-pills { display:none; gap:8px; align-items:center; flex:none; }
+.pill-w { display:inline-flex; align-items:center; gap:8px; height:32px; padding:0 12px; border-radius:16px; background:var(--surface-container-high); border:0; font-size:12px; font-weight:500; color:var(--on-surface-variant); white-space:nowrap; }
+.pill-w b { color:var(--on-surface); font-weight:500; }
+.pill-w .mini-meter { width:36px; height:6px; border-radius:3px; background:var(--surface-container-highest); overflow:hidden; }
+.pill-w .mini-meter i { display:block; height:100%; background:var(--primary); }
+.pill-w .dot { width:8px; height:8px; border-radius:50%; }
+.pill-w .avs { display:flex; } .pill-w .avs span { width:18px; height:18px; border-radius:50%; font-size:10px; display:grid; place-items:center; margin-left:-5px; color:#fff; box-shadow:0 0 0 2px var(--surface-container-high); }
+.pill-w .avs span:first-child { margin-left:0; }
+.drawer-list { display:grid; gap:2px; }
+.drawer-list .item { border-radius:28px; min-height:52px; border-top:0 !important; padding:0 16px; }
+.drawer-list .item[aria-current="true"] { background:var(--secondary-container); color:var(--on-secondary-container); }
+.drawer-list .item[aria-current="true"] .s, .drawer-list .item[aria-current="true"] .lead-icon { color:var(--on-secondary-container); }
+.drawer-list .item .h { font-size:14px !important; font-weight:500; }
+.drawer-head { padding:14px 16px 6px; color:var(--on-surface-variant); font-size:14px; font-weight:500; }
+@media (min-width:1200px) {
+  .chat-layout { grid-template-columns:320px 1fr; }
+  .chat-list-pane { display:flex; flex-direction:column; min-height:0; background:var(--surface-container-low); border-radius:16px 0 0 0; padding:12px; overflow-y:auto; gap:4px; }
+  .compact-only { display:none !important; }
+  .desk-pills { display:flex; }
+  .chat-head-text { flex:1 1 140px; min-width:140px; }
+  .model-chip .tps { display:none; }
+}
+
+/* Swarm */
+.health { display:flex; gap:20px; align-items:center; }
+.ring { width:88px; height:88px; flex:none; position:relative; }
+.ring svg { width:100%; height:100%; }
+.ring b { position:absolute; inset:0; display:grid; place-items:center; font-size:20px; font-weight:500; }
+.stats { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin-top:16px; }
+.stat { background:var(--surface-container-highest); border-radius:16px; padding:12px; min-width:0; }
+.stat b { display:block; font-size:22px; line-height:28px; font-weight:400; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.stat span { font-size:12px; color:var(--on-surface-variant); }
+.meter { height:8px; border-radius:4px; background:var(--surface-container-highest); overflow:hidden; }
+.meter i { display:block; height:100%; background:var(--primary); border-radius:4px; }
+.spark { width:100%; height:40px; display:block; }
+
+/* Sheets, dialogs, snackbar */
+.scrim { position:fixed; inset:0; background:var(--scrim); z-index:20; animation:fade .2s; }
+@keyframes fade { from { opacity:0; } }
+.sheet { position:fixed; left:0; right:0; bottom:0; z-index:21; background:var(--surface-container-low); border-radius:28px 28px 0 0; max-height:90dvh; overflow-y:auto; padding:0 0 calc(20px + env(safe-area-inset-bottom)); animation:up .25s cubic-bezier(.2,0,0,1); margin:0 auto; max-width:640px; }
+@keyframes up { from { transform:translateY(100%); } }
+.sheet .grab { width:32px; height:4px; border-radius:2px; background:var(--on-surface-variant); opacity:.4; margin:22px auto 14px; }
+.sheet h2 { margin:0; padding:0 24px 8px; font-weight:400; }
+.sheet .body { padding:0 24px; display:grid; gap:16px; }
+.sheet .acts { display:flex; justify-content:flex-end; gap:8px; flex-wrap:wrap; }
+.dialog { position:fixed; z-index:21; left:50%; top:50%; transform:translate(-50%,-50%); width:min(400px, calc(100vw - 48px)); background:var(--surface-container-high); border-radius:28px; padding:24px; display:grid; gap:16px; animation:pop .2s cubic-bezier(.2,0,0,1); }
+.dialog h2 { margin:0; font-weight:400; font-size:24px; line-height:32px; }
+@keyframes pop { from { opacity:0; transform:translate(-50%,-46%) scale(.96); } }
+.drawer { position:fixed; left:0; top:0; bottom:0; width:min(360px, 86vw); z-index:21; background:var(--surface-container-low); border-radius:0 16px 16px 0; padding:calc(12px + env(safe-area-inset-top)) 12px 12px; overflow-y:auto; animation:right .25s cubic-bezier(.2,0,0,1); display:flex; flex-direction:column; gap:4px; }
+@keyframes right { from { transform:translateX(-100%); } }
+.snackbar { position:fixed; left:50%; transform:translateX(-50%); bottom:calc(96px + env(safe-area-inset-bottom)); z-index:30; background:var(--inverse-surface); color:var(--inverse-on-surface); border-radius:4px; min-height:48px; padding:4px 8px 4px 16px; display:flex; align-items:center; gap:8px; box-shadow:var(--shadow-3); width:max-content; max-width:calc(100vw - 32px); animation:snack .25s cubic-bezier(.2,0,0,1); }
+.snackbar .btn.text { color:var(--inverse-primary); }
+@keyframes snack { from { opacity:0; transform:translate(-50%, 16px); } }
+@media (min-width:600px) { .snackbar { bottom:24px; } }
+.fab { height:56px; border-radius:16px; border:0; background:var(--primary-container); color:var(--on-primary-container); display:inline-flex; align-items:center; gap:12px; padding:0 20px 0 16px; font-weight:500; box-shadow:var(--shadow-3); }
+.fab.square { width:56px; padding:0; justify-content:center; }
+.fab-float { position:absolute; right:16px; bottom:16px; z-index:5; }
+.confetti { position:fixed; inset:0; pointer-events:none; z-index:40; overflow:hidden; }
+.confetti i { position:absolute; top:-12px; width:8px; height:14px; border-radius:2px; animation:fall 1.6s cubic-bezier(.3,.6,.4,1) forwards; }
+@keyframes fall { to { transform:translateY(105vh) rotate(540deg); opacity:.2; } }
+.code-big { font:400 40px/52px ui-monospace, "Roboto Mono", monospace; letter-spacing:6px; text-align:center; padding:12px 0; background:var(--surface-container-highest); border-radius:16px; }
+.check-code { font:500 22px/28px ui-monospace, "Roboto Mono", monospace; letter-spacing:3px; text-align:center; }
+pre.cmd { margin:0; padding:12px 14px; border-radius:12px; background:var(--surface-container-highest); font:12px/1.5 ui-monospace, monospace; white-space:pre-wrap; word-break:break-all; }
+pre.log { margin:0; padding:12px 14px; border-radius:12px; background:var(--surface-container-lowest, var(--surface)); font:12px/1.5 ui-monospace, monospace; white-space:pre-wrap; max-height:60dvh; overflow:auto; }
+.signin { max-width:460px; margin:0 auto; padding:calc(40px + env(safe-area-inset-top)) 16px 40px; display:grid; gap:16px; }
+.banner { display:flex; gap:12px; align-items:center; flex-wrap:wrap; background:var(--primary-container); color:var(--on-primary-container); border-radius:16px; padding:12px 16px; }
+.banner .text { flex:1; min-width:200px; }
+.banner.warn { background:var(--warn-container); color:var(--on-warn-container); }
 </style>
 </head>
 <body>
-<header>
-  <h1>Clamor</h1>
-  <div class="sub" id="sub">connecting…</div>
-  <button id="whoami" class="linkish" title="Your preferences" hidden></button>
-  <button id="signout" hidden>Sign out</button>
-  <button id="add-device">Add device</button>
-</header>
-<div style="background:var(--card);border-bottom:1px solid var(--line);padding:6px 14px" id="navbar" hidden>
-  <nav class="tabs" aria-label="Pages">
-    <a href="#home">Home</a><a href="#models">Models</a><a href="#people">People</a><a href="#devices">Devices</a><a href="#advanced">Advanced</a>
-  </nav>
-</div>
-<section id="signin" class="signin" hidden>
-  <h2 style="text-transform:none;letter-spacing:0;font-size:22px;color:var(--ink)">Sign in</h2>
-  <p>Ask someone already in the swarm to approve this code in their Clamor app or dashboard (or approve it yourself on one of your devices):</p>
-  <div class="code" id="si-code">…</div>
-  <p class="mute" id="si-status">Waiting for approval…</p>
-  <details><summary>Sign in with your PIN instead</summary>
-    <form id="si-pin" class="row" style="margin-top:10px">
-      <input id="si-name" placeholder="Your name" autocomplete="username">
-      <input id="si-pinval" placeholder="PIN" inputmode="numeric" type="password" autocomplete="current-password">
-      <button class="primary">Sign in</button>
-    </form>
-    <p class="err" id="si-err"></p>
-  </details>
-</section>
-<main id="main">
-  <div id="approvals"></div>
+<!--ICONS-->
 
-  <div data-page="home">
-    <div class="widgets" id="widgets"></div>
-  </div>
-  <section data-page="home" class="chatbox" aria-label="Chat">
-    <div class="convs" id="convs"></div>
-    <div class="thread">
-      <select class="convpick" id="convpick" aria-label="Conversation"></select>
-      <div class="msgs" id="msgs" aria-live="polite"></div>
-      <form class="composer" id="composer">
-        <textarea id="say" rows="1" placeholder="Message the model…" aria-label="Message"></textarea>
-        <button class="primary" id="send">Send</button>
+<!-- Signing in from a browser -->
+<section id="signin" class="scroll" hidden style="height:100dvh">
+  <div class="signin">
+    <img src="/icon.svg" alt="" style="width:72px;height:72px;border-radius:20px;margin:0 auto">
+    <div class="center"><div class="headline-s">Sign in to Clamor</div><p class="muted">Ask someone already in the swarm to approve this code in their Clamor app (or approve it yourself on one of your devices).</p></div>
+    <div class="code-big" id="si-code">…</div>
+    <p class="muted center" id="si-status" style="margin:0">Waiting for approval…</p>
+    <div class="card" style="display:grid;gap:12px">
+      <div class="title-s">Or sign in with your PIN</div>
+      <form id="si-pin" style="display:grid;gap:12px">
+        <div class="field"><input id="si-name" autocomplete="username" placeholder=" "><label>Your name</label></div>
+        <div class="field"><input id="si-pinval" inputmode="numeric" type="password" autocomplete="current-password" placeholder=" "><label>PIN</label></div>
+        <button class="btn filled st">Sign in</button>
       </form>
+      <div class="err" id="si-err"></div>
     </div>
-  </section>
+  </div>
+</section>
 
-  <section data-page="models"><h2>Running now</h2><div id="running"></div></section>
-  <section data-page="models"><h2>Models in the swarm</h2>
-    <p class="mute" style="margin-top:0">Model files on the swarm's devices. One copy is enough: the other devices fetch the layers they run.</p>
-    <table><thead><tr><th>Model</th><th class="num">Size</th><th>On</th><th></th></tr></thead><tbody id="modelfiles"></tbody></table>
-  </section>
-  <section data-page="models"><h2>What could this group run?</h2>
-    <div class="controls">
-      Quant <select id="quant"><option>q4</option><option>q6</option><option>q8</option><option>f16</option></select>
-      Context <select id="ctx"><option>4096</option><option selected>8192</option><option>16384</option><option>32768</option></select>
-      Layout <select id="topology"><option value="ring">ring</option><option value="hub">hub</option></select>
-      Min decode <input type="number" id="target" value="2" min="0.1" step="0.5"> tok/s
-    </div>
-    <table>
-      <thead><tr><th>Model</th><th class="num">Needs</th><th class="num">Decode</th><th class="num">Prefill</th><th>Layout</th><th>Limited by</th></tr></thead>
-      <tbody id="plans"></tbody>
-    </table>
-    <small id="assume"></small>
-  </section>
+<div class="app" id="app" hidden>
+  <nav class="nav" aria-label="Main">
+    <div class="fab-slot"><button class="fab square st" title="New chat" onclick="go('chat');newChat()"><svg class="i"><use href="#i-edit_square"/></svg></button></div>
+    <a href="#chat" data-nav="chat"><span class="pill st"><svg class="i off"><use href="#i-chat_bubble"/></svg><svg class="i on"><use href="#i-chat_bubble-fill"/></svg></span>Chat</a>
+    <a href="#swarm" data-nav="swarm"><span class="pill st"><svg class="i off"><use href="#i-hub"/></svg><svg class="i on"><use href="#i-hub-fill"/></svg></span>Swarm</a>
+    <a href="#models" data-nav="models"><span class="pill st"><svg class="i off"><use href="#i-neurology"/></svg><svg class="i on"><use href="#i-neurology-fill"/></svg></span>Models</a>
+    <a href="#coord" data-nav="coord" id="nav-coord" hidden title="Coordinator: for the swarm's owner and admins"><span class="pill st"><svg class="i off"><use href="#i-crab"/></svg><svg class="i on"><use href="#i-crab-fill"/></svg><i class="dotbadge" id="coord-dot" hidden></i></span>Coord.</a>
+    <a href="#settings" data-nav="settings"><span class="pill st"><svg class="i off"><use href="#i-settings"/></svg><svg class="i on"><use href="#i-settings-fill"/></svg><i class="dotbadge" id="settings-dot" hidden></i></span>Settings</a>
+  </nav>
 
-  <section data-page="people"><h2>People</h2>
-    <table><thead><tr><th>Name</th><th>Role</th><th>Devices</th><th></th></tr></thead><tbody id="people"></tbody></table>
-
-  </section>
-
-  <section data-page="devices"><h2>Devices</h2>
-    <table><thead><tr><th>Device</th><th>Whose</th><th>State</th><th class="num">Memory Clamor may use</th><th></th></tr></thead><tbody id="devlist"></tbody></table>
-  </section>
-
-  <section data-page="advanced"><h2>Group</h2><div class="stats" id="stats"></div><div id="warnings"></div>
-    <p><button id="muster">Re-run the muster</button> <span class="mute">Measures every device and link again.</span></p>
-  </section>
-  <section data-page="advanced"><h2>Measurements</h2>
-    <table>
-      <thead><tr><th>Device</th><th>State</th><th>Type</th><th>Clamor</th><th class="num">RAM free</th><th class="num">Mem BW</th><th class="num">GFLOP/s</th><th class="num">RTT</th><th class="num">Link</th></tr></thead>
-      <tbody id="roster"></tbody>
-    </table>
-  </section>
-</main>
-<dialog id="prefs" aria-labelledby="pref-title">
-  <form method="dialog">
-    <div class="dlg-head"><h3 id="pref-title">Your preferences</h3><div class="mute" id="pref-sub"></div></div>
-    <div class="dlg-body">
-      <div class="field"><div class="label" id="lbl-style">Replies</div>
-        <div class="seg" role="group" aria-labelledby="lbl-style" id="pref-style">
-          <button type="button" data-v="stream">As they're written</button><button type="button" data-v="whole">All at once</button>
+  <main>
+    <!-- ============================================================ CHAT -->
+    <section class="screen" id="s-chat">
+      <div class="chat-layout">
+        <aside class="chat-list-pane" id="chat-pane"></aside>
+        <div class="conv">
+          <header class="topbar lead">
+            <button class="icon-btn st compact-only" title="Conversations" onclick="openDrawer()"><svg class="i"><use href="#i-menu"/></svg></button>
+            <div class="chat-head-text">
+              <span class="title-m" id="chat-title">Group</span>
+              <span class="body-s muted" id="chat-sub"></span>
+            </div>
+            <button class="model-chip st" onclick="go('models')" title="The model the swarm runs"><span class="live" id="mc-dot"></span><span class="t" id="mc-text">No model</span></button>
+            <div class="desk-pills" id="desk-pills"></div>
+          </header>
+          <div class="banners" id="banners-chat" style="padding:0 16px"></div>
+          <div class="msgs" id="msgs" aria-live="polite"><div class="inner" id="msgs-inner"></div></div>
+          <form class="composer" id="composer">
+            <div class="box">
+              <textarea id="say" rows="1" placeholder="Message Clamor" aria-label="Message"></textarea>
+              <button class="icon-btn filled st" id="send" title="Send"><svg class="i"><use href="#i-arrow_upward" id="send-icon"/></svg></button>
+            </div>
+            <div class="note" id="private-note" hidden><svg class="i s16"><use href="#i-lock"/></svg>Private: your words stay on this device</div>
+          </form>
         </div>
-        <div class="help" id="help-style"></div>
       </div>
-      <div class="field"><div class="label">Signing in from a browser</div>
-        <div class="row"><button type="button" id="pref-pin"></button></div>
-        <div class="help">With a PIN you can sign in on any browser without someone approving a code.</div>
-      </div>
-    </div>
-    <div class="dlg-foot"><span class="spacer"></span><button value="cancel" class="primary">Done</button></div>
-  </form>
-</dialog>
-<dialog id="invite" aria-labelledby="inv-title">
-  <form method="dialog">
-    <div class="dlg-head"><h3 id="inv-title">Add a device</h3><div class="mute">Run this on the new device, with Clamor installed:</div></div>
-    <div class="dlg-body">
-      <div class="seg" role="group" aria-label="Whose device" id="inv-kind">
-        <button type="button" data-v="device">One of my devices</button><button type="button" data-v="person">Someone new</button>
-      </div>
-      <div class="code" id="inv-code" aria-live="polite"></div>
-      <pre class="cmd" id="inv-cmd"></pre>
-      <div class="help" id="inv-help"></div>
-    </div>
-    <div class="dlg-foot">
-      <button type="button" id="inv-copy">Copy command</button>
-      <span class="spacer"></span>
-      <button value="cancel" class="primary">Done</button>
-    </div>
-  </form>
-</dialog>
-<dialog id="settings" aria-labelledby="set-title">
-  <form method="dialog" id="set-form">
-    <div class="dlg-head"><h3 id="set-title">Device settings</h3><div class="mute" id="set-sub"></div></div>
-    <div class="dlg-body">
-      <div class="field"><div class="label" id="lbl-part">Take part</div>
-        <div class="seg" role="group" aria-labelledby="lbl-part" id="set-part">
-          <button type="button" data-v="full">Full</button><button type="button" data-v="idle_only">Idle only</button><button type="button" data-v="paused">Paused</button>
+    </section>
+
+    <!-- ============================================================ SWARM -->
+    <section class="screen" id="s-swarm" hidden>
+      <header class="topbar"><img class="brand-mark" src="/icon.svg" alt=""><span class="title-l" style="margin-left:12px" id="swarm-title">Swarm</span></header>
+      <div class="scroll"><div class="wrap">
+        <div id="banners-swarm"></div>
+        <div class="card hero" id="health-card"></div>
+        <div><div class="section-title">Your devices</div><div class="list" id="my-devices"></div></div>
+        <div><div class="section-title">All devices</div><div class="list" id="all-devices"></div></div>
+        <div><div class="section-title">People</div><div class="list" id="people-list"></div></div>
+        <div style="height:72px"></div>
+      </div></div>
+      <button class="fab fab-float st" onclick="inviteSheet('device')"><svg class="i"><use href="#i-add"/></svg>Add device</button>
+    </section>
+
+    <!-- ============================================================ MODELS -->
+    <section class="screen" id="s-models" hidden>
+      <header class="topbar"><span class="title-l">Models</span></header>
+      <div class="scroll"><div class="wrap">
+        <div class="card hero" id="running"></div>
+        <div><div class="section-title">On the swarm's devices</div><div class="list" id="model-files"></div>
+          <p class="body-s muted" style="padding:8px 16px 0;margin:0">One copy is enough: the other devices fetch the layers they run. Put a .gguf file in the models folder of any device (desktop app: tray menu, <b>Open models folder</b>).</p></div>
+        <div>
+          <div class="section-title">What could this swarm run?</div>
+          <div class="card" style="display:grid;gap:12px">
+            <div class="row">
+              <label class="row body-s muted">Quantization <select class="select" id="quant"><option>q4</option><option>q6</option><option selected>q8</option><option>f16</option></select></label>
+              <label class="row body-s muted">Context <select class="select" id="ctx"><option>4096</option><option selected>8192</option><option>16384</option><option>32768</option></select></label>
+              <label class="row body-s muted">Layout <select class="select" id="topology"><option value="ring">ring</option><option value="hub">hub</option></select></label>
+              <label class="row body-s muted">At least <input class="num-in" type="number" id="target" value="2" min="0.1" step="0.5"> tok/s</label>
+            </div>
+            <div id="plans"></div>
+            <p class="body-s muted" id="assume" style="margin:0"></p>
+          </div>
         </div>
-        <div class="help" id="help-part"></div>
-      </div>
-      <div class="field"><label class="switch"><input type="checkbox" id="set-battery"> Work on battery</label>
-        <div class="help" id="help-battery"></div>
-      </div>
-      <div class="field"><label for="set-ram">Memory Clamor may use</label>
-        <div class="row"><input type="range" id="set-ram" min="5" max="95" step="5"><span class="readout" id="out-ram"></span></div>
-        <div class="help">It also always leaves 512 MB free. Applies from the next pipeline.</div>
-      </div>
-      <div class="field"><label for="set-cpu">CPU Clamor may use</label>
-        <div class="row"><input type="range" id="set-cpu" min="5" max="100" step="5"><span class="readout" id="out-cpu"></span></div>
-        <div class="help">One fast core always stays free for you. Applies from the next pipeline.</div>
-      </div>
-      <div class="field"><div class="label" id="lbl-prio">Priority</div>
-        <div class="seg" role="group" aria-labelledby="lbl-prio" id="set-prio">
-          <button type="button" data-v="low">Low</button><button type="button" data-v="normal">Normal</button>
+      </div></div>
+    </section>
+
+    <!-- ============================================================ COORD. (owner and admins) -->
+    <section class="screen" id="s-coord" hidden>
+      <header class="topbar"><span class="title-l">Coordinator</span></header>
+      <div class="scroll"><div class="wrap">
+        <div class="card hero" id="coord-hero"></div>
+        <div id="needs-wrap"><div class="section-title">Needs you</div><div style="display:grid;gap:12px" id="needs"></div></div>
+        <div><div class="section-title">People</div><div class="list" id="coord-people"></div></div>
+        <div><div class="section-title">Devices</div><div class="list" id="coord-devices"></div></div>
+        <div><div class="section-title">Swarm</div><div class="list">
+          <div class="item"><svg class="i lead-icon"><use href="#i-badge"/></svg><div class="text"><span class="h" id="coord-name"></span><span class="s">The swarm's name</span></div></div>
+          <div class="item" style="opacity:.55"><svg class="i lead-icon"><use href="#i-move_up"/></svg><div class="text"><span class="h">Move coordinator to…</span><span class="s">Coming later</span></div></div>
+        </div></div>
+        <div><div class="section-title">Diagnostics</div>
+          <div class="card" style="display:grid;gap:12px">
+            <div class="stats" style="margin:0" id="group-stats"></div>
+            <div id="warnings"></div>
+            <div class="row"><button class="btn tonal st" id="muster"><svg class="i"><use href="#i-speed"/></svg>Re-run the muster</button><span class="body-s muted">Measures every device and link again.</span></div>
+          </div>
+          <div class="table-wrap" style="margin-top:12px"><table class="data"><thead><tr><th>Device</th><th>State</th><th>Type</th><th>Clamor</th><th class="num">RAM free</th><th class="num">Mem BW</th><th class="num">GFLOP/s</th><th class="num">RTT</th><th class="num">Link</th></tr></thead><tbody id="measure"></tbody></table></div>
         </div>
-        <div class="help">Low: your own apps always go first, so this device never feels slow. Normal: Clamor competes with them equally. Applies from the next pipeline.</div>
-      </div>
-      <div class="status" id="set-status"></div>
-      <div class="note" id="set-note" hidden></div>
-    </div>
-    <div class="dlg-foot">
-      <button type="button" class="danger" id="set-drain">Remove from swarm…</button>
-      <span class="spacer"></span>
-      <button value="cancel" formnovalidate autofocus>Cancel</button>
-      <button type="button" class="primary" id="set-save">Save</button>
-    </div>
-  </form>
-</dialog>
+      </div></div>
+    </section>
+
+    <!-- ============================================================ SETTINGS -->
+    <section class="screen" id="s-settings" hidden>
+      <header class="topbar"><span class="title-l">Settings</span></header>
+      <div class="scroll"><div class="wrap">
+        <div class="card hero row" style="gap:16px;flex-wrap:nowrap" id="me-card"></div>
+        <div id="this-device-wrap"><div class="section-title" id="this-device-title">This device</div><div class="list" id="this-device"></div></div>
+        <div><div class="section-title">Swarm</div><div class="list">
+          <button class="item st" onclick="inviteSheet('device')"><svg class="i lead-icon"><use href="#i-mobile_arrow_down"/></svg><div class="text"><span class="h">Add one of my devices</span><span class="s">A one-time code, linked to you</span></div><svg class="i trail"><use href="#i-chevron_right"/></svg></button>
+          <button class="item st" id="signout" hidden onclick="signOut()"><svg class="i lead-icon"><use href="#i-logout"/></svg><div class="text"><span class="h">Sign out</span><span class="s">Of this browser</span></div></button>
+        </div></div>
+        <div id="app-wrap" hidden><div class="section-title">This app</div><div class="list" id="app-list"></div></div>
+        <div><div class="section-title">Clamor</div><div class="list">
+          <a class="item st" href="https://github.com/amruthwo/Clamor/tree/main/docs" target="_blank" rel="noopener" style="text-decoration:none"><svg class="i lead-icon"><use href="#i-article"/></svg><div class="text"><span class="h">Guides</span><span class="s">Joining, devices, private chats, updating</span></div><svg class="i trail"><use href="#i-open_in_new"/></svg></a>
+          <div class="item"><svg class="i lead-icon"><use href="#i-info"/></svg><div class="text"><span class="h" id="version">Clamor</span><span class="s">Free software, GPL-3.0</span></div></div>
+        </div></div>
+      </div></div>
+    </section>
+  </main>
+</div>
+<div id="overlays"></div>
 
 <script>
-const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const gib = b => (b / 2**30).toFixed(1);
+// ------------------------------------------------------------------ Basics
 const $ = id => document.getElementById(id);
-let busy = false;
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const js = v => esc(JSON.stringify(v));
+const ic = (name, cls = '') => `<svg class="i ${cls}"><use href="#i-${name}"/></svg>`;
+const gib = b => (b / 2**30).toFixed(1);
+const gb = b => b >= 10 * 2**30 ? Math.round(b / 2**30) + ' GB' : (b / 2**30).toFixed(1) + ' GB';
+const COLORS = ['#c8402f', '#0e7c70', '#a0650c', '#6a4fd8', '#2f62d0', '#ab1468', '#2e7d4f', '#77615c'];
+const colorOf = name => COLORS[[...String(name)].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7) % COLORS.length];
+const initials = name => String(name).split(/\s+/).filter(Boolean).slice(0, 2).map(w => w[0].toUpperCase()).join('') || '?';
+const avatar = (name, cls = '') => `<div class="avatar ${cls}" style="background:${colorOf(name)}">${esc(initials(name))}</div>`;
+const plural = (n, one, many) => `${n} ${n === 1 ? one : (many || one + 's')}`;
+const inApp = new URLSearchParams(location.search).has('app');
+let me = null, o = null, roster = null, nodes = {}, people = [], joins = [], pending = [], plan = null, appState = {};
 
-async function post(url, body) {
-  const r = await fetch(url, { method:'POST', headers:{'content-type':'application/json'}, body: body ? JSON.stringify(body) : undefined });
-  if (!r.ok) alert(await r.text());
-  refresh();
+// Theme: Auto (the system's), Light or Dark; remembered in this browser.
+function applyTheme() {
+  let t = 'auto'; try { t = localStorage.getItem('clamor-theme') || 'auto'; } catch {}
+  if (t === 'auto') delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = t;
+  return t;
 }
-window.drain = id => confirm('Drain ' + id + '? It finishes current work and leaves the swarm.') && post('/api/nodes/' + encodeURIComponent(id) + '/drain');
-window.togglePause = (id, paused, policy) => post('/api/nodes/' + encodeURIComponent(id) + '/policy', { ...policy, participation: paused ? 'full' : 'paused' });
+applyTheme();
 
-// ---- device settings dialog
-let nodes = {}, editing = null;
+async function api(url, method = 'GET', body) {
+  const r = await fetch(url, { method, headers: body ? {'content-type':'application/json'} : {}, body: body ? JSON.stringify(body) : undefined });
+  if (!r.ok) throw new Error((await r.text()) || r.statusText);
+  const t = await r.text();
+  return t ? JSON.parse(t) : {};
+}
+async function act(f, done) {
+  try { const r = await f(); if (done) snack(done); refresh(); return r; } catch (e) { snack(String(e.message || e)); }
+}
+
+// ------------------------------------------------------------------ Overlays
+function closeOverlay() { $('overlays').innerHTML = ''; onOverlayClose?.(); onOverlayClose = null; }
+let onOverlayClose = null;
+function overlay(html, kind = 'sheet') {
+  onOverlayClose?.(); onOverlayClose = null;
+  $('overlays').innerHTML = `<div class="scrim" onclick="closeOverlay()"></div><div class="${kind}" role="dialog" aria-modal="true">${kind === 'sheet' ? '<div class="grab"></div>' : ''}${html}</div>`;
+}
+addEventListener('keydown', e => { if (e.key === 'Escape' && $('overlays').innerHTML) closeOverlay(); });
+let snackTimer;
+function snack(text, action, onAction) {
+  document.querySelector('.snackbar')?.remove();
+  const d = document.createElement('div');
+  d.className = 'snackbar'; d.setAttribute('role', 'status');
+  d.innerHTML = `<span>${esc(text)}</span>` + (action ? `<button class="btn text st">${esc(action)}</button>` : '');
+  if (action) d.querySelector('button').onclick = () => { d.remove(); onAction?.(); };
+  document.body.append(d);
+  clearTimeout(snackTimer); snackTimer = setTimeout(() => d.remove(), 5000);
+}
+function confirmDialog(title, text, ok, danger) {
+  return new Promise(res => {
+    overlay(`<h2>${esc(title)}</h2><div class="muted body-l">${esc(text)}</div><div class="row" style="justify-content:flex-end"><button class="btn text st" id="cd-no">Cancel</button><button class="btn ${danger ? 'danger' : 'filled'} st" id="cd-yes">${esc(ok)}</button></div>`, 'dialog');
+    let answered = false;
+    onOverlayClose = () => { if (!answered) res(false); };
+    $('cd-no').onclick = () => closeOverlay();
+    $('cd-yes').onclick = () => { answered = true; closeOverlay(); res(true); };
+  });
+}
+function bindSegs(root) {
+  root.querySelectorAll('.seg').forEach(s => s.querySelectorAll('button').forEach(b => b.addEventListener('click', () => { if (b.disabled) return; s.querySelectorAll('button').forEach(x => x.setAttribute('aria-pressed', x === b)); s.dispatchEvent(new Event('change')); })));
+}
+const segValue = s => s.querySelector('button[aria-pressed="true"]')?.dataset.v;
+function celebrate(text) {
+  const c = document.createElement('div'); c.className = 'confetti';
+  const colors = ['#fd5453', '#fc8b61', '#ffb4a9', '#f8e287', '#8fd9ad'];
+  for (let i = 0; i < 60; i++) { const p = document.createElement('i'); p.style.left = Math.random() * 100 + 'vw'; p.style.background = colors[i % colors.length]; p.style.animationDelay = Math.random() * .4 + 's'; c.append(p); }
+  document.body.append(c); setTimeout(() => c.remove(), 2400);
+  if (text) snack(text);
+  try { navigator.vibrate?.(30); } catch {}
+}
+
+// ------------------------------------------------------------------ Navigation
+const SCREENS = ['chat', 'swarm', 'models', 'coord', 'settings'];
+const OLD = { home: 'chat', people: 'coord', devices: 'swarm', advanced: 'coord' };
+let screen = 'chat';
+function go(name) { location.hash = name; }
+function route() {
+  let h = location.hash.slice(1).split('=')[0];
+  h = OLD[h] || h;
+  if (!SCREENS.includes(h) || (h === 'coord' && me && me.role === 'member')) h = screen && SCREENS.includes(screen) ? screen : 'chat';
+  const changed = h !== screen;
+  screen = h;
+  for (const s of SCREENS) { const el = $('s-' + s); el.hidden = s !== h; if (s === h && changed) { el.classList.remove('enter'); void el.offsetWidth; el.classList.add('enter'); } }
+  document.querySelectorAll('[data-nav]').forEach(a => a.dataset.nav === h ? a.setAttribute('aria-current', 'page') : a.removeAttribute('aria-current'));
+}
+addEventListener('hashchange', route);
+
+// ------------------------------------------------------------------ Devices
+const KIND_ICON = { laptop: 'laptop_mac', desktop: 'desktop_windows', phone: 'mobile', tablet: 'mobile', server: 'dns', sbc: 'memory' };
+const devIcon = n => KIND_ICON[String(n?.report?.info?.class || '').toLowerCase()] || 'computer';
+const isMine = n => !!(me && n.person && n.person[0] === me.id);
+// A device's shown name: the one someone gave it, else its id.
+const dn = id => (nodes[id] && nodes[id].label) || id;
+const canEdit = n => !!me && (me.role !== 'member' || isMine(n));
+function devState(n) {
+  if (n.state === 'away') return ['Away', 'neutral', n.note || 'offline'];
+  if (n.paused) return ['Paused', 'warn', n.paused];
+  if (n.state === 'busy') return ['Working', 'ok', 'running part of the model'];
+  if (n.state === 'benchmarking' || n.state === 'joining') return ['Measuring', 'warn', 'being measured'];
+  if (n.state === 'draining') return ['Leaving', 'warn', 'finishing its work'];
+  return ['Ready', 'ok', 'ready'];
+}
+function deviceItem(n, sub) {
+  const [label, tone] = devState(n);
+  return `<button class="item st" onclick='deviceSheet(${js(n.id)})'><div class="tile-icon${n.is_coordinator ? ' pri' : ''}">${ic(devIcon(n))}</div><div class="text"><span class="h">${esc(dn(n.id))}</span><span class="s">${esc(sub)}</span></div><div class="trail"><span class="badge ${tone}">${label}</span></div></button>`;
+}
 const PART_HELP = {
   full: 'Always takes work when the swarm needs it.',
   idle_only: 'Steps aside while you are using this device, and comes back when it is quiet.',
   paused: 'Takes no new work. Anything already running finishes.',
 };
-function seg(id, value) {
-  for (const b of $(id).querySelectorAll('button')) b.setAttribute('aria-pressed', b.dataset.v === value);
-}
-function segValue(id) { return [...$(id).querySelectorAll('button')].find(b => b.getAttribute('aria-pressed') === 'true')?.dataset.v; }
-for (const g of ['set-part', 'set-prio']) $(g).onclick = e => { if (e.target.dataset.v) { seg(g, e.target.dataset.v); updateReadouts(); } };
-// Same rule as the node (neighbour::threads_for): a share of the fast cores, always leaving one.
 function threadsFor(share, cores) { const n = Math.max(1, cores); return Math.min(Math.max(1, Math.round(n * share)), n > 1 ? n - 1 : 1); }
-function updateReadouts() {
-  const n = nodes[editing]; if (!n) return;
-  const info = n.report.info, ram = $('set-ram').value / 100, cpu = $('set-cpu').value / 100;
-  $('out-ram').textContent = `${Math.round(ram * 100)}% · ${gib(info.ram_total_bytes * ram)} of ${gib(info.ram_total_bytes)} GiB`;
-  const cores = info.perf_cores || info.cpu_cores_physical || 1;
-  $('out-cpu').textContent = `${Math.round(cpu * 100)}% · ${threadsFor(cpu, cores)} of ${cores} fast cores`;
-  $('help-part').textContent = PART_HELP[segValue('set-part')] || '';
+// The settings of one device, as list rows; `id` prefixes the element ids.
+function deviceSettingsHtml(n, id) {
+  const p = n.report.policy, info = n.report.info, ed = canEdit(n);
+  const part = p.participation === 'draining' ? 'full' : p.participation;
+  const dis = ed ? '' : 'disabled';
+  return `<div class="item" style="display:grid;gap:8px"><div class="row" style="gap:16px;flex-wrap:nowrap">${ic('volunteer_activism', 'lead-icon')}<div class="text"><span class="h">Help the swarm</span><span class="s" id="${id}-parthelp">${PART_HELP[part] || ''}</span></div></div>
+      <div class="seg" id="${id}-part"><button type="button" class="st" data-v="paused" aria-pressed="${part === 'paused'}" ${dis}>Off</button><button type="button" class="st" data-v="idle_only" aria-pressed="${part === 'idle_only'}" ${dis}>When idle</button><button type="button" class="st" data-v="full" aria-pressed="${part === 'full'}" ${dis}>Always</button></div></div>
+    <label class="item ${info.power && ed ? 'st' : ''}">${ic('battery_charging_full', 'lead-icon')}<div class="text"><span class="h">Help on battery</span><span class="s">${info.power ? 'Off: pauses whenever it is unplugged' : 'This device has no battery'}</span></div><span class="switch"><input type="checkbox" id="${id}-battery" ${!p.require_plugged_in ? 'checked' : ''} ${info.power && ed ? '' : 'disabled'}></span></label>
+    <div class="item">${ic('memory', 'lead-icon')}<div class="text"><span class="h">Memory Clamor may use</span><span class="s"><input type="range" min="5" max="95" step="5" id="${id}-ram" value="${Math.round(p.max_ram_fraction * 100)}" ${dis}></span><span class="s body-s" id="${id}-ramout"></span></div></div>
+    <div class="item">${ic('speed', 'lead-icon')}<div class="text"><span class="h">Processor Clamor may use</span><span class="s"><input type="range" min="5" max="100" step="5" id="${id}-cpu" value="${Math.round(p.max_cpu_fraction * 100)}" ${dis}></span><span class="s body-s" id="${id}-cpuout"></span></div></div>
+    <label class="item ${ed ? 'st' : ''}">${ic('low_priority', 'lead-icon')}<div class="text"><span class="h">Stay in the background</span><span class="s">Your own apps always come first</span></div><span class="switch"><input type="checkbox" id="${id}-low" ${p.low_priority !== false ? 'checked' : ''} ${dis}></span></label>`;
 }
-window.openSettings = id => {
-  const n = nodes[id]; if (!n) return;
-  editing = id;
-  const p = n.report.policy, info = n.report.info;
-  $('set-title').textContent = n.id;
-  $('set-sub').textContent = `${info.class} · ${info.os}/${info.arch}${n.is_coordinator ? ' · runs the swarm (coordinator)' : ''}`;
-  seg('set-part', p.participation === 'draining' ? 'full' : p.participation);
-  seg('set-prio', p.low_priority === false ? 'normal' : 'low');
-  const battery = info.power;
-  $('set-battery').checked = !p.require_plugged_in;
-  $('set-battery').disabled = !battery;
-  $('help-battery').textContent = battery ? 'Off: pauses whenever it is unplugged, and resumes when you plug it back in.' : 'This device has no battery.';
-  $('set-ram').value = Math.round(p.max_ram_fraction * 100);
-  $('set-cpu').value = Math.round(p.max_cpu_fraction * 100);
-  const rows = [
-    ['Status', n.paused ? `paused: ${n.paused}` : n.state],
-    ['Battery', battery ? `${battery.battery_pct ?? '?'}%, ${battery.on_battery ? 'on battery' : 'plugged in'}` : 'none'],
-    ['Free memory', `${gib(info.ram_available_bytes)} of ${gib(info.ram_total_bytes)} GiB`],
-    ['Clamor', n.build ? `${n.build.version} (${n.build.variant === 'cpu' ? 'CPU' : n.build.variant})` : 'older version'],
-  ];
-  if (n.state === 'away') rows.push(['Note', 'offline: changes apply when it reconnects']);
-  $('set-status').innerHTML = rows.map(([k, v]) => `<span>${esc(k)}</span><b>${esc(v)}</b>`).join('');
-  $('set-note').hidden = !n.settings_note; $('set-note').textContent = n.settings_note ? '⚠ ' + n.settings_note : '';
-  $('set-drain').hidden = n.is_coordinator || n.state === 'away';
-  updateReadouts();
-  $('settings').showModal();
-};
-$('set-ram').oninput = $('set-cpu').oninput = updateReadouts;
-$('set-save').onclick = async () => {
-  const policy = {
-    participation: segValue('set-part'),
-    require_plugged_in: !$('set-battery').checked,
-    max_ram_fraction: $('set-ram').value / 100,
-    max_cpu_fraction: $('set-cpu').value / 100,
-    low_priority: segValue('set-prio') === 'low',
+// Wire the settings rows: readouts update as you slide, and every change saves.
+function bindDeviceSettings(n, id) {
+  const info = n.report.info, root = $(id + '-part')?.closest('.list, .sheet');
+  if (!root) return;
+  bindSegs(root);
+  const out = () => {
+    const ram = $(id + '-ram').value / 100, cpu = $(id + '-cpu').value / 100, cores = info.perf_cores || info.cpu_cores_physical || 1;
+    $(id + '-ramout').textContent = `${Math.round(ram * 100)}% · ${gib(info.ram_total_bytes * ram)} of ${gib(info.ram_total_bytes)} GB`;
+    $(id + '-cpuout').textContent = `${Math.round(cpu * 100)}% · ${threadsFor(cpu, cores)} of ${cores} fast cores`;
+    $(id + '-parthelp').textContent = PART_HELP[segValue($(id + '-part'))] || '';
   };
-  const r = await fetch('/api/nodes/' + encodeURIComponent(editing) + '/policy', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(policy) });
-  if (!r.ok) { $('set-note').hidden = false; $('set-note').textContent = '⚠ ' + await r.text(); return; }
-  const res = await r.json();
-  if (res.note) { $('set-note').hidden = false; $('set-note').textContent = '⚠ ' + res.note; refresh(); return; }
-  $('settings').close(); refresh();
+  const save = async () => {
+    out();
+    const policy = { participation: segValue($(id + '-part')), require_plugged_in: !$(id + '-battery').checked, max_ram_fraction: $(id + '-ram').value / 100, max_cpu_fraction: $(id + '-cpu').value / 100, low_priority: $(id + '-low').checked };
+    try {
+      const r = await api('/api/nodes/' + encodeURIComponent(n.id) + '/policy', 'POST', policy);
+      snack(r.note ? r.note : 'Saved');
+      refresh();
+    } catch (e) { snack(String(e.message || e)); }
+  };
+  $(id + '-ram').oninput = $(id + '-cpu').oninput = out;
+  $(id + '-ram').onchange = $(id + '-cpu').onchange = save;
+  $(id + '-part').addEventListener('change', save);
+  $(id + '-battery').onchange = $(id + '-low').onchange = save;
+  out();
+}
+window.deviceSheet = id => {
+  const n = nodes[id]; if (!n) return;
+  const info = n.report.info, [label, tone, why] = devState(n), b = n.report.bench;
+  const whose = n.person ? n.person[1] + (isMine(n) ? ' (you)' : '') : 'nobody yet';
+  const removable = me.role !== 'member' && !n.is_coordinator && n.state !== 'away';
+  const pausable = canEdit(n) && !n.is_coordinator && n.state !== 'away';
+  const paused = n.report.policy.participation === 'paused';
+  overlay(`<div class="row" style="padding:0 24px 12px;gap:16px;flex-wrap:nowrap"><div class="tile-icon big pri">${ic(devIcon(n), 's32')}</div><div style="flex:1;min-width:0"><div class="row" style="flex-wrap:nowrap;gap:4px"><div class="title-l" style="overflow:hidden;text-overflow:ellipsis">${esc(dn(n.id))}</div>${canEdit(n) ? `<button class="icon-btn st" title="Rename" onclick='renameSheet(${js(n.id)})'>${ic('edit', 's18')}</button>` : ''}</div><div class="body-s muted">${esc(whose)} · ${esc(info.class)} · ${esc(info.os)}/${esc(info.arch)}${n.is_coordinator ? ' · coordinator' : ''}${n.label ? ' · id ' + esc(n.id) : ''}</div></div><span class="badge ${tone}">${label}</span></div>
+    <div class="body">
+      <div class="stats" style="margin:0"><div class="stat"><b>${gib(info.ram_available_bytes)}</b><span>GB free of ${gib(info.ram_total_bytes)}</span></div><div class="stat"><b>${b ? b.mem_bw_gbps.toFixed(0) : '–'}</b><span>GB/s memory</span></div><div class="stat"><b>${info.power ? (info.power.battery_pct ?? '?') + '%' : '–'}</b><span>${info.power ? (info.power.on_battery ? 'on battery' : 'charging') : 'no battery'}</span></div></div>
+      ${n.settings_note ? `<div class="banner">${ic('warning')}<div class="text">${esc(n.settings_note)}</div></div>` : ''}
+      ${n.state === 'away' ? '<div class="body-s muted">Offline: changes apply when it reconnects.</div>' : ''}
+      <div class="list">${deviceSettingsHtml(n, 'ds')}</div>
+      <div class="list">
+        ${pausable ? `<button class="item st" onclick='closeOverlay();togglePause(${js(n.id)})'>${ic(paused ? 'play_circle' : 'pause_circle', 'lead-icon')}<div class="text"><span class="h">${paused ? 'Resume' : 'Pause'}</span><span class="s">${paused ? 'Let it help again' : 'The swarm carries on without it'}</span></div></button>` : ''}
+        <div class="item">${ic('info', 'lead-icon')}<div class="text"><span class="h">Clamor ${n.build ? esc(n.build.version) : '(older)'}${n.build && n.build.variant !== 'cpu' ? ' · ' + esc(n.build.variant) : ''}</span><span class="s">${n.update_available ? esc(n.update_available) + ' is available' : 'Up to date'}</span></div></div>
+        ${removable ? `<button class="item st danger" onclick='removeDevice(${js(n.id)})'>${ic('do_not_disturb_on', 'lead-icon')}<div class="text"><span class="h">Remove from swarm</span><span class="s" style="color:inherit;opacity:.8">It finishes its work and leaves</span></div></button>` : ''}
+      </div>
+    </div>`);
+  bindDeviceSettings(n, 'ds');
 };
-$('set-drain').onclick = () => {
-  if (!confirm('Remove ' + editing + ' from the swarm? It finishes its current work and leaves, and needs the passphrase to join again.')) return;
-  $('settings').close();
-  post('/api/nodes/' + encodeURIComponent(editing) + '/remove');
+window.renameSheet = id => {
+  const n = nodes[id]; if (!n) return;
+  overlay(`<h2>Rename device</h2><div class="body">
+    <div class="field"><input id="rn-name" maxlength="40" placeholder=" " value="${esc(n.label || '')}"><label>Name shown in the swarm</label></div>
+    <div class="body-s muted">Leave it empty to show its id, ${esc(n.id)}. Everyone in the swarm sees this name.</div>
+    <div class="acts"><button class="btn text st" onclick="deviceSheet(${esc(JSON.stringify(id))})">Cancel</button><button class="btn filled st" id="rn-save">Save</button></div></div>`);
+  const f = $('rn-name'); f.focus(); f.select();
+  const save = async () => {
+    try { const r = await api('/api/nodes/' + encodeURIComponent(id) + '/name', 'POST', { name: f.value }); nodes[id].label = r.name === id ? null : r.name; closeOverlay(); snack('Renamed to ' + r.name); refresh(); }
+    catch (e) { snack(String(e.message || e)); }
+  };
+  $('rn-save').onclick = save;
+  f.onkeydown = e => { if (e.key === 'Enter') save(); };
 };
-$('muster').onclick = () => post('/api/muster');
+window.togglePause = id => {
+  const n = nodes[id], p = n.report.policy, paused = p.participation === 'paused';
+  act(() => api('/api/nodes/' + encodeURIComponent(id) + '/policy', 'POST', { ...p, participation: paused ? 'full' : 'paused' }), paused ? 'Resumed' : 'Paused');
+};
+window.removeDevice = async id => {
+  closeOverlay();
+  if (await confirmDialog('Remove ' + dn(id) + '?', 'It finishes its current work and leaves the swarm. To come back it needs a new invitation.', 'Remove', true))
+    act(() => api('/api/nodes/' + encodeURIComponent(id) + '/remove', 'POST'), 'Removing ' + dn(id));
+};
+
+// ------------------------------------------------------------------ Invites ("Add device")
 let inviteTimer;
-let inviteKind = 'device';
-document.querySelectorAll('#inv-kind button').forEach(b => b.onclick = () => { inviteKind = b.dataset.v; $('add-device').click(); });
-$('add-device').onclick = async () => {
-  document.querySelectorAll('#inv-kind button').forEach(b => { b.setAttribute('aria-pressed', b.dataset.v === inviteKind); b.hidden = b.dataset.v === 'person' && !(me && me.role !== 'member'); });
-  const r = await fetch('/api/invite', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ kind: inviteKind }) });
-  const text = await r.text();
+window.inviteSheet = async (kind) => {
+  const admin = me.role !== 'member';
+  overlay(`<h2>Add a device</h2><div class="body">
+    ${admin ? `<div class="seg" id="inv-kind"><button type="button" class="st" data-v="device" aria-pressed="${kind === 'device'}">One of my devices</button><button type="button" class="st" data-v="person" aria-pressed="${kind === 'person'}">Someone new</button></div>` : ''}
+    <div class="body-l" id="inv-what">On the new device, open Clamor and choose <b>Join a swarm</b>. When it asks, type this code:</div>
+    <div class="code-big" id="inv-code">…</div>
+    <div class="row muted body-s" style="justify-content:center">${ic('timer', 's16')}<span id="inv-help"></span></div>
+    <details><summary class="body-s muted" style="cursor:pointer">On the command line</summary><pre class="cmd" id="inv-cmd" style="margin-top:8px"></pre></details>
+    <div class="acts"><button class="btn text st" id="inv-copy">Copy command</button><button class="btn filled st" onclick="closeOverlay()">Done</button></div></div>`);
+  onOverlayClose = () => clearInterval(inviteTimer);
+  if (admin) { bindSegs($('overlays')); $('inv-kind').addEventListener('change', () => inviteSheet(segValue($('inv-kind')))); }
+  $('inv-copy').onclick = () => { navigator.clipboard?.writeText($('inv-cmd').textContent); snack('Copied'); };
   clearInterval(inviteTimer);
-  if (!r.ok) {
-    $('inv-code').textContent = '';
-    $('inv-cmd').textContent = 'clamor-node join <coordinator> --passphrase <the swarm\'s passphrase>';
-    $('inv-help').textContent = text + ' The passphrase is shown when the coordinator starts, and by “clamor-node swarms” on it.';
-  } else {
-    const j = JSON.parse(text), until = Date.now() + j.expires_in * 1000;
-    $('inv-code').textContent = j.code;
-    $('inv-cmd').textContent = j.command;
+  try {
+    const j = await api('/api/invite', 'POST', { kind });
+    const until = Date.now() + j.expires_in * 1000;
+    $('inv-code').textContent = j.code; $('inv-cmd').textContent = j.command;
+    $('inv-what').innerHTML = kind === 'device' ? 'On your new device, open Clamor and choose <b>Join a swarm</b>. When it asks, type this code:' : 'On their device, they open Clamor, choose <b>Join a swarm</b>, type their name and this code:';
     const tick = () => {
       const s = Math.max(0, Math.round((until - Date.now()) / 1000));
-      $('inv-help').textContent = s ? `The code works once, for the next ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}. ${inviteKind === 'device' ? 'The device joins as you.' : 'They join as a new person (add --name to give their name).'} After joining, the device is remembered.` : 'This code has expired. Close and press Add device again for a new one.';
+      if ($('inv-help')) $('inv-help').textContent = s ? `Works once, for the next ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}` : 'Expired: close this and press Add device again';
     };
     tick(); inviteTimer = setInterval(tick, 1000);
+  } catch (e) {
+    $('inv-code').textContent = '—';
+    $('inv-help').textContent = String(e.message || e);
+    $('inv-cmd').textContent = "clamor-node join <coordinator> --passphrase <the swarm's passphrase>";
   }
-  $('invite').showModal();
 };
-$('invite').onclose = () => clearInterval(inviteTimer);
-$('inv-copy').onclick = () => navigator.clipboard?.writeText($('inv-cmd').textContent);
 
-let roster = null;
-function renderRoster(data) {
-  roster = data;
-  $('sub').textContent = `swarm “${data.swarm}”`;
-  nodes = Object.fromEntries(data.nodes.map(n => [n.id, n]));
-  const stateText = n => n.paused ? `<span class="paused-chip" title="${esc(n.paused)}">paused · ${esc(n.paused)}</span>` : esc(n.state === 'away' ? (n.note || 'away') : n.state);
-  $('roster').innerHTML = data.nodes.map(n => {
-    const r = n.report, b = r.bench, l = r.link;
-    return `<tr class="${esc(n.state)}">
-      <td><span class="dot"></span>${esc(n.id)}${n.is_coordinator ? ' <small>(coordinator)</small>' : ''}</td><td>${stateText(n)}</td>
-      <td>${esc(r.info.class)} · ${esc(r.info.os)}/${esc(r.info.arch)}</td>
-      <td>${n.build ? esc(n.build.version) + (n.build.variant !== 'cpu' ? ' · ' + esc(n.build.variant) : '') : '<span class="mute">older</span>'}${n.update_available ? ` <span class="mute" title="clamor-node update">→ ${esc(n.update_available)} available</span>` : ''}</td>
-      <td class="num">${gib(r.info.ram_available_bytes)} / ${gib(r.info.ram_total_bytes)} GiB</td>
-      <td class="num">${b ? b.mem_bw_gbps.toFixed(1) + ' GB/s' : '–'}</td>
-      <td class="num">${b ? b.cpu_gflops_mt.toFixed(0) : '–'}</td>
-      <td class="num">${l ? l.rtt_ms_p50.toFixed(1) + ' ms' : (n.is_coordinator ? 'local' : '–')}</td>
-      <td class="num">${l && l.up_mbps ? Math.min(l.up_mbps, l.down_mbps).toFixed(0) + ' Mbit/s' : '–'}</td></tr>`;
-  }).join('') || '<tr><td colspan="9" class="mute">no devices yet</td></tr>';
-  // Devices page: yours first.
-  const ordered = [...data.nodes].sort((a, b) => (isMine(b) - isMine(a)) || a.id.localeCompare(b.id));
-  $('devlist').innerHTML = ordered.map(n => {
-    const p = n.report.policy, paused = p.participation === 'paused';
-    const can = me && (me.role !== 'member' || isMine(n));
-    const settings = can ? `<button onclick='openSettings(${JSON.stringify(n.id)})'>Settings</button>` : '';
-    const pause = can && !n.is_coordinator && n.state !== 'away' ? `<button onclick='togglePause(${JSON.stringify(n.id)}, ${paused}, ${JSON.stringify(p)})'>${paused ? 'Resume' : 'Pause'}</button> ` : '';
-    return `<tr class="${esc(n.state)}"><td><span class="dot"></span>${esc(n.id)}${n.is_coordinator ? ' <small>(coordinator)</small>' : ''}</td>
-      <td>${n.person ? esc(n.person[1]) + (isMine(n) ? ' <small>(you)</small>' : '') : '<span class="mute">–</span>'}</td><td>${stateText(n)}</td>
-      <td class="num">${Math.round(p.max_ram_fraction * 100)}% · ${gib(n.report.info.ram_total_bytes * p.max_ram_fraction)} GiB</td><td>${pause}${settings}</td></tr>`;
-  }).join('');
-  renderModelFiles(data);
+// ------------------------------------------------------------------ Swarm screen
+function ringSvg(ok, paused, total) {
+  const C = 97.4, seg = (v) => total ? v / total * C : 0, a = seg(ok), b = seg(paused);
+  return `<svg viewBox="0 0 36 36" style="transform:rotate(-90deg)"><circle cx="18" cy="18" r="15.5" fill="none" stroke="var(--surface-container-highest)" stroke-width="4"/>
+    ${a ? `<circle cx="18" cy="18" r="15.5" fill="none" stroke="var(--ok)" stroke-width="4" stroke-linecap="round" stroke-dasharray="${a} ${C}" pathLength="${C}"/>` : ''}
+    ${b ? `<circle cx="18" cy="18" r="15.5" fill="none" stroke="var(--warn)" stroke-width="4" stroke-linecap="round" stroke-dasharray="${b} ${C}" stroke-dashoffset="${-a}" pathLength="${C}"/>` : ''}</svg>`;
 }
-const isMine = n => !!(me && n.person && n.person[0] === me.id);
-
-function renderModelFiles(data) {
-  const files = {};
-  for (const n of data.nodes) for (const m of (n.models || [])) {
-    const f = files[m.id] ??= { name: m.name, size: m.size, on: [] };
-    f.on.push(n.id);
-  }
-  const list = Object.values(files).sort((a, b) => a.name.localeCompare(b.name));
-  const admin = me && me.role !== 'member';
-  $('modelfiles').innerHTML = list.map(f => `<tr><td>${esc(f.name)}</td><td class="num">${gib(f.size)} GiB</td><td>${f.on.map(esc).join(', ')}</td>
-    <td>${admin ? `<button onclick='startModel(${JSON.stringify(f.name)})'>Start</button>` : ''}</td></tr>`).join('')
-    || `<tr><td colspan="4" class="mute">No model files yet. Put a .gguf file in the models folder of any device (in the app: tray menu, Open models folder).</td></tr>`;
-}
-window.startModel = async name => {
-  const r = await fetch('/api/pipeline', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ model: name }) });
-  if (!r.ok) alert(await r.text());
-  refresh();
-};
-window.stopModel = () => confirm('Stop the running model? Chats wait until a model runs again.') && fetch('/api/pipeline', { method:'DELETE' }).then(refresh);
-
-function renderPlan(data) {
-  const s = data.summary;
-  $('stats').innerHTML = [
-    [s.devices, 'devices in swarm'], [s.cpu_threads, 'CPU threads'],
-    [gib(s.ram_available_bytes) + ' GiB', 'free RAM'], [s.mem_bw_sum_gbps.toFixed(0) + ' GB/s', 'memory bandwidth (sum)'],
-    [s.gflops_sum.toFixed(0), 'GFLOP/s (sum)']
-  ].map(([v, k]) => `<div class="stat"><b>${esc(v)}</b><span>${esc(k)}</span></div>`).join('');
-  $('warnings').innerHTML = s.warnings.map(w => `<div class="warn">⚠ ${esc(w)}</div>`).join('');
-  $('plans').innerHTML = data.plans.map((p, i) => {
-    const rec = i === data.recommended ? '<span class="badge">recommended</span>' : '';
-    if (!p.feasible) return `<tr><td>${esc(p.model)}</td><td class="num">${gib(p.need_bytes)} GiB</td><td colspan="4" class="mute">does not fit — ${esc(p.notes.join('; '))}</td></tr>`;
-    const layout = p.stages.map(s => `${esc(s.node)} [${s.layer_start}–${s.layer_end})`).join(' → ');
-    return `<tr><td>${esc(p.model)}${rec}</td><td class="num">${gib(p.need_bytes)} GiB</td><td class="num">${p.decode_tok_s.toFixed(1)} tok/s</td><td class="num">${p.prefill_tok_s.toFixed(0)} tok/s</td><td>${layout}</td><td>${esc(p.bottleneck)}</td></tr>`;
-  }).join('');
-  $('assume').textContent = `Estimates assume ${(data.assumptions.mem_efficiency*100).toFixed(0)}% memory-bandwidth and ${(data.assumptions.compute_efficiency*100).toFixed(0)}% compute efficiency. Treat them as planning numbers, not promises.`;
-}
-
-// ---- pages
-const PAGES = ['home', 'models', 'people', 'devices', 'advanced'];
-function showPage() {
-  const h = location.hash.replace(/^#/, '');
-  const page = PAGES.includes(h) ? h : 'home';
-  document.querySelectorAll('[data-page]').forEach(el => el.hidden = el.dataset.page !== page);
-  document.querySelectorAll('nav.tabs a').forEach(a => a.setAttribute('aria-current', a.getAttribute('href') === '#' + page ? 'page' : 'false'));
-}
-window.addEventListener('hashchange', showPage);
-
-// ---- home widgets
-const COLORS = ['#2f6fed', '#12805c', '#b54708', '#7a5af8', '#c11574', '#0e9384', '#dd6b20', '#475467'];
-const colorOf = name => COLORS[[...name].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7) % COLORS.length];
-const initials = name => name.split(/\s+/).filter(Boolean).slice(0, 2).map(w => w[0].toUpperCase()).join('') || '?';
-function donut(parts, label) {
-  const total = parts.reduce((a, p) => a + p.v, 0) || 1, r = 26, c = 2 * Math.PI * r;
-  let off = 0;
-  const arcs = parts.filter(p => p.v > 0).map(p => {
-    const len = c * p.v / total, el = `<circle r="${r}" cx="34" cy="34" fill="none" stroke="${p.color}" stroke-width="9" stroke-dasharray="${len} ${c - len}" stroke-dashoffset="${-off}" transform="rotate(-90 34 34)"/>`;
-    off += len; return el;
-  }).join('');
-  return `<svg width="68" height="68" viewBox="0 0 68 68" role="img" aria-label="${esc(label)}"><circle r="${r}" cx="34" cy="34" fill="none" stroke="var(--line)" stroke-width="9"/>${arcs}<text x="34" y="39" text-anchor="middle" font-size="14" font-weight="650" fill="currentColor">${esc(label)}</text></svg>`;
-}
-function sparkline(vals) {
+function sparkPath(vals, w, h) {
   if (vals.length < 2) return '';
-  const w = 140, h = 30, max = Math.max(...vals) * 1.1 || 1;
-  const pts = vals.map((v, i) => `${(i / (vals.length - 1) * w).toFixed(1)},${(h - v / max * h).toFixed(1)}`).join(' ');
-  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" aria-hidden="true"><polyline points="${pts}" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linejoin="round"/></svg>`;
+  const max = Math.max(...vals) * 1.15 || 1;
+  return vals.map((v, i) => `${i ? 'L' : 'M'}${(i / (vals.length - 1) * w).toFixed(1)} ${(h - v / max * h).toFixed(1)}`).join(' ');
 }
-function renderWidgets(o) {
-  const h = o.health, ok = h.online - h.paused, away = h.total - h.online;
-  const status = { good: ['All good', 'ok'], partly: [h.paused ? `${h.paused} paused` : `${away} away`, 'warn'], problem: ['Needs attention', 'bad'] }[h.status];
-  const health = `<div class="widget"><h3>Swarm</h3><div class="w-row">${donut([{ v: ok, color: 'var(--ok)' }, { v: h.paused, color: 'var(--warn)' }, { v: away, color: 'var(--line)' }], `${h.online}/${h.total}`)}
-    <div><div class="big">${h.online} online</div><span class="chip ${status[1]}">${esc(status[0])}</span></div></div><div class="cap">${h.total === 1 ? '1 device' : h.total + ' devices'} in the swarm</div></div>`;
-  const shown = o.people.here.slice(0, 5);
-  const people = `<div class="widget"><h3>People here</h3><div class="avatars">${shown.map(n => `<span class="avatar" title="${esc(n)}" style="background:${colorOf(n)}">${esc(initials(n))}</span>`).join('')}${o.people.here.length > 5 ? `<span class="avatar" style="background:var(--mute)">+${o.people.here.length - 5}</span>` : ''}</div>
-    <div class="cap">${o.people.here.length} of ${o.people.total} ${o.people.total === 1 ? 'person' : 'people'} online</div></div>`;
-  const m = o.model, last = o.speeds.length ? o.speeds[o.speeds.length - 1] : null;
-  const chip = m ? { ready: ['ready', 'ok'], loading: ['loading…', 'warn'], failed: ['stopped', 'bad'] }[m.state] : null;
-  const model = `<div class="widget"><h3>Model</h3>${m ? `<div class="big" style="font-size:16px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(m.name)}">${esc(m.name.replace(/\.gguf$/, ''))}</div>
-    <div><span class="chip ${chip[1]}">${chip[0]}</span> <span class="cap">on ${m.devices.length} device${m.devices.length === 1 ? '' : 's'}</span></div>
-    ${sparkline(o.speeds)}<div class="cap">${last ? last.toFixed(1) + ' tokens/s on the last reply' : 'no replies yet'}</div>`
-    : `<div class="cap">No model is running.</div>${me.role !== 'member' ? '<a href="#models">Start one</a>' : '<div class="cap">An admin can start one.</div>'}`}</div>`;
-  const used = m ? m.need_bytes : 0, pooled = Math.max(o.memory.pooled_bytes, used, 1);
-  const memory = `<div class="widget"><h3>Pooled memory</h3><div class="big">${gib(o.memory.pooled_bytes)} GiB</div>
-    <div class="bar" role="img" aria-label="${gib(used)} of ${gib(pooled)} GiB in use"><span style="width:${(used / pooled * 100).toFixed(1)}%"></span></div>
-    <div class="cap">${m ? gib(used) + ' GiB used by the model' : 'what the swarm can lend a model now'}</div></div>`;
-  const mine = `<div class="widget"><h3>Your devices</h3>${o.mine.length ? o.mine.map(d => {
-      const paused = d.policy.participation === 'paused';
-      const dot = d.state === 'away' ? 'var(--bad)' : d.paused ? 'var(--warn)' : 'var(--ok)';
-      const what = d.state === 'away' ? 'away' : d.paused ? 'paused' : d.in_model ? 'helping run the model' : 'ready';
-      const btn = nodes[d.id] && !nodes[d.id].is_coordinator && d.state !== 'away' ? `<button onclick='togglePause(${JSON.stringify(d.id)}, ${paused}, ${JSON.stringify(d.policy)})'>${paused ? 'Resume' : 'Pause'}</button>` : '';
-      return `<div class="mydev"><span class="dot" style="background:${dot}"></span><span class="name" title="${esc(d.paused || '')}">${esc(d.id)} <small>· ${what}</small></span>${btn}</div>`;
-    }).join('') : '<div class="cap">None in this swarm yet.</div>'}<a href="#devices" class="cap">Device settings</a></div>`;
-  $('widgets').innerHTML = health + people + model + memory + mine;
+function healthText() {
+  const h = o.health, away = h.total - h.online;
+  if (h.status === 'good') return ['All good', `${plural(h.online, 'device')} ready`];
+  if (h.status === 'problem') return ['Needs attention', o.model?.failure || 'the model stopped'];
+  return [h.paused ? `${h.paused} paused` : `${away} away`, [h.online - h.paused && `${h.online - h.paused} working`, h.paused && `${h.paused} paused`, away && `${away} away`].filter(Boolean).join(' · ')];
 }
-function renderRunning(o) {
-  const m = o.model, admin = me.role !== 'member';
-  $('running').innerHTML = m ? `<p style="margin-top:0"><b>${esc(m.name)}</b> <span class="chip">${esc(m.state)}</span> on ${m.devices.map(esc).join(' → ')}</p>
-    ${m.failure ? `<p class="err">${esc(m.failure)}</p>` : ''}${admin ? '<button onclick="stopModel()">Stop</button>' : ''}`
-    : `<p class="mute" style="margin-top:0">Nothing is running. ${admin ? 'Start a model below.' : 'An admin can start one.'}</p>`;
+function renderSwarm() {
+  const h = o.health, [head, sub] = healthText(), last = o.speeds.length ? o.speeds[o.speeds.length - 1] : null;
+  const used = o.model ? o.model.need_bytes : 0, pooled = Math.max(o.memory.pooled_bytes, used, 1);
+  $('swarm-title').textContent = o.swarm;
+  $('health-card').innerHTML = `<div class="health"><div class="ring">${ringSvg(h.online - h.paused, h.paused, h.total)}<b>${h.online}/${h.total}</b></div>
+      <div style="min-width:0"><div class="headline-s">${esc(head)}</div><div class="muted">${esc(sub)}</div></div></div>
+    <div class="stats"><div class="stat"><b>${last ? last.toFixed(0) : '–'}</b><span>tok/s last reply</span></div><div class="stat"><b>${o.people.here.length}</b><span>${o.people.here.length === 1 ? 'person' : 'people'} here</span></div><div class="stat"><b>${gb(o.memory.pooled_bytes)}</b><span>pooled</span></div></div>
+    <div style="margin-top:16px"><div class="body-s muted" style="margin-bottom:6px">${o.model ? `The model uses ${gib(used)} of ${gib(pooled)} GB` : 'Memory the swarm can lend a model now'}</div><div class="meter"><i style="width:${(used / pooled * 100).toFixed(1)}%"></i></div></div>`;
+  const all = roster.nodes;
+  const mine = all.filter(isMine);
+  $('my-devices').innerHTML = mine.map(n => deviceItem(n, (n.is_coordinator ? 'Coordinator · ' : '') + devState(n)[2])).join('') || `<div class="empty">None of your devices are in this swarm yet. <a href="#" onclick="inviteSheet('device');return false">Add one</a>.</div>`;
+  const others = all.filter(n => !isMine(n));
+  $('all-devices').innerHTML = others.map(n => deviceItem(n, `${n.person ? n.person[1] : '—'}${n.is_coordinator ? ' · coordinator' : ''} · ${devState(n)[2]}`)).join('') || '<div class="empty">Only your devices so far.</div>';
+  const here = new Set(o.people.here);
+  $('people-list').innerHTML = people.map(p => `<div class="item">${avatar(p.name)}<div class="text"><span class="h">${esc(p.name)}${p.id === me.id ? ' <span class="muted">(you)</span>' : ''}</span><span class="s">${esc(p.role[0].toUpperCase() + p.role.slice(1))} · ${plural(p.devices.length, 'device')}</span></div><div class="trail body-s">${here.has(p.name) ? '<span class="badge ok">here</span>' : 'away'}</div></div>`).join('');
 }
 
-// ---- chat
-let chatId = 'group', chatList = null, sending = false, shownCount = -1, liveShown = '';
-const words = t => (t.trim().match(/\S+/g) || []).length;
-function bubble(m) {
-  if (m.error) return `<div class="msg assistant error">Couldn't answer: ${esc(m.error)}</div>`;
-  const who = m.role === 'user' && chatId === 'group' && m.by ? `<span class="who">${esc(m.by)}</span>` : '';
-  const meta = m.tok_s ? `<span class="meta">${m.tok_s.toFixed(1)} tokens/s</span>` : (m.stopped ? '<span class="meta"></span>' : '');
-  return `<div class="msg ${m.role === 'user' ? 'user' : 'assistant'}${m.stopped ? ' stopped' : ''}">${who}${esc(m.content)}${meta}</div>`;
-}
-// A reply being written: the text so far ("As they're written"), or a progress line.
-function liveBubble(text) {
-  if (me && me.reply_style === 'whole' || !text) {
-    const n = words(text || '');
-    return `<div class="msg assistant typing" id="typing">${n ? `Writing… ${n} word${n === 1 ? '' : 's'} so far` : 'Writing'}</div>`;
+// ------------------------------------------------------------------ Models screen
+const modelName = n => String(n || '').replace(/\.gguf$/i, '');
+function renderModels() {
+  const m = o.model, admin = me.role !== 'member', last = o.speeds.length ? o.speeds[o.speeds.length - 1] : null;
+  if (m) {
+    const tone = { ready: 'ok', loading: 'warn', failed: 'bad' }[m.state] || 'neutral';
+    const path = sparkPath(o.speeds, 200, 40);
+    $('running').innerHTML = `<div class="row" style="gap:12px;flex-wrap:nowrap"><div class="tile-icon big pri">${ic('neurology-fill', 's32')}</div><div style="flex:1;min-width:0"><div class="label-m" style="color:var(--primary)">RUNNING NOW</div><div class="title-m" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(modelName(m.name))}</div><div class="body-s muted">${esc(m.devices.map(dn).join(' → '))}</div></div><span class="badge ${tone}">${esc(m.state)}</span></div>
+      ${path ? `<svg class="spark" viewBox="0 0 200 40" preserveAspectRatio="none" style="margin-top:12px"><path d="${path}" fill="none" stroke="var(--primary)" stroke-width="2" vector-effect="non-scaling-stroke"/><path d="${path} L200 40 L0 40Z" fill="var(--primary)" opacity=".12"/></svg>` : ''}
+      ${m.failure ? `<p class="err" style="margin:8px 0 0">${esc(m.failure)}</p>` : ''}
+      <div class="row" style="margin-top:8px"><span class="body-s muted">${last ? last.toFixed(1) + ' tok/s on the last reply' : 'No replies yet'} · ${gib(m.need_bytes)} GB</span><span class="spacer"></span>${admin ? '<button class="btn outlined st" onclick="stopModel()">Stop</button>' : ''}</div>`;
+  } else {
+    $('running').innerHTML = `<div class="row" style="gap:16px;flex-wrap:nowrap"><div class="tile-icon big">${ic('neurology', 's32')}</div><div><div class="title-m">No model is running</div><div class="body-s muted">${admin ? 'Start one from the list below.' : 'An admin can start one.'}</div></div></div>`;
   }
-  return `<div class="msg assistant" id="typing">${esc(text)}<span class="caret">▍</span></div>`;
+  const files = {};
+  for (const n of roster.nodes) for (const f of (n.models || [])) (files[f.id] ??= { name: f.name, size: f.size, on: [] }).on.push(n.id);
+  const list = Object.values(files).sort((a, b) => a.name.localeCompare(b.name));
+  $('model-files').innerHTML = list.map(f => {
+    const running = m && m.name === f.name;
+    return `<div class="item">${ic('description', 'lead-icon')}<div class="text"><span class="h">${esc(modelName(f.name))}</span><span class="s">${gib(f.size)} GB · on ${esc(f.on.map(dn).join(', '))}</span></div><div class="trail">${running ? '<span class="badge pri">Running</span>' : admin ? `<button class="btn tonal sm st" onclick='startModel(${js(f.name)})'>Start</button>` : ''}</div></div>`;
+  }).join('') || '<div class="empty">No model files yet.</div>';
 }
-function setLive(text) {
-  const el = $('typing'), atEnd = $('msgs').scrollHeight - $('msgs').scrollTop - $('msgs').clientHeight < 40;
-  if (el) el.outerHTML = liveBubble(text); else $('msgs').insertAdjacentHTML('beforeend', liveBubble(text));
-  if (atEnd) $('msgs').scrollTop = $('msgs').scrollHeight;
+function renderPlan() {
+  if (!plan) return;
+  const wide = innerWidth >= 840;
+  const rows = plan.plans.map((p, i) => ({ p, rec: i === plan.recommended }));
+  if (wide) {
+    $('plans').innerHTML = `<div class="table-wrap" style="background:transparent"><table class="data"><thead><tr><th>Model size</th><th class="num">Needs</th><th class="num">Decode</th><th class="num">Prefill</th><th>Layout</th><th>Limited by</th></tr></thead><tbody>${rows.map(({ p, rec }) => p.feasible
+      ? `<tr><td>${esc(p.model)} ${rec ? '<span class="badge pri">best fit</span>' : ''}</td><td class="num">${gib(p.need_bytes)} GB</td><td class="num">${p.decode_tok_s.toFixed(1)} tok/s</td><td class="num">${p.prefill_tok_s.toFixed(0)} tok/s</td><td class="wrap">${p.stages.map(s => `${esc(dn(s.node))} [${s.layer_start}–${s.layer_end})`).join(' → ')}</td><td class="wrap">${esc(p.bottleneck)}</td></tr>`
+      : `<tr><td>${esc(p.model)}</td><td class="num">${gib(p.need_bytes)} GB</td><td colspan="4" class="muted" style="white-space:normal">doesn't fit: ${esc(p.notes.join('; ').replace(/GiB/g, 'GB'))}</td></tr>`).join('')}</tbody></table></div>`;
+  } else {
+    $('plans').innerHTML = `<div class="list" style="background:transparent">${rows.map(({ p, rec }) => `<div class="item" style="padding-left:0;padding-right:0">${ic(p.feasible ? 'check_circle' : 'cloud_off', 'lead-icon')}<div class="text"><span class="h">${esc(p.model)} ${rec ? '<span class="badge pri">best fit</span>' : ''}</span><span class="s">${p.feasible ? `${gib(p.need_bytes)} GB · ~${p.decode_tok_s.toFixed(1)} tok/s · ${plural(p.stages.length, 'device')}` : `Doesn't fit: needs ${gib(p.need_bytes)} GB`}</span></div></div>`).join('')}</div>`;
+  }
+  $('assume').textContent = `Sizes are typical models at this quantization. Estimates assume ${(plan.assumptions.mem_efficiency * 100).toFixed(0)}% memory-bandwidth and ${(plan.assumptions.compute_efficiency * 100).toFixed(0)}% compute efficiency: planning numbers, not promises.`;
 }
-// Private chats exist only where this page is served by the device's own clamor-node (the
-// app, or 127.0.0.1:7421 on a member device): its conversations are kept there. Their ids
-// are "p:<id>" here.
-let privateHere = null, privateStatus = null, privateList = [];
+window.startModel = name => act(() => api('/api/pipeline', 'POST', { model: name }), 'Starting ' + modelName(name) + '…');
+window.stopModel = async () => { if (await confirmDialog('Stop the model?', 'Chats wait until a model runs again.', 'Stop')) act(() => api('/api/pipeline', 'DELETE'), 'Stopped'); };
+
+// ------------------------------------------------------------------ Coord. screen
+function renderCoord() {
+  const coord = roster.nodes.find(n => n.is_coordinator);
+  $('coord-hero').innerHTML = `<div class="row" style="gap:16px;flex-wrap:nowrap"><div class="tile-icon big pri">${ic('crab-fill', 's32')}</div><div style="flex:1;min-width:0"><div class="title-m">${esc(o.swarm)}</div><div class="body-s muted">Coordinated by ${esc(coord ? dn(coord.id) : '?')} · you are ${me.role === 'owner' ? 'the owner' : 'an admin'}</div></div></div>
+    <div class="row" style="margin-top:16px"><span class="badge ok">${ic('lock', 's16')}Encrypted</span>${coord?.build ? `<span class="badge neutral">Clamor ${esc(coord.build.version)}</span>` : ''}<span class="badge neutral">${plural(roster.nodes.length, 'device')}</span><span class="badge neutral">${plural(people.length, 'person', 'people')}</span></div>`;
+  $('coord-name').textContent = o.swarm;
+  $('needs').innerHTML = joins.map(j => `<div class="card" style="display:grid;gap:12px"><div class="row" style="gap:16px;flex-wrap:nowrap"><div class="tile-icon">${ic('how_to_reg')}</div><div style="flex:1;min-width:0"><div class="title-s">${esc(j.device)} asks to join${j.person_name !== j.device ? ' as ' + esc(j.person_name) : ''}</div><div class="body-s muted">From ${esc(j.from)}. Approve only if its screen shows this code:</div></div></div>
+      <div class="check-code">${esc(j.code)}</div><div class="row" style="justify-content:flex-end"><button class="btn text st" onclick='decideJoin(${js(j.id)}, "decline")'>Decline</button><button class="btn filled st" onclick='decideJoin(${js(j.id)}, "approve")'>Approve</button></div></div>`).join('');
+  $('needs-wrap').hidden = !joins.length;
+  $('coord-people').innerHTML = people.map(p => `<button class="item st" onclick='personSheet(${js(p.id)})'>${avatar(p.name)}<div class="text"><span class="h">${esc(p.name)}${p.id === me.id ? ' <span class="muted">(you)</span>' : ''}</span><span class="s">${esc(p.role[0].toUpperCase() + p.role.slice(1))} · ${plural(p.devices.length, 'device')}</span></div>${ic('chevron_right', 'trail')}</button>`).join('')
+    + `<button class="item st" onclick="inviteSheet('person')">${ic('person_add', 'lead-icon')}<div class="text"><span class="h">Invite a person</span><span class="s">They join with their own name and devices</span></div></button>`;
+  const upd = roster.nodes.filter(n => n.update_available);
+  $('coord-devices').innerHTML = (upd.length ? `<div class="item">${ic('update', 'lead-icon')}<div class="text"><span class="h">${plural(upd.length, 'device')} can update</span><span class="s">To ${esc(upd[0].update_available)}: in the Clamor app (it offers it), or <code>clamor-node update</code></span></div></div>` : '')
+    + roster.nodes.map(n => deviceItem(n, `${n.person ? n.person[1] : '—'} · ${n.build ? n.build.version : 'older'} · ${gib(n.report.info.ram_total_bytes)} GB`)).join('');
+  const s = plan?.summary;
+  if (s) {
+    $('group-stats').innerHTML = [[s.cpu_threads, 'CPU threads'], [gib(s.ram_available_bytes), 'GB free RAM'], [s.mem_bw_sum_gbps.toFixed(0), 'GB/s memory']].map(([v, k]) => `<div class="stat"><b>${esc(v)}</b><span>${esc(k)}</span></div>`).join('');
+    $('warnings').innerHTML = s.warnings.map(w => `<div class="banner warn" style="margin-top:4px">${ic('warning')}<div class="text">${esc(w.replace(/GiB/g, 'GB'))}</div></div>`).join('');
+  }
+  $('measure').innerHTML = roster.nodes.map(n => {
+    const r = n.report, b = r.bench, l = r.link;
+    return `<tr><td>${esc(dn(n.id))}${n.is_coordinator ? ' <span class="muted">(coordinator)</span>' : ''}</td><td>${devState(n)[0]}</td><td>${esc(r.info.class)} · ${esc(r.info.os)}/${esc(r.info.arch)}</td><td>${n.build ? esc(n.build.version) + (n.build.variant !== 'cpu' ? ' · ' + esc(n.build.variant) : '') : 'older'}</td>
+      <td class="num">${gib(r.info.ram_available_bytes)} / ${gib(r.info.ram_total_bytes)} GB</td><td class="num">${b ? b.mem_bw_gbps.toFixed(1) + ' GB/s' : '–'}</td><td class="num">${b ? b.cpu_gflops_mt.toFixed(0) : '–'}</td>
+      <td class="num">${l ? l.rtt_ms_p50.toFixed(1) + ' ms' : (n.is_coordinator ? 'local' : '–')}</td><td class="num">${l && l.up_mbps ? Math.min(l.up_mbps, l.down_mbps).toFixed(0) + ' Mbit/s' : '–'}</td></tr>`;
+  }).join('');
+}
+window.decideJoin = (id, d) => act(() => api('/api/joins/' + encodeURIComponent(id) + '/' + d, 'POST'), d === 'approve' ? 'Approved: the device is joining' : 'Declined');
+window.personSheet = id => {
+  const p = people.find(p => p.id === id); if (!p) return;
+  const owner = me.role === 'owner', canRemove = me.role !== 'member' && p.role !== 'owner' && (p.role !== 'admin' || owner) && p.id !== me.id;
+  overlay(`<div class="row" style="padding:0 24px 12px;gap:16px;flex-wrap:nowrap">${avatar(p.name, '')}<div style="flex:1;min-width:0"><div class="title-l">${esc(p.name)}</div><div class="body-s muted">${esc(p.role)}${p.devices.length ? ' · ' + esc(p.devices.join(', ')) : ''}</div></div></div>
+    <div class="body">
+      <div><div class="title-s" style="margin-bottom:8px">Role</div><div class="seg" id="ps-role"><button type="button" class="st" data-v="member" aria-pressed="${p.role === 'member'}" ${owner && p.role !== 'owner' ? '' : 'disabled'}>Member</button><button type="button" class="st" data-v="admin" aria-pressed="${p.role === 'admin'}" ${owner && p.role !== 'owner' ? '' : 'disabled'}>Admin</button><button type="button" class="st" data-v="owner" aria-pressed="${p.role === 'owner'}" disabled>Owner</button></div>
+        <div class="body-s muted" style="margin-top:8px">Admins add and remove people and devices, and start models. ${owner ? '' : 'Only the owner changes roles.'}</div></div>
+      ${canRemove ? `<div class="list"><button class="item st danger" onclick='removePerson(${js(p.id)}, ${js(p.name)})'>${ic('person_remove', 'lead-icon')}<div class="text"><span class="h">Remove from swarm</span><span class="s" style="color:inherit;opacity:.8">Their devices leave too</span></div></button></div>` : ''}
+    </div>`);
+  bindSegs($('overlays'));
+  $('ps-role').addEventListener('change', () => act(() => api('/api/people/' + encodeURIComponent(p.id) + '/role', 'POST', { role: segValue($('ps-role')) }), 'Role changed'));
+};
+window.removePerson = async (id, name) => {
+  closeOverlay();
+  if (await confirmDialog(`Remove ${name}?`, 'Their devices leave the swarm and need a new invitation to come back.', 'Remove', true))
+    act(() => api('/api/people/' + encodeURIComponent(id) + '/remove', 'POST'), 'Removed ' + name);
+};
+
+// ------------------------------------------------------------------ Settings screen
+const STYLE_HELP = { stream: 'Words appear as the model writes them, so long answers start right away.', whole: 'The reply appears when it is finished; meanwhile you see how far it has got.' };
+function renderSettings() {
+  $('me-card').innerHTML = `${avatar(me.name, '')}<div style="flex:1;min-width:0"><div class="title-m">${esc(me.name)}</div><div class="body-s muted">${esc(me.role[0].toUpperCase() + me.role.slice(1))} of ${esc(me.swarm)}</div></div><button class="btn tonal st" onclick="prefsSheet()">Preferences</button>`;
+  $('signout').hidden = me.how !== 'session';
+  const here = me.device && nodes[me.device];
+  $('this-device-wrap').hidden = !here;
+  if (here && !$('this-device').contains(document.activeElement) && !draggingSettings) {
+    $('this-device-title').textContent = `This device · ${dn(here.id)}`;
+    $('this-device').innerHTML = deviceSettingsHtml(here, 'td');
+    bindDeviceSettings(here, 'td');
+  }
+  const coord = roster.nodes.find(n => n.is_coordinator);
+  $('version').textContent = 'Clamor ' + (coord?.build?.version || '');
+  // Inside the Clamor app: its own settings (the app answers over postMessage).
+  $('app-wrap').hidden = !inApp;
+  if (inApp) {
+    $('app-list').innerHTML = `<button class="item st" onclick="appAction('log')">${ic('terminal', 'lead-icon')}<div class="text"><span class="h">Log</span><span class="s">What Clamor on this device is doing</span></div>${ic('chevron_right', 'trail')}</button>
+      ${appState.autostart !== undefined && !appState.mobile ? `<label class="item st">${ic('power_settings_new', 'lead-icon')}<div class="text"><span class="h">Start Clamor when I log in</span><span class="s">In the background, in the tray</span></div><span class="switch"><input type="checkbox" id="app-auto" ${appState.autostart ? 'checked' : ''}></span></label>` : ''}
+      ${appState.passphrase ? `<button class="item st" onclick='snack(${js(appState.passphrase)})'>${ic('key', 'lead-icon')}<div class="text"><span class="h">Swarm passphrase</span><span class="s">Tap to show</span></div>${ic('visibility', 'trail')}</button>` : ''}
+      <button class="item st" onclick="appAction('change-swarm')">${ic('swap_horiz', 'lead-icon')}<div class="text"><span class="h">Change swarm</span><span class="s">Leave this one (it is remembered) and join or start another</span></div>${ic('chevron_right', 'trail')}</button>`;
+    const a = $('app-auto'); if (a) a.onchange = () => appAction('autostart', a.checked);
+  }
+}
+let draggingSettings = false;
+addEventListener('pointerdown', e => { if (e.target.closest?.('#this-device')) draggingSettings = true; });
+addEventListener('pointerup', () => setTimeout(() => draggingSettings = false, 300));
+window.prefsSheet = () => {
+  const theme = applyTheme();
+  overlay(`<h2>Your preferences</h2><div class="body">
+    <div><div class="title-s" style="margin-bottom:8px">Replies</div><div class="seg" id="pf-style"><button type="button" class="st" data-v="stream" aria-pressed="${(me.reply_style || 'stream') === 'stream'}">As they're written</button><button type="button" class="st" data-v="whole" aria-pressed="${me.reply_style === 'whole'}">All at once</button></div><div class="body-s muted" style="margin-top:8px" id="pf-help">${STYLE_HELP[me.reply_style || 'stream']}</div></div>
+    <div><div class="title-s" style="margin-bottom:8px">Look</div><div class="seg" id="pf-theme"><button type="button" class="st" data-v="auto" aria-pressed="${theme === 'auto'}">${ic('brightness_auto', 's18')}Auto</button><button type="button" class="st" data-v="light" aria-pressed="${theme === 'light'}">${ic('light_mode', 's18')}Light</button><button type="button" class="st" data-v="dark" aria-pressed="${theme === 'dark'}">${ic('dark_mode', 's18')}Dark</button></div></div>
+    <div class="list"><button class="item st" onclick="pinSheet()">${ic('pin', 'lead-icon')}<div class="text"><span class="h">${me.has_pin ? 'Change my PIN' : 'Set a PIN'}</span><span class="s">Sign in on any browser without someone approving a code</span></div>${ic('chevron_right', 'trail')}</button></div>
+    <div class="acts"><button class="btn filled st" onclick="closeOverlay()">Done</button></div></div>`);
+  bindSegs($('overlays'));
+  $('pf-style').addEventListener('change', async () => {
+    const v = segValue($('pf-style')); $('pf-help').textContent = STYLE_HELP[v];
+    try { await api('/api/me/prefs', 'POST', { reply_style: v }); me.reply_style = v; } catch (e) { snack(String(e.message || e)); }
+  });
+  $('pf-theme').addEventListener('change', () => { try { localStorage.setItem('clamor-theme', segValue($('pf-theme'))); } catch {} applyTheme(); });
+};
+window.pinSheet = () => {
+  overlay(`<h2>${me.has_pin ? 'Change your PIN' : 'Set a PIN'}</h2><div class="body"><div class="body-l muted">4 to 12 digits. With it you can sign in on any browser as ${esc(me.name)}.</div>
+    <div class="field"><input id="pin-new" inputmode="numeric" type="password" autocomplete="new-password" placeholder=" "><label>New PIN</label></div>
+    <div class="acts"><button class="btn text st" onclick="closeOverlay()">Cancel</button><button class="btn filled st" id="pin-save">Save</button></div></div>`);
+  $('pin-new').focus();
+  $('pin-save').onclick = async () => { try { await api('/api/me/pin', 'POST', { pin: $('pin-new').value }); me.has_pin = true; closeOverlay(); snack('PIN saved'); } catch (e) { snack(String(e.message || e)); } };
+};
+window.signOut = async () => { await fetch('/api/logout', { method:'POST' }); location.reload(); };
+// The Clamor app (this page in its window): actions only it can do.
+window.appAction = (action, value) => parent.postMessage({ clamor: action, value }, '*');
+addEventListener('message', e => {
+  if (e.source !== parent || !e.data || typeof e.data !== 'object' || !e.data.clamorApp) return;
+  appState = e.data.clamorApp;
+  if (me && roster) renderSettings();
+});
+if (inApp) parent.postMessage({ clamor: 'hello' }, '*');
+
+// ------------------------------------------------------------------ Chat
+let chatId = 'group', chatList = null, sending = false, shownKey = '', privateHere = null, privateList = [], privateStatus = null;
 const isPrivate = id => id.startsWith('p:');
 const chatUrl = id => isPrivate(id) ? '/api/private/chats/' + encodeURIComponent(id.slice(2)) : '/api/chats/' + encodeURIComponent(id);
+const words = t => (t.trim().match(/\S+/g) || []).length;
 async function loadChats() {
-  chatList = await fetch('/api/chats').then(r => r.json());
+  chatList = await api('/api/chats');
   if (privateHere === null) privateHere = (await fetch('/api/private/status').catch(() => ({ ok: false }))).ok;
   if (privateHere) privateList = (await fetch('/api/private/chats').then(r => r.ok ? r.json() : { conversations: [] })).conversations;
-  const items = [{ id: 'group', title: 'Group' }, ...chatList.conversations];
-  const priv = privateList.map(c => ({ id: 'p:' + c.id, title: c.title }));
-  const btn = c => `<button aria-current="${c.id === chatId}" onclick='openChat(${JSON.stringify(c.id)})'>${c.id === 'group' ? '👥 ' : isPrivate(c.id) ? '🔒 ' : ''}${esc(c.title)}</button>`;
-  $('convs').innerHTML = `<button class="new" onclick="newChat()">+ New chat</button>` + items.map(btn).join('')
-    + (privateHere ? `<div class="convhead">Private · this device</div><button class="new" onclick="newPrivateChat()">+ New private chat</button>` + priv.map(btn).join('') : '');
-  $('convpick').innerHTML = [...items, ...priv].map(c => `<option value="${esc(c.id)}"${c.id === chatId ? ' selected' : ''}>${isPrivate(c.id) ? '🔒 ' : ''}${esc(c.title)}</option>`).join('') + '<option value="__new">+ New chat</option>' + (privateHere ? '<option value="__newp">+ New private chat</option>' : '');
+  renderChatList();
 }
-// Private chats need this device's ends of the model: explain, and offer to turn them on.
+function chatListHtml() {
+  const item = (id, icon, title) => `<button class="item st" aria-current="${id === chatId}" onclick='openChat(${js(id)})'>${ic(icon, 'lead-icon')}<div class="text"><span class="h">${esc(title)}</span></div></button>`;
+  return `<div class="row" style="padding:4px 8px 8px"><img class="brand-mark" src="/icon.svg" alt=""><span class="title-m" style="margin-left:4px">Clamor</span></div>
+    <button class="fab st" style="margin:4px 4px 8px;box-shadow:none" onclick="newChat()">${ic('edit_square')}New chat</button>
+    <div class="drawer-list"><div class="drawer-head">Shared</div>${item('group', 'groups', 'Group')}
+    <div class="drawer-head">Your chats</div>${(chatList?.conversations || []).map(c => item(c.id, 'person', c.title)).join('') || '<div class="body-s muted" style="padding:4px 16px 8px">Only you see these, on any of your devices.</div>'}
+    ${privateHere ? `<div class="drawer-head">Private · this device</div>${privateList.map(c => item('p:' + c.id, 'lock', c.title)).join('')}<button class="btn text st" style="justify-content:flex-start;margin:4px 4px 0" onclick="newPrivateChat()">${ic('lock')}New private chat</button>` : ''}</div>`;
+}
+function renderChatList() { $('chat-pane').innerHTML = chatListHtml(); }
+function openDrawer() { overlay(chatListHtml(), 'drawer'); }
+function chatMeta() {
+  if (chatId === 'group') return ['Group', `Everyone in the swarm · ${plural(o?.people.here.length || 0, 'person', 'people')} here`];
+  if (isPrivate(chatId)) return [privateList.find(c => 'p:' + c.id === chatId)?.title || 'Private chat', 'Private · stays on this device'];
+  return [(chatList?.conversations || []).find(c => c.id === chatId)?.title || 'Chat', 'Only you, on any of your devices'];
+}
+function msgHtml(m) {
+  if (m.error) return `<div class="m bot err"><img class="bot-avatar" src="/icon.svg" alt=""><div class="body"><div class="who">Clamor</div>Couldn't answer: ${esc(m.error)}</div></div>`;
+  if (m.role !== 'user') return `<div class="m bot"><img class="bot-avatar" src="/icon.svg" alt=""><div class="body"><div class="who">Clamor${m.stopped ? ' · stopped' : ''}</div>${esc(m.content)}${m.tok_s ? `<span class="meta">${m.tok_s.toFixed(1)} tok/s</span>` : ''}<div class="msg-actions"><button type="button" class="icon-btn st" title="Copy" data-t="${esc(m.content)}" onclick="copyText(this.dataset.t)">${ic('content_copy')}</button></div></div></div>`;
+  const mine = chatId !== 'group' || !m.by || m.by === me.name;
+  if (mine) return `<div class="m me"><div class="col"><div class="bubble">${esc(m.content)}</div></div></div>`;
+  return `<div class="m other">${avatar(m.by, 'sm')}<div class="col"><div class="who">${esc(m.by)}</div><div class="bubble">${esc(m.content)}</div></div></div>`;
+}
+window.copyText = t => { navigator.clipboard?.writeText(t).then(() => snack('Copied'), () => snack('Could not copy')); };
+function liveHtml(text) {
+  const whole = me && me.reply_style === 'whole';
+  const n = words(text || '');
+  const body = !text ? '<span class="typing"><i></i><i></i><i></i></span>' : whole ? `<span class="muted">Writing… ${plural(n, 'word')} so far</span>` : esc(text);
+  return `<div class="m bot" id="live"><img class="bot-avatar thinking" src="/icon.svg" alt=""><div class="body"><div class="who">Clamor</div>${body}</div></div>`;
+}
+function setLive(text) {
+  const box = $('msgs'), atEnd = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
+  const el = $('live');
+  if (el) el.outerHTML = liveHtml(text); else $('msgs-inner').insertAdjacentHTML('beforeend', liveHtml(text));
+  if (atEnd) box.scrollTop = box.scrollHeight;
+}
+function emptyHtml() {
+  if (isPrivate(chatId)) return `<div class="center" style="margin:auto;padding:32px 8px"><div class="tile-icon pri" style="width:64px;height:64px;border-radius:20px;margin:0 auto 12px">${ic('lock', 's32')}</div><div class="title-m">Just you and the model</div><p class="muted">Nothing you write here leaves this device.</p></div>`;
+  const what = chatId === 'group' ? 'Everyone in the swarm sees this chat, and the model answers.' : 'Only you see this chat, on any of your devices.';
+  return `<div class="center" style="margin:auto;padding:32px 8px"><img src="/icon.svg" alt="" style="width:64px;height:64px;border-radius:20px"><div class="title-m" style="margin-top:12px">What's on your mind?</div><p class="muted" style="margin:4px 0 12px">${what}</p>
+    <div class="chips" style="justify-content:center"><button type="button" class="chip st" onclick="suggest(this)">Plan a dinner</button><button type="button" class="chip st" onclick="suggest(this)">Explain a topic simply</button><button type="button" class="chip st" onclick="suggest(this)">Help me write an email</button></div></div>`;
+}
+window.suggest = b => { $('say').value = b.textContent; $('composer').requestSubmit(); };
 function privatePanel(st) {
-  const why = `<p>Your words stay on this device: it runs the first and the last part of the model itself, and the swarm's other devices (the coordinator included) only see numbers in between. The conversation is kept on this device too.</p>
-    <p class="mute">Not hidden: that you chatted, when, and roughly how long the messages were. And with deliberate effort, someone could turn those middle numbers back into rough text. <a href="https://github.com/amruthwo/Clamor/blob/main/docs/private-chats.md" target="_blank" rel="noopener">More</a></p>`;
   if (st.state === 'ready') return '';
-  if (st.state === 'starting') return `<div class="empty">${why}<p><b>Starting…</b> this device is loading its part of the model.</p></div>`;
-  const failed = st.state === 'failed' ? `<p class="err">${esc(st.message || 'could not start')}</p>` : '';
-  return `<div class="empty">${why}${failed}<p><button class="primary" onclick="privateOn()">Turn on private chats</button></p></div>`;
+  const why = `<p class="body-l" style="margin:0">Your device runs the first and last part of the model itself, so your words never leave it; the swarm's other devices, the coordinator included, only see numbers in between.</p>
+    <div class="list"><div class="item">${ic('check_circle', 'lead-icon')}<div class="text"><span class="h">Protected</span><span class="s">What you write and what the model answers</span></div></div><div class="item">${ic('visibility', 'lead-icon')}<div class="text"><span class="h">Not hidden</span><span class="s">That you chatted, when, and roughly how long the messages were. <a href="https://github.com/amruthwo/Clamor/blob/main/docs/private-chats.md" target="_blank" rel="noopener">More</a></span></div></div></div>`;
+  const tail = st.state === 'starting' ? '<div class="row muted">' + ic('hourglass_top') + 'Starting: this device is loading its part of the model…</div>'
+    : (st.state === 'failed' ? `<div class="err">${esc(st.message || 'could not start')}</div>` : '') + '<div><button type="button" class="btn filled st" onclick="privateOn()">Turn on private chats</button></div>';
+  return `<div class="card" style="display:grid;gap:12px;margin-top:auto">${why}${tail}</div>`;
 }
-window.privateOn = async () => {
-  const r = await fetch('/api/private/open', { method:'POST' });
-  if (!r.ok) alert(await r.text());
-  loadThread(true);
-};
-window.newPrivateChat = async () => {
-  const r = await fetch('/api/private/chats', { method:'POST' });
-  if (!r.ok) { alert(await r.text()); return; }
-  openChat('p:' + (await r.json()).id);
-};
+window.privateOn = async () => { try { await api('/api/private/open', 'POST'); } catch (e) { snack(String(e.message || e)); } loadThread(true); };
+window.newPrivateChat = async () => { try { const r = await api('/api/private/chats', 'POST'); openChat('p:' + r.id); } catch (e) { snack(String(e.message || e)); } };
 async function loadThread(force) {
   if (sending) return;
-  const r = await fetch(chatUrl(chatId));
-  if (!r.ok) { chatId = 'group'; return; }
-  const c = await r.json();
-  const live = c.live ? c.live.text : '';
+  let c;
+  try { c = await api(chatUrl(chatId)); } catch { chatId = 'group'; return; }
   let panel = '';
   if (isPrivate(chatId)) {
-    privateStatus = await fetch('/api/private/status').then(r => r.json());
+    privateStatus = await api('/api/private/status');
     panel = privatePanel(privateStatus);
     $('say').disabled = privateStatus.state !== 'ready';
-    $('say').placeholder = privateStatus.state === 'ready' ? 'Message the model privately…' : 'Turn on private chats first';
+    $('say').placeholder = privateStatus.state === 'ready' ? 'Message privately' : 'Turn on private chats first';
   } else {
-    $('say').disabled = false; $('say').placeholder = 'Message the model…';
+    $('say').disabled = false; $('say').placeholder = 'Message Clamor';
   }
-  const key = live + '|' + panel;
-  if (!force && c.messages.length === shownCount && key === liveShown) return;
-  shownCount = c.messages.length; liveShown = key;
-  const empty = chatId === 'group' ? 'The group chat: everyone in the swarm sees it, and the model answers.' : isPrivate(chatId) ? 'A private chat: it stays on this device.' : 'A chat of your own: only you can see it, on any of your devices.';
-  // The turn-on panel goes last: next to where you type, not scrolled away above old messages.
-  $('msgs').innerHTML = (c.messages.map(bubble).join('') || (c.live || panel ? '' : `<div class="empty">${empty}</div>`)) + panel;
-  // Someone's reply is being written (another device, or before a reload).
-  if (c.live) $('msgs').insertAdjacentHTML('beforeend', liveBubble(live));
+  $('private-note').hidden = !isPrivate(chatId);
+  const [title, sub] = chatMeta(); $('chat-title').textContent = title; $('chat-sub').textContent = sub;
+  const live = c.live ? c.live.text : null;
+  const key = chatId + '|' + c.messages.length + '|' + live + '|' + panel + '|' + (me?.reply_style);
+  if (!force && key === shownKey) return;
+  shownKey = key;
+  $('msgs-inner').innerHTML = (c.messages.length ? c.messages.map(msgHtml).join('') : (live !== null || panel ? '' : emptyHtml())) + panel;
+  if (live !== null) $('msgs-inner').insertAdjacentHTML('beforeend', liveHtml(live));
   $('msgs').scrollTop = $('msgs').scrollHeight;
 }
-window.openChat = async id => { chatId = id; shownCount = -1; await loadChats(); await loadThread(true); };
-window.newChat = async () => { const r = await (await fetch('/api/chats', { method:'POST' })).json(); openChat(r.id); };
-$('convpick').onchange = e => e.target.value === '__new' ? newChat() : e.target.value === '__newp' ? newPrivateChat() : openChat(e.target.value);
+window.openChat = async id => { chatId = id; closeOverlay(); shownKey = ''; renderChatList(); await loadThread(true); if (innerWidth >= 600) $('say').focus(); };
+window.newChat = async () => { try { const r = await api('/api/chats', 'POST'); await loadChats(); openChat(r.id); } catch (e) { snack(String(e.message || e)); } };
 function sendMode(on) {
   sending = on;
-  $('send').textContent = on ? 'Stop' : 'Send';
-  $('send').classList.toggle('primary', !on);
-  $('send').type = on ? 'button' : 'submit';
+  $('send-icon').setAttribute('href', on ? '#i-stop' : '#i-arrow_upward');
+  $('send').title = on ? 'Stop' : 'Send';
 }
-$('send').onclick = e => {
-  if (!sending) return; // a normal submit
-  e.preventDefault();
-  fetch(chatUrl(chatId) + '/stop', { method:'POST' });
-};
+$('send').onclick = e => { if (sending) { e.preventDefault(); fetch(chatUrl(chatId) + '/stop', { method:'POST' }); } };
 $('composer').onsubmit = async e => {
   e.preventDefault();
   const text = $('say').value.trim();
   if (!text || sending) return;
   const asked = chatId;
-  sendMode(true); $('say').value = '';
-  const empty = $('msgs').querySelector('.empty'); if (empty) empty.remove();
-  $('msgs').insertAdjacentHTML('beforeend', bubble({ role: 'user', content: text, by: me.name }));
+  sendMode(true); $('say').value = ''; grow();
+  if (!$('msgs-inner').querySelector('.m')) $('msgs-inner').innerHTML = '';
+  $('msgs-inner').insertAdjacentHTML('beforeend', msgHtml({ role: 'user', content: text, by: me.name }));
   setLive('');
   try {
     const r = await fetch(chatUrl(asked) + '/messages', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ content: text }) });
@@ -647,109 +952,106 @@ $('composer').onsubmit = async e => {
         const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
         if (!line.trim() || chatId !== asked) continue;
         const p = JSON.parse(line);
-        if (p.done) { $('typing')?.remove(); $('msgs').insertAdjacentHTML('beforeend', bubble(p.done)); $('msgs').scrollTop = $('msgs').scrollHeight; }
+        if (p.done) { $('live')?.remove(); $('msgs-inner').insertAdjacentHTML('beforeend', msgHtml(p.done)); $('msgs').scrollTop = $('msgs').scrollHeight; }
         else setLive(p.text);
       }
     }
-  } catch (err) { $('typing')?.remove(); $('msgs').insertAdjacentHTML('beforeend', bubble({ role: 'assistant', error: String(err.message || err) })); }
+  } catch (err) { $('live')?.remove(); $('msgs-inner').insertAdjacentHTML('beforeend', msgHtml({ role: 'assistant', error: String(err.message || err) })); }
   sendMode(false);
   await loadChats(); await loadThread(true);
 };
-$('say').onkeydown = e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('composer').requestSubmit(); } };
+function grow() { const t = $('say'); t.style.height = 'auto'; t.style.height = Math.min(t.scrollHeight, 144) + 'px'; }
+$('say').oninput = grow;
+$('say').onkeydown = e => { if (e.key === 'Enter' && !e.shiftKey && innerWidth >= 600) { e.preventDefault(); $('composer').requestSubmit(); } };
 
-let me = null, signin = null;
+// The chat header: the model chip, and (wide screens) the at-a-glance pills.
+function renderChatHeader() {
+  const m = o.model, last = o.speeds.length ? o.speeds[o.speeds.length - 1] : null;
+  $('mc-dot').className = 'live ' + (!m ? '' : m.state === 'ready' ? 'ok' : m.state === 'loading' ? 'warn' : '');
+  $('mc-text').innerHTML = m ? `${esc(modelName(m.name))}<span class="tps">${last ? ' · ' + last.toFixed(0) + ' tok/s' : ''}</span>` : 'No model running';
+  const h = o.health, [head] = healthText(), used = m ? m.need_bytes : 0, pooled = Math.max(o.memory.pooled_bytes, used, 1);
+  const tone = h.status === 'good' ? 'var(--ok)' : h.status === 'problem' ? 'var(--error)' : 'var(--warn)';
+  const here = me.device && nodes[me.device];
+  const path = sparkPath(o.speeds.slice(-12), 40, 16);
+  $('desk-pills').innerHTML = `
+    <button class="pill-w st" onclick="go('models')" title="Speed of the last replies">${path ? `<svg width="40" height="16" viewBox="0 0 40 16" preserveAspectRatio="none"><path d="${path}" fill="none" stroke="var(--primary)" stroke-width="1.6"/></svg>` : ic('speed', 's16')}<b>${last ? last.toFixed(0) : '–'}</b> tok/s</button>
+    <button class="pill-w st" onclick="go('swarm')" title="Swarm health"><span class="dot" style="background:${tone}"></span><b>${esc(head)}</b> · ${h.online}/${h.total} devices</button>
+    <button class="pill-w st" onclick="go('swarm')" title="Memory the model uses, of what the swarm pools">${ic('memory', 's16')}<span class="mini-meter"><i style="width:${(used / pooled * 100).toFixed(0)}%"></i></span><b>${gib(used)}</b>/${gib(pooled)} GB</button>
+    <button class="pill-w st" onclick="go('swarm')" title="${esc(o.people.here.join(', '))}"><span class="avs">${o.people.here.slice(0, 3).map(n => `<span style="background:${colorOf(n)}">${esc(initials(n)[0])}</span>`).join('')}</span><b>${o.people.here.length}</b> here</button>
+    ${here ? `<button class="pill-w st" onclick='deviceSheet(${js(here.id)})' title="${esc(dn(here.id))}">${ic(devIcon(here), 's16')}This device · <b>${devState(here)[0]}</b></button>` : ''}`;
+}
+
+// ------------------------------------------------------------------ Banners (things that need you)
+function renderBanners() {
+  // A browser asking to sign in (any person can approve it as themselves).
+  const html = pending.map(s => `<div class="banner" style="margin:8px 0">${ic('login')}<div class="text"><b>A browser wants to sign in</b> (${esc(s.from)}). If it shows <b>${esc(s.code)}</b> and it is you, approve it.</div><button class="btn filled st" onclick='act(() => api("/api/login/approve", "POST", { code: ${js(s.code)} }), "Signed in")'>Approve as me</button></div>`).join('');
+  $('banners-chat').innerHTML = html; $('banners-swarm').innerHTML = html;
+  $('coord-dot').hidden = !joins.length;
+}
+
+// ------------------------------------------------------------------ Sign-in, refresh loop
+let signin = null;
 async function checkMe() {
   const r = await fetch('/api/me');
   if (r.status === 401) {
     me = null;
-    $('main').hidden = true; $('signin').hidden = false; $('navbar').hidden = true;
-    for (const id of ['add-device', 'signout']) $(id).hidden = true;
-    $('whoami').textContent = ''; $('whoami').hidden = true;
-    $('sub').textContent = 'sign in to see the swarm';
-    if (!signin) {
-      signin = await (await fetch('/api/login/start', { method:'POST' })).json();
-      $('si-code').textContent = signin.code;
-    }
+    $('app').hidden = true; $('signin').hidden = false;
+    if (!signin) { signin = await api('/api/login/start', 'POST'); $('si-code').textContent = signin.code; }
     const p = await fetch('/api/login/poll?id=' + signin.id);
     if (p.status === 410) { signin = null; $('si-status').textContent = 'That code expired; here is a new one.'; }
     else if ((await p.json()).approved) { signin = null; location.reload(); }
     return false;
   }
   me = await r.json();
-  $('main').hidden = false; $('signin').hidden = true; $('navbar').hidden = false;
-  $('whoami').textContent = `${me.name} · ${me.role}`; $('whoami').hidden = false;
-  $('signout').hidden = me.how !== 'session';
-  $('muster').disabled = me.role === 'member';
-  $('add-device').hidden = false;
-  $('set-drain').hidden = me.role === 'member';
+  $('app').hidden = false; $('signin').hidden = true;
+  $('nav-coord').hidden = me.role === 'member';
   return true;
 }
-async function refreshPeople() {
-  const [ppl, pend, joins] = await Promise.all([fetch('/api/people').then(r => r.json()), fetch('/api/login/pending').then(r => r.json()), me.role === 'member' ? { joins: [] } : fetch('/api/joins').then(r => r.json())]);
-  $('people').innerHTML = ppl.people.map(p => {
-    let actions = '';
-    if (me.role === 'owner' && p.role !== 'owner') actions += `<button onclick='setRole(${JSON.stringify(p.id)}, ${JSON.stringify(p.role === 'admin' ? 'member' : 'admin')})'>${p.role === 'admin' ? 'Make member' : 'Make admin'}</button> `;
-    if (me.role !== 'member' && p.role !== 'owner' && (p.role !== 'admin' || me.role === 'owner')) actions += `<button class="danger" onclick='removePerson(${JSON.stringify(p.id)}, ${JSON.stringify(p.name)})'>Remove…</button>`;
-    return `<tr><td>${esc(p.name)}${p.id === me.id ? ' <small>(you)</small>' : ''}</td><td>${esc(p.role)}</td><td>${p.devices.map(esc).join(', ') || '<span class="mute">none</span>'}</td><td>${actions}</td></tr>`;
-  }).join('');
-  $('approvals').innerHTML = joins.joins.map(j => `<div class="approve"><b>${esc(j.device)} wants to join${j.person_name !== j.device ? ' as ' + esc(j.person_name) : ''}</b> <span class="mute">(from ${esc(j.from)})</span> <span>Approve only if the device shows the check code <b>${esc(j.code)}</b>.</span> <button class="primary" onclick='decideJoin(${JSON.stringify(j.id)}, "approve")'>Approve</button> <button onclick='decideJoin(${JSON.stringify(j.id)}, "decline")'>Decline</button></div>`).join('') + pend.pending.map(s => `<div class="approve"><b>A browser (${esc(s.from)}) wants to sign in.</b> <span>If it shows <b>${esc(s.code)}</b> and it is you, approve it: it signs in as you.</span> <button class="primary" onclick='approveSignin(${JSON.stringify(s.code)})'>Approve as me</button></div>`).join('');
-}
-window.setRole = (id, role) => post('/api/people/' + encodeURIComponent(id) + '/role', { role });
-window.removePerson = (id, name) => confirm(`Remove ${name} from the swarm? Their devices leave and need a new invitation to come back.`) && post('/api/people/' + encodeURIComponent(id) + '/remove');
-window.approveSignin = code => post('/api/login/approve', { code });
-window.decideJoin = (id, d) => post('/api/joins/' + encodeURIComponent(id) + '/' + d);
-const STYLE_HELP = { stream: 'Words appear as the model writes them, so long answers start right away.', whole: 'The reply appears when it is finished; meanwhile you see how far it has got.' };
-$('whoami').onclick = () => {
-  seg('pref-style', me.reply_style || 'stream');
-  $('help-style').textContent = STYLE_HELP[me.reply_style || 'stream'];
-  $('pref-sub').textContent = `${me.name} · ${me.role} in “${me.swarm}”`;
-  $('pref-pin').textContent = me.has_pin ? 'Change my PIN' : 'Set a PIN';
-  $('prefs').showModal();
-};
-$('pref-style').onclick = async e => {
-  const v = e.target.dataset.v; if (!v) return;
-  seg('pref-style', v); $('help-style').textContent = STYLE_HELP[v];
-  const r = await fetch('/api/me/prefs', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ reply_style: v }) });
-  if (r.ok) me.reply_style = v; else alert(await r.text());
-};
-$('pref-pin').onclick = () => setPin();
-window.setPin = async () => {
-  const pin = prompt('New PIN (4 to 12 digits):');
-  if (pin) post('/api/me/pin', { pin });
-};
-$('signout').onclick = async () => { await fetch('/api/logout', { method:'POST' }); location.reload(); };
 $('si-pin').onsubmit = async e => {
   e.preventDefault();
   const r = await fetch('/api/login/pin', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ name: $('si-name').value, pin: $('si-pinval').value }) });
   if (r.ok) location.reload(); else $('si-err').textContent = await r.text();
 };
+let busy = false, lastPlan = 0, knownNodes = null;
 async function refresh() {
   if (busy) return; busy = true;
   try {
-    if (!await checkMe()) { busy = false; return; }
-    refreshPeople().catch(() => {});
-    const o = await fetch('/api/overview').then(r => r.json());
+    if (!await checkMe()) return;
     const q = new URLSearchParams({ quant: $('quant').value, ctx: $('ctx').value, target: $('target').value, topology: $('topology').value });
-    const [rosterData, plan] = await Promise.all([fetch('/api/roster').then(r => r.json()), fetch('/api/plan?' + q).then(r => r.json())]);
-    renderRoster(rosterData); renderPlan(plan); renderWidgets(o); renderRunning(o);
+    const wantPlan = !plan || Date.now() - lastPlan > 15000 || screen === 'models';
+    const [ov, ro, ppl, pend, jn, pl] = await Promise.all([
+      api('/api/overview'), api('/api/roster'), api('/api/people'), api('/api/login/pending'),
+      me.role === 'member' ? { joins: [] } : api('/api/joins').catch(() => ({ joins: [] })),
+      wantPlan ? api('/api/plan?' + q).catch(() => null) : null]);
+    o = ov; roster = ro; people = ppl.people; pending = pend.pending; joins = jn.joins;
+    if (pl) { plan = pl; lastPlan = Date.now(); }
+    nodes = Object.fromEntries(roster.nodes.map(n => [n.id, n]));
+    // A new device joined since the last look: a small celebration.
+    const ids = new Set(roster.nodes.map(n => n.id));
+    if (knownNodes) for (const id of ids) if (!knownNodes.has(id)) celebrate(`${dn(id)} joined the swarm 🎉`);
+    knownNodes = ids;
+    route();
+    renderChatHeader(); renderSwarm(); renderModels(); renderPlan(); renderSettings(); renderBanners();
+    if (me.role !== 'member') renderCoord();
     if (!chatList) await loadChats();
     loadThread(false);
-  } catch (e) { $('sub').textContent = 'portal unreachable: ' + e; }
-  busy = false;
+  } catch (e) {
+    snack('Cannot reach the swarm: ' + (e.message || e));
+  } finally { busy = false; }
 }
-['quant','ctx','target','topology'].forEach(id => $(id).onchange = refresh);
-// Deep link: /#settings=<device id> opens that device's settings.
-showPage();
+['quant', 'ctx', 'target', 'topology'].forEach(id => $(id).onchange = () => { plan = null; refresh(); });
+$('muster').onclick = () => act(() => api('/api/muster', 'POST'), 'Measuring every device again…');
+addEventListener('resize', () => plan && renderPlan());
+
+// Deep links: #settings=<device> opens that device, #add-device, #prefs, #chat=<id>.
 refresh().then(() => {
-  const m = location.hash.match(/^#settings=(.+)$/);
-  if (m) openSettings(decodeURIComponent(m[1]));
-  if (location.hash === '#add-device') $('add-device').click();
-  if (location.hash === '#prefs') $('whoami').click();
-  const c = location.hash.match(/^#chat=(.+)$/);
-  if (c) openChat(decodeURIComponent(c[1]));
+  const h = decodeURIComponent(location.hash);
+  const d = h.match(/^#settings=(.+)$/); if (d) { go('swarm'); deviceSheet(d[1]); }
+  if (h === '#add-device') inviteSheet('device');
+  if (h === '#prefs') { go('settings'); prefsSheet(); }
+  const c = h.match(/^#chat=(.+)$/); if (c) { go('chat'); openChat(c[1]); }
 });
 setInterval(refresh, 3000);
-// (checkMe also drives the sign-in screen's polling.)
 </script>
 </body>
 </html>

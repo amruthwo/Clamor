@@ -1,7 +1,12 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The app's own pages (not the swarm dashboard, which is a remote page in a frame).",
-  "windows": ["main"],
-  "permissions": ["core:default", "opener:default", "autostart:default"]
+  "description": "The app's own pages on every platform (not the swarm dashboard, which is a remote page in a frame).",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "opener:default"
+  ]
 }

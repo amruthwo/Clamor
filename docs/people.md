@@ -11,28 +11,28 @@ person in the swarm; a device you add with **Add device → One of my devices** 
 | **Admin** | Appointed by the owner | Add people, remove people and devices, start and stop models, re-run the muster |
 | **Member** | Everyone else | Use the swarm (chat), see the dashboard, add their own devices, change their own devices' settings |
 
-The **People** section of the dashboard lists everyone, their role and their devices. The owner
-can make someone an admin (or a member again); admins can remove people. Removing someone makes
-all their devices leave, ends their sign-ins, and they need a new invitation to come back.
+**Swarm** lists everyone, their role and their devices. The owner and admins also get a
+**Coord.** tab (the crab): there, tap a person to change their role (the owner makes someone an
+admin, or a member again) or to remove them (admins).
+Removing someone makes all their devices leave, ends their sign-ins, and they need a new invitation to come back.
 
-Every device in the device list shows whose it is. You can change the settings of your own
-devices (how much memory and CPU Clamor may use, when it pauses); only admins can change other
+Every device in **Swarm** shows whose it is; tap one for its settings. You can change the settings
+of your own devices (how much memory and CPU Clamor may use, when it pauses); only admins can change other
 people's.
 
-Admins also see devices **asking to join** (see [joining](joining.md)): approve one only if it
-shows the same check code as the dashboard.
+Admins also see devices **asking to join** under **Coord. → Needs you** (a dot on the crab says
+so; see [joining](joining.md)): approve one only if it shows the same check code.
 
 ## Chats
 
-The **Home** page has a **Group** chat that everyone in the swarm shares (each message shows who
+**Chat** has a **Group** chat that everyone in the swarm shares (each message shows who
 wrote it), and your own conversations (**New chat**), which only you can open, from any of your
 devices. Conversations are kept on the coordinator, so whoever runs the coordinator's computer
 could read the files. For chats that even the owner cannot read, use a [private
 chat](private-chats.md) from the app on your own device.
 
 Replies appear **as the model writes them**. If you prefer to read a reply only once it is
-finished, choose **All at once** under your preferences (press your name at the top of the
-dashboard); you then see how far it has got ("Writing… 120 words so far"). Either way, **Stop**
+finished, choose **All at once** in **Settings → Preferences**; you then see how far it has got ("Writing… 120 words so far"). Either way, **Stop**
 ends a reply early and keeps what was written. A reply is finished and saved even if you close
 the page meanwhile.
 

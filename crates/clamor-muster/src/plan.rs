@@ -246,7 +246,8 @@ pub struct GroupSummary {
     pub warnings: Vec<String>,
 }
 
-pub fn summarize(reports: &[NodeReport]) -> GroupSummary {
+/// `coordinator`: the device the others' links are measured against (it has no link of its own).
+pub fn summarize(reports: &[NodeReport], coordinator: Option<&NodeId>) -> GroupSummary {
     let mut g = GroupSummary::default();
     for r in reports {
         g.devices += 1;
@@ -265,7 +266,7 @@ pub fn summarize(reports: &[NodeReport]) -> GroupSummary {
             }
             None => g.warnings.push(format!("{}: not benchmarked yet", r.info.id)),
         }
-        if r.link.is_none() && r.bench.is_some() {
+        if r.link.is_none() && r.bench.is_some() && coordinator != Some(&r.info.id) {
             g.warnings.push(format!("{}: no link measurement, assuming {DEFAULT_RTT_MS} ms / {DEFAULT_LINK_MBPS} Mbit/s", r.info.id));
         }
         if !r.info.accelerators.is_empty() && r.bench.as_ref().map(|b| b.accel_mem_bw_gbps.is_none()).unwrap_or(false) {
@@ -459,6 +460,21 @@ pub fn recommend_with(models: &[ModelSpec], ctx: u32, nodes: &[PlanNode], min_de
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The coordinator has no link to itself: no "no link measurement" warning for it, but still
+    /// for a member whose link was not measured.
+    #[test]
+    fn the_coordinator_needs_no_link_measurement() {
+        let bench = BenchReport { cpu_gflops_1t: 10.0, cpu_gflops_mt: 40.0, mem_bw_gbps: 40.0, disk_read_mbps: None, disk_write_mbps: None, accel_mem_bw_gbps: None, accel_tflops: None, took_ms: 1, measured_at_unix: 0, build: "release".into() };
+        let report = |id: &str| {
+            let mut info = crate::probe::probe_node(NodeId(id.into()));
+            info.accelerators.clear();
+            NodeReport { policy: Policy::default_for(info.class), info, bench: Some(bench.clone()), link: None }
+        };
+        let g = summarize(&[report("laptop"), report("phone")], Some(&NodeId("laptop".into())));
+        assert_eq!(g.warnings.len(), 1, "{:?}", g.warnings);
+        assert!(g.warnings[0].starts_with("phone: no link measurement"), "{:?}", g.warnings);
+    }
 
     fn node(id: &str, mem_gib: f64, bw: f64, rtt: f64, mbps: f64, coord: bool) -> PlanNode {
         PlanNode {

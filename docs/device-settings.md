@@ -17,6 +17,14 @@ machine, runs at low priority, and steps aside when you need the device.
 "Pausing" never interrupts a reply that is already being written: it finishes, and then the
 device takes no new requests until it is available again.
 
+## Renaming a device
+
+Tap a device (on **Swarm**) and the pencil next to its name. The new name is what everyone in the
+swarm sees; it is kept by the swarm, so it stays when the device restarts. You can rename your
+own devices; admins can rename any. Underneath, the device keeps its id (its host name, or the
+name of a phone), which the command line and the logs use. Leave the name empty to show the id
+again.
+
 ## Defaults
 
 | | Desktops | Laptops, tablets and phones |

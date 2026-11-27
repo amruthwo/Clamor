@@ -150,7 +150,6 @@ pub async fn join(mut addr: String, creds: Credentials, id: Option<String>, mut 
                 return Ok(());
             }
             Ok(Exit::Rejected(reason)) => {
-                eprintln!("coordinator rejected us: {reason}");
                 // A coordinator on a newer protocol: catch up and rejoin.
                 if updates.auto && reason.contains("protocol") {
                     println!("trying an update to match the coordinator");
@@ -158,7 +157,8 @@ pub async fn join(mut addr: String, creds: Credentials, id: Option<String>, mut 
                         eprintln!("update failed: {e:#}");
                     }
                 }
-                std::process::exit(1);
+                // An error, not exit(): inside an app this must not end the whole app.
+                anyhow::bail!("coordinator rejected us: {reason}");
             }
             Err(e) => {
                 eprintln!("disconnected: {e}; retrying in {backoff}s");
@@ -366,7 +366,7 @@ async fn session(addr: &str, creds: &Credentials, allowed: &share::AllowedKeys, 
             Some(m) = ctl_rx.recv() => {
                 write_msg(&mut wr, &m).await?;
             }
-            _ = tokio::signal::ctrl_c() => {
+            _ = crate::stop_requested() => {
                 let _ = write_msg(&mut wr, &Message::Leave).await;
                 return Ok(Exit::Interrupted);
             }

@@ -64,6 +64,17 @@ pub fn normalize_passphrase(p: &str) -> String {
     p.split(|c: char| c.is_whitespace() || c == '-' || c == '_' || c == '.').filter(|w| !w.is_empty()).map(|w| w.to_lowercase()).collect::<Vec<_>>().join("-")
 }
 
+/// A one-time code as the coordinator writes it ("123-456"), however it was typed: six digits
+/// with or without a hyphen or space. Anything else is left as typed (and will not match).
+pub fn normalize_code(c: &str) -> String {
+    let digits: String = c.chars().filter(|c| c.is_ascii_digit()).collect();
+    if digits.len() == 6 && c.chars().all(|c| c.is_ascii_digit() || c == '-' || c.is_whitespace()) {
+        format!("{}-{}", &digits[..3], &digits[3..])
+    } else {
+        c.trim().to_string()
+    }
+}
+
 // ---------------------------------------------------------------- MAC and key derivation
 
 /// HMAC-SHA256 (RFC 2104).
@@ -163,6 +174,10 @@ pub struct CoordinatorProfile {
     /// The people in this swarm (each approved device belongs to one).
     #[serde(default)]
     pub people: Vec<crate::people::Person>,
+    /// Names people gave devices (device id -> shown name). The id stays as it is (pipelines,
+    /// approvals and settings refer to it); screens show this name instead.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub device_names: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -203,7 +218,7 @@ impl CoordinatorProfile {
     /// The swarm this device coordinates under `name`, or a new one (new id, passphrase).
     pub fn load_or_create(config_dir: &Path, name: &str, passphrase: Option<&str>) -> Result<Self> {
         let existing = Self::all(config_dir).into_iter().find(|p| p.name == name);
-        let mut p = existing.unwrap_or_else(|| CoordinatorProfile { swarm_id: hex::encode(random_bytes::<16>()), name: name.into(), passphrase: generate_passphrase(), approved: Vec::new(), people: Vec::new() });
+        let mut p = existing.unwrap_or_else(|| CoordinatorProfile { swarm_id: hex::encode(random_bytes::<16>()), name: name.into(), passphrase: generate_passphrase(), approved: Vec::new(), people: Vec::new(), device_names: Default::default() });
         p.normalize();
         if let Some(pp) = passphrase {
             let pp = normalize_passphrase(pp);
@@ -476,6 +491,14 @@ pub fn verify_share_request(header: &str, path: &str, allowed: impl Fn(&str) -> 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn codes_match_with_or_without_the_hyphen() {
+        for typed in ["123456", "123-456", " 123 456 ", "123-456\n"] {
+            assert_eq!(super::normalize_code(typed), "123-456", "{typed:?}");
+        }
+        assert_eq!(super::normalize_code("12345"), "12345");
+    }
+
     use super::*;
 
     #[test]

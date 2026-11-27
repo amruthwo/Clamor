@@ -5,8 +5,32 @@ use clamor_proto::*;
 use std::process::Command;
 use sysinfo::{Disks, System};
 
+/// This device's name in a swarm: `CLAMOR_DEVICE_NAME` (the Android app sets the phone's name from
+/// its settings), else the host name. Android's host name is "localhost" for every phone, so there
+/// the model is used instead.
 pub fn default_node_id() -> NodeId {
-    NodeId(System::host_name().unwrap_or_else(|_| "unknown-host".into()))
+    let from_env = std::env::var("CLAMOR_DEVICE_NAME").ok().map(|n| device_name(&n)).filter(|n| !n.is_empty());
+    let host = System::host_name().ok().map(|h| device_name(&h)).filter(|h| !h.is_empty() && h != "localhost");
+    let model = || {
+        if cfg!(target_os = "android") {
+            Command::new("/system/bin/getprop").arg("ro.product.model").output().ok().map(|o| device_name(&String::from_utf8_lossy(&o.stdout))).filter(|m| !m.is_empty())
+        } else {
+            None
+        }
+    };
+    NodeId(from_env.or(host).or_else(model).unwrap_or_else(|| "unknown-host".into()))
+}
+
+/// A device name as an id: letters, digits, '.', '_' and '-' (anything else becomes '-'), at most 48.
+pub fn device_name(raw: &str) -> String {
+    let mut out = String::new();
+    for c in raw.trim().chars() {
+        let c = if c.is_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '-' };
+        if !(c == '-' && out.ends_with('-')) {
+            out.push(c);
+        }
+    }
+    out.trim_matches('-').chars().take(48).collect()
 }
 
 pub fn probe_node(id: NodeId) -> NodeInfo {
@@ -157,6 +181,11 @@ fn detect_accelerators(os: Os, arch: &str, ram_total: u64) -> Vec<Accelerator> {
 
 /// Battery state, or None on a machine without a battery.
 pub fn read_power() -> Option<PowerState> {
+    // Set by the Android app, which reads the battery through Android (apps may not read the
+    // kernel's power-supply files there) and keeps this file current.
+    if let Some(p) = std::env::var_os("CLAMOR_POWER_FILE").and_then(|f| std::fs::read_to_string(f).ok()) {
+        return parse_power_file(&p);
+    }
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         read_power_sysfs(std::path::Path::new("/sys/class/power_supply"))
@@ -173,6 +202,14 @@ pub fn read_power() -> Option<PowerState> {
     {
         None
     }
+}
+
+/// `<percent> <plugged in: 0 or 1>`, e.g. "85 1".
+pub(crate) fn parse_power_file(s: &str) -> Option<PowerState> {
+    let mut it = s.split_whitespace();
+    let pct: u8 = it.next()?.parse().ok()?;
+    let plugged = it.next()? == "1";
+    Some(PowerState { on_battery: !plugged, battery_pct: Some(pct.min(100)) })
 }
 
 /// Linux power supplies, identified by their `type` file, not their name: batteries are called
@@ -266,10 +303,27 @@ mod tests {
     }
 
     #[test]
+    fn the_android_apps_power_file() {
+        assert_eq!(parse_power_file("85 1\n"), Some(PowerState { on_battery: false, battery_pct: Some(85) }));
+        assert_eq!(parse_power_file("40 0"), Some(PowerState { on_battery: true, battery_pct: Some(40) }));
+        assert_eq!(parse_power_file(""), None);
+        assert_eq!(parse_power_file("x 1"), None);
+    }
+
+    #[test]
     fn probe_reports_sane_values() {
         let info = probe_node(NodeId("t".into()));
         assert!(info.cpu_threads >= 1);
         assert!(info.ram_total_bytes > 0);
+    }
+
+    #[test]
+    fn device_names_are_tidy_ids() {
+        assert_eq!(device_name("  Galaxy S24 Ultra "), "Galaxy-S24-Ultra");
+        assert_eq!(device_name("Bea's laptop"), "Bea-s-laptop");
+        assert_eq!(device_name("ryzen-mini.local"), "ryzen-mini.local");
+        assert_eq!(device_name("SM-S928U1\n"), "SM-S928U1");
+        assert_eq!(device_name("   "), "");
     }
 
     #[test]

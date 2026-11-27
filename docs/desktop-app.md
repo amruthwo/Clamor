@@ -27,17 +27,18 @@ malicious software" (right-click the app, **Open**, then **Open** again), and Wi
 The app asks what this computer should do:
 
 - **Start a swarm.** This computer becomes the coordinator. Give the swarm a name; Clamor makes up
-  a passphrase, shown at the top of the window. Add other devices with **Add device** in the
-  dashboard (a one-time code), or give them the passphrase.
+  a passphrase (**Settings → Swarm passphrase**). Add other devices with **Add device** on the
+  **Swarm** tab (a one-time code), or give them the passphrase.
 - **Join a swarm.** The app lists the swarms it finds on your network. Pick one, give your name,
   type the code from **Add device** (or the passphrase), and press **Join**. Or leave the code
   empty to **ask**: the app shows a check code, and someone who runs the swarm approves your
-  device in the dashboard. If nothing is found, type the coordinator's address.
+  device under **Coord. → Needs you**. If nothing is found, type the coordinator's address.
 
-Tick **Start Clamor when I log in** to have it start with your computer, in the tray.
+Turn on **Start Clamor when I log in** to have it start with your computer, in the tray (also
+in **Settings → This app**).
 
 After that the app remembers what it does: next time it starts straight into the dashboard.
-**Change swarm…** stops Clamor on this computer and goes back to the first screen (swarms you
+**Settings → Change swarm** stops Clamor on this computer and goes back to the first screen (swarms you
 joined are remembered, so rejoining needs no passphrase).
 
 ## Where things are
@@ -48,7 +49,12 @@ joined are remembered, so rejoining needs no passphrase).
   fetch the parts they run.
 - **Settings and keys:** the same config folder as the command-line `clamor-node` (see
   [joining](joining.md)), so the app and the command line share swarms.
-- **The log:** the **Log** button at the top of the window.
+- **The log:** **Settings → This app → Log**.
+- **The layout:** Chat, Swarm, Models and Settings (plus Coord. for the owner and admins): a bar
+  at the bottom on phones, a rail at the side on wider windows; on a wide screen the chat list
+  stays beside the conversation, with the swarm's health and speed along the top.
+- **Updates:** the app offers new versions itself and installs them when you agree; see
+  [updating](updating.md).
 
 ## Known limits
 

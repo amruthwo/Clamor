@@ -2,164 +2,340 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Clamor</title>
+<link rel="icon" href="icon.svg" type="image/svg+xml">
 <style>
-  :root { color-scheme: light dark; --bg:#f6f7f9; --card:#fff; --ink:#15181d; --mute:#667085; --line:#e4e7ec; --accent:#2f6fed; --ok:#12805c; --warn:#b54708; --bad:#b42318; }
-  @media (prefers-color-scheme: dark) { :root { --bg:#0f1216; --card:#171b21; --ink:#e8ebf0; --mute:#98a2b3; --line:#262c35; --accent:#6b9bff; --ok:#3ccf9a; --warn:#f5a65b; --bad:#ff7a6e; } }
-  * { box-sizing:border-box; }
-  html, body { height:100%; }
-  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.45 system-ui,-apple-system,Segoe UI,sans-serif; display:flex; flex-direction:column; }
-  button, input, select { font:inherit; color:inherit; background:var(--card); border:1px solid var(--line); border-radius:8px; padding:7px 12px; }
-  button { cursor:pointer; } button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
-  button:disabled { opacity:.6; cursor:default; }
-  input { width:100%; }
-  .mute { color:var(--mute); } .err { color:var(--bad); white-space:pre-wrap; } .ok { color:var(--ok); }
-  [hidden] { display:none !important; }
+/* The app's own screens (setup, connecting, log, updates). Same Material 3 tokens as the
+   dashboard (crates/clamor-node/src/portal.html), which fills the window once Clamor runs. */
+:root {
+  color-scheme: light;
+  --primary:#ad3229; --on-primary:#ffffff; --primary-container:#ffdad5; --on-primary-container:#410001;
+  --secondary-container:#f8ddd9; --on-secondary-container:#291816;
+  --error:#ba1a1a; --error-container:#ffdad6; --on-error-container:#410002;
+  --ok:#1e6b45; --ok-container:#c2f0d2; --on-ok-container:#002111;
+  --surface:#f9f9fc; --surface-container-low:#f3f3f6; --surface-container:#edeef1;
+  --surface-container-high:#e7e8eb; --surface-container-highest:#e1e2e5;
+  --on-surface:#191c1e; --on-surface-variant:#43474e; --outline:#73777f; --outline-variant:#c3c6cf;
+  --scrim:rgb(0 0 0 / .32);
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  color-scheme: dark;
+  --primary:#ffb4a9; --on-primary:#690003; --primary-container:#8c1d18; --on-primary-container:#ffdad5;
+  --secondary-container:#5d3f3b; --on-secondary-container:#ffdad5;
+  --error:#ffb4ab; --error-container:#93000a; --on-error-container:#ffdad6;
+  --ok:#8fd9ad; --ok-container:#005232; --on-ok-container:#abf5c8;
+  --surface:#111318; --surface-container-low:#171b21; --surface-container:#1b1f26;
+  --surface-container-high:#262a31; --surface-container-highest:#31353c;
+  --on-surface:#e2e2e9; --on-surface-variant:#c3c6cf; --outline:#8d9199; --outline-variant:#43474e;
+  --scrim:rgb(0 0 0 / .55);
+} }
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --primary:#ffb4a9; --on-primary:#690003; --primary-container:#8c1d18; --on-primary-container:#ffdad5;
+  --secondary-container:#5d3f3b; --on-secondary-container:#ffdad5;
+  --error:#ffb4ab; --error-container:#93000a; --on-error-container:#ffdad6;
+  --ok:#8fd9ad; --ok-container:#005232; --on-ok-container:#abf5c8;
+  --surface:#111318; --surface-container-low:#171b21; --surface-container:#1b1f26;
+  --surface-container-high:#262a31; --surface-container-highest:#31353c;
+  --on-surface:#e2e2e9; --on-surface-variant:#c3c6cf; --outline:#8d9199; --outline-variant:#43474e;
+  --scrim:rgb(0 0 0 / .55);
+}
+* { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+html, body { height:100%; margin:0; }
+body { background:var(--surface); color:var(--on-surface); font:400 14px/20px Roboto, system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing:.25px; display:flex; flex-direction:column; overflow:hidden; }
+button, input { font:inherit; color:inherit; letter-spacing:inherit; }
+[hidden] { display:none !important; }
+.i { width:24px; height:24px; fill:currentColor; flex:none; }
+.muted { color:var(--on-surface-variant); } .err { color:var(--error); white-space:pre-wrap; }
+.center { text-align:center; }
+.row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+.headline-s { font-size:24px; line-height:32px; } .title-m { font-size:16px; line-height:24px; font-weight:500; } .body-l { font-size:16px; line-height:24px; } .body-s { font-size:12px; line-height:16px; }
+.st { position:relative; overflow:hidden; cursor:pointer; }
+.st::after { content:""; position:absolute; inset:0; background:currentColor; opacity:0; transition:opacity .15s; pointer-events:none; border-radius:inherit; }
+.st:hover::after { opacity:.08; } .st:active::after { opacity:.12; } .st:disabled::after { display:none; }
+.btn { display:inline-flex; align-items:center; justify-content:center; gap:8px; height:40px; padding:0 24px; border-radius:20px; border:0; font-weight:500; white-space:nowrap; }
+.btn .i { width:18px; height:18px; margin-left:-8px; }
+.btn.filled { background:var(--primary); color:var(--on-primary); }
+.btn.tonal { background:var(--secondary-container); color:var(--on-secondary-container); }
+.btn.text { background:transparent; color:var(--primary); padding:0 12px; }
+.btn.danger { background:transparent; color:var(--error); padding:0 12px; }
+.btn:disabled { opacity:.38; cursor:default; }
+.btn.wide { width:100%; height:48px; border-radius:24px; }
+.icon-btn { width:40px; height:40px; border-radius:20px; border:0; background:transparent; color:var(--on-surface-variant); display:inline-grid; place-items:center; padding:0; }
+.field { position:relative; }
+.field input { width:100%; height:56px; padding:22px 16px 6px; border:0; border-radius:4px 4px 0 0; background:var(--surface-container-highest); border-bottom:1px solid var(--on-surface-variant); outline:none; font-size:16px; }
+.field input:focus { border-bottom:2px solid var(--primary); }
+.field label { position:absolute; left:16px; top:8px; font-size:12px; color:var(--on-surface-variant); pointer-events:none; }
+.list { background:var(--surface-container-low); border-radius:16px; overflow:hidden; }
+.item { display:flex; align-items:center; gap:16px; min-height:64px; padding:8px 16px; text-align:left; width:100%; border:0; background:transparent; }
+.item + .item { border-top:1px solid var(--outline-variant); }
+.item .text { flex:1; min-width:0; display:grid; } .item .h { font-size:16px; line-height:24px; } .item .s { color:var(--on-surface-variant); }
+.tile-icon { width:40px; height:40px; border-radius:12px; display:grid; place-items:center; background:var(--secondary-container); color:var(--on-secondary-container); flex:none; }
+.tile-icon.pri { background:var(--primary-container); color:var(--on-primary-container); }
+.switch { position:relative; width:52px; height:32px; flex:none; display:inline-block; }
+.switch input { appearance:none; margin:0; width:52px; height:32px; border-radius:16px; background:var(--surface-container-highest); box-shadow:inset 0 0 0 2px var(--outline); cursor:pointer; }
+.switch input::after { content:""; position:absolute; left:8px; top:8px; width:16px; height:16px; border-radius:50%; background:var(--outline); transition:all .2s; }
+.switch input:checked { background:var(--primary); box-shadow:none; }
+.switch input:checked::after { left:24px; top:4px; width:24px; height:24px; background:var(--on-primary); }
 
-  /* First run */
-  .setup { max-width:880px; width:100%; margin:0 auto; padding:28px 16px; overflow:auto; }
-  .setup h1 { margin:0 0 4px; font-size:26px; }
-  .cards { display:grid; grid-template-columns:repeat(auto-fit, minmax(300px, 1fr)); gap:16px; margin-top:20px; }
-  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px; display:grid; gap:12px; align-content:start; }
-  .card h2 { margin:0; font-size:18px; }
-  label { display:grid; gap:4px; font-size:14px; }
-  .found { display:grid; gap:6px; }
-  .found button { text-align:left; display:flex; justify-content:space-between; gap:8px; }
-  .found button.sel { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent) inset; }
-  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+/* Setup, step by step */
+.setup { flex:1; overflow:auto; display:flex; flex-direction:column; padding:calc(8px + env(safe-area-inset-top)) 16px calc(24px + env(safe-area-inset-bottom)); }
+.setup .wrap { max-width:480px; width:100%; margin:0 auto; display:grid; gap:16px; align-content:start; }
+.topline { display:flex; align-items:center; min-height:48px; }
+.steps { display:flex; gap:6px; justify-content:center; flex:1; }
+.steps i { width:24px; height:4px; border-radius:2px; background:var(--surface-container-highest); } .steps i.on { background:var(--primary); }
+.choice { display:flex; gap:16px; align-items:center; text-align:left; padding:20px; border-radius:24px; border:0; background:var(--surface-container-low); width:100%; }
+.choice .tile-icon { width:56px; height:56px; border-radius:16px; }
+.hero-mark { width:96px; height:96px; border-radius:28px; margin:16px auto 0; display:block; box-shadow:0 12px 32px rgb(253 84 83 / .35); }
+.spinner { width:48px; height:48px; border-radius:50%; border:4px solid var(--surface-container-highest); border-top-color:var(--primary); animation:spin 1s linear infinite; margin:24px auto; }
+.spinner.sm { width:16px; height:16px; border-width:2px; margin:0; }
+@keyframes spin { to { transform:rotate(360deg); } }
+.code-big { font:500 28px/36px ui-monospace, monospace; letter-spacing:4px; text-align:center; padding:12px; background:var(--surface-container-highest); border-radius:16px; }
+details summary { cursor:pointer; color:var(--on-surface-variant); }
+pre.log { margin:8px 0 0; padding:12px 14px; border-radius:12px; background:var(--surface-container-high); font:12px/1.5 ui-monospace, monospace; white-space:pre-wrap; word-break:break-word; max-height:50vh; overflow:auto; }
 
-  /* Running */
-  .bar { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:8px 14px; background:var(--card); border-bottom:1px solid var(--line); }
-  .bar .name { font-weight:600; }
-  .bar .spacer { flex:1; }
-  .dot { display:inline-block; width:9px; height:9px; border-radius:50%; background:var(--mute); }
-  .dot.on { background:var(--ok); } .dot.wait { background:var(--warn); } .dot.off { background:var(--bad); }
-  .pass { font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:13px; }
-  iframe { flex:1; border:0; width:100%; background:var(--bg); }
-  .log { flex:1; margin:0; padding:12px 14px; overflow:auto; font:12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space:pre-wrap; }
-  .waiting { flex:1; display:grid; place-items:center; text-align:center; padding:24px; }
+/* Running */
+#running { flex:1; min-height:0; display:flex; flex-direction:column; position:relative; }
+iframe { flex:1; border:0; width:100%; background:var(--surface); }
+.waiting { flex:1; display:grid; place-items:center; text-align:center; padding:24px; }
+.update { display:flex; align-items:center; gap:8px; padding:calc(6px + env(safe-area-inset-top)) 8px 6px 16px; background:var(--secondary-container); color:var(--on-secondary-container); }
+.update #upd-text { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.update .btn { height:36px; padding:0 14px; }
+.update .btn.text { color:var(--on-secondary-container); }
+
+/* Sheets */
+.scrim { position:fixed; inset:0; background:var(--scrim); z-index:20; }
+.sheet { position:fixed; left:0; right:0; bottom:0; z-index:21; background:var(--surface-container-low); border-radius:28px 28px 0 0; max-height:90dvh; overflow-y:auto; padding:0 24px calc(20px + env(safe-area-inset-bottom)); margin:0 auto; max-width:680px; display:grid; gap:16px; animation:up .25s cubic-bezier(.2,0,0,1); }
+@keyframes up { from { transform:translateY(100%); } }
+.sheet .grab { width:32px; height:4px; border-radius:2px; background:var(--on-surface-variant); opacity:.4; margin:22px auto 0; }
+.sheet h2 { margin:0; font-weight:400; font-size:24px; line-height:32px; }
+.sheet .acts { display:flex; justify-content:flex-end; gap:8px; flex-wrap:wrap; }
+.notes { max-height:45vh; overflow:auto; background:var(--surface-container); border-radius:12px; padding:4px 16px; }
+.notes h3 { font-size:15px; margin:12px 0 4px; } .notes ul { padding-left:20px; margin:4px 0; }
 </style>
 </head>
 <body>
+<div id="icons" hidden></div>
+
+<div class="update" id="upd" hidden>
+  <svg class="i"><use href="#i-update"/></svg><span id="upd-text"></span>
+  <button class="btn text st" id="upd-later">Later</button>
+  <button class="btn filled st" id="upd-open">Update…</button>
+</div>
 
 <section class="setup" id="setup" hidden>
-  <h1>Welcome to Clamor</h1>
-  <div class="mute">Team up the computers and phones around you to run AI models too big for any one of them.</div>
-  <div class="err" id="setup-err"></div>
-  <div class="cards">
-    <form class="card" id="start">
-      <h2>Start a swarm</h2>
-      <div class="mute">This computer becomes the swarm's coordinator. Other devices join it.</div>
-      <label>Name <input id="start-name" value="home" autocomplete="off" required></label>
-      <label>Passphrase <input id="start-pass" placeholder="leave empty to get five random words" autocomplete="off"></label>
-      <button class="primary" id="start-go">Start</button>
-    </form>
-    <form class="card" id="join">
-      <h2>Join a swarm</h2>
-      <div class="found" id="found"><span class="mute">Looking on your network…</span></div>
-      <label>Or its address <input id="join-addr" placeholder="e.g. 192.168.1.20" autocomplete="off"></label>
-      <label>Your name <input id="join-name" placeholder="shown to the others in the swarm" autocomplete="name"></label>
-      <label>Code or passphrase <input id="join-secret" placeholder="code from “Add device”, the five words, or nothing to ask" autocomplete="off"></label>
-      <div class="mute" id="ask-status"></div>
-      <button class="primary" id="join-go">Join</button>
-    </form>
-  </div>
-  <p class="row mute"><label class="row" style="display:flex"><input type="checkbox" id="autostart" style="width:auto"> Start Clamor when I log in</label></p>
-  <p class="err" id="no-node" hidden>clamor-node was not found next to this app. Reinstall Clamor.</p>
+  <div class="wrap" id="step"></div>
 </section>
 
-<section id="running" hidden style="display:flex; flex-direction:column; flex:1; min-height:0">
-  <div class="bar">
-    <span class="dot" id="dot"></span>
-    <span class="name" id="swarm-name"></span>
-    <span class="mute" id="role"></span>
-    <span class="pass" id="pass" hidden></span>
-    <span class="spacer"></span>
-    <button id="show-log">Log</button>
-    <button id="leave">Change swarm…</button>
-  </div>
-  <iframe id="dash" title="Swarm dashboard" hidden></iframe>
-  <div class="waiting" id="waiting"><div><div id="wait-msg">Connecting…</div><div class="err" id="run-err"></div><p><button id="retry" hidden>Try again</button></p></div></div>
-  <pre class="log" id="log" hidden></pre>
+<section id="running" hidden>
+  <iframe id="dash" title="Clamor" hidden></iframe>
+  <div class="waiting" id="waiting"><div style="max-width:420px">
+    <img src="icon.svg" alt="" style="width:64px;height:64px;border-radius:20px">
+    <div class="title-m" id="wait-msg" style="margin-top:12px">Connecting…</div>
+    <div class="err" id="run-err" style="margin-top:8px"></div>
+    <div class="row" style="justify-content:center;margin-top:16px"><button class="btn tonal" id="retry" hidden>Try again</button><button class="btn text st" onclick="logSheet()">Log</button><button class="btn text st" onclick="changeSwarm()">Change swarm</button></div>
+  </div></div>
 </section>
+<div id="overlays"></div>
 
 <script>
 const { invoke } = window.__TAURI__.core;
 const $ = id => document.getElementById(id);
-let st = null, chosen = null, showLog = false, dashUrl = null;
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const ic = n => `<svg class="i"><use href="#i-${n}"/></svg>`;
+const mobile = /Android/i.test(navigator.userAgent);
+let shownKey = '';
+// Redraw, keeping what was typed into the fields and the error shown.
+function keepInputs(f) {
+  const vals = {}; document.querySelectorAll('#step input').forEach(i => { if (i.id && i.type !== 'checkbox') vals[i.id] = i.value; });
+  const err = $('setup-err')?.textContent;
+  f();
+  for (const [id, v] of Object.entries(vals)) if ($(id)) $(id).value = v;
+  if (err && $('setup-err')) $('setup-err').textContent = err;
+}
+let st = null, dashUrl = null, found = [], scanning = false, chosen = null, step = 'welcome', autostart = false;
+fetch('icons.svg').then(r => r.text()).then(t => $('icons').innerHTML = t).catch(() => {});
+try { const t = localStorage.getItem('clamor-theme'); if (t && t !== 'auto') document.documentElement.dataset.theme = t; } catch {}
 
+function closeOverlay() { $('overlays').innerHTML = ''; logOpen = false; }
+function sheet(html) { $('overlays').innerHTML = `<div class="scrim" onclick="closeOverlay()"></div><div class="sheet" role="dialog" aria-modal="true"><div class="grab"></div>${html}</div>`; }
+
+// ------------------------------------------------------------------ Setup steps
+function shell(n, total, inner, back) {
+  const dots = Array.from({ length: total }, (_, i) => `<i class="${i <= n ? 'on' : ''}"></i>`).join('');
+  return `<div class="topline">${back ? `<button class="icon-btn st" title="Back" onclick="${back}">${ic('arrow_back')}</button>` : '<span style="width:40px"></span>'}<div class="steps">${total ? dots : ''}</div><span style="width:40px"></span></div>${inner}`;
+}
+const logBox = () => st && st.log.length ? `<details><summary class="body-s">Show log</summary><pre class="log">${esc(st.log.join('\n'))}</pre></details>` : '';
+function render() {
+  const pick = found.map((f, i) => `<button class="item st" onclick="chooseSwarm(${i})"><div class="tile-icon pri">${ic('hub')}</div><div class="text"><span class="h">${esc(f.name)}</span><span class="s">${f.known ? 'Joined before' : esc(f.addresses[0] || '')}</span></div>${ic('chevron_right')}</button>`).join('');
+  const steps = {
+    welcome: () => shell(0, 0, `<img class="hero-mark" src="icon.svg" alt=""><div class="center"><div class="headline-s">Welcome to Clamor</div><p class="body-l muted" style="margin:8px 0 0">Team up the computers and phones around you to run AI models too big for any one of them.</p></div>
+      <button class="choice st" onclick="goStep('join')"><div class="tile-icon pri">${ic('login')}</div><div><div class="title-m">Join a swarm</div><div class="muted">Someone nearby already runs Clamor</div></div></button>
+      <button class="choice st" onclick="goStep('start')"><div class="tile-icon">${ic('hub')}</div><div><div class="title-m">Start a swarm</div><div class="muted">This ${mobile ? 'phone' : 'computer'} becomes the coordinator</div></div></button>
+      ${!mobile ? `<label class="item st" style="border-radius:16px;background:var(--surface-container-low)">${ic('power_settings_new')}<div class="text"><span class="h">Start Clamor when I log in</span><span class="s">In the background, in the tray</span></div><span class="switch"><input type="checkbox" id="autostart" ${autostart ? 'checked' : ''}></span></label>` : ''}
+      ${!st.node_found ? '<div class="err">clamor-node was not found next to this app. Reinstall Clamor.</div>' : ''}`),
+    join: () => shell(0, 3, `<div class="headline-s">Swarms nearby</div><p class="muted" style="margin:0">Found on this Wi-Fi network.</p>
+      <div class="list">${pick || `<div class="item"><div class="text"><span class="s">${scanning ? 'Looking…' : 'No swarms found yet. Is this device on the same Wi-Fi as the swarm?'}</span></div></div>`}</div>
+      <div class="row muted body-s">${scanning ? '<div class="spinner sm"></div>Still looking…' : `<button class="btn text st" onclick="scan()">${ic('refresh')}Look again</button>`}</div>
+      <div class="field"><input id="join-addr" placeholder=" " autocomplete="off" inputmode="url"><label>Or type the coordinator's address (e.g. 192.168.1.20)</label></div>
+      <button class="btn tonal wide st" onclick="useAddress()">Use this address</button>`, "goStep('welcome')"),
+    code: () => shell(1, 3, `<div class="headline-s">Join ${esc(chosen?.name || chosen?.address || 'the swarm')}</div>
+      <p class="muted" style="margin:0">On a device already in the swarm, open <b>Add device</b> and type the code it shows. Or the swarm's five-word passphrase.</p>
+      <div class="field"><input id="join-secret" placeholder=" " autocomplete="off" autocapitalize="off"><label>Code or passphrase</label></div>
+      <div class="field"><input id="join-name" placeholder=" " autocomplete="name"><label>Your name (shown to the others)</label></div>
+      <div class="err" id="setup-err"></div>
+      <button class="btn filled wide st" id="join-go" onclick="doJoin(false)">Join</button>
+      <button class="btn text st" onclick="doJoin(true)">No code? Ask to join instead</button>${logBox()}`, "goStep('join')"),
+    start: () => shell(0, 2, `<div class="headline-s">Start a swarm</div><p class="muted" style="margin:0">This ${mobile ? 'phone' : 'computer'} becomes the coordinator: the others join it.</p>
+      <div class="field"><input id="start-name" value="home" autocomplete="off"><label>Swarm name</label></div>
+      <div class="field"><input id="start-pass" placeholder=" " autocomplete="off"><label>Passphrase (leave empty for five random words)</label></div>
+      <div class="err" id="setup-err"></div>
+      <button class="btn filled wide st" id="start-go" onclick="doStart()">Start</button>${logBox()}`, "goStep('welcome')"),
+    asking: () => shell(2, 3, `<div class="spinner"></div><div class="center"><div class="headline-s">Asking to join</div>
+      <p class="body-l muted">An admin approves this device in the swarm's Coordinator tab, when it shows the same code:</p></div>
+      <div class="code-big">${esc(st.check_code || '…')}</div><button class="btn text st" onclick="cancelJoin()">Cancel</button>${logBox()}`),
+  };
+  $('step').innerHTML = (steps[step] || steps.welcome)();
+  const a = $('autostart'); if (a) a.onchange = () => setAutostart(a.checked);
+}
+window.goStep = s => { step = s; render(); if (s === 'join') scan(); };
+window.chooseSwarm = i => { chosen = { name: found[i].name, address: found[i].addresses[0] }; goStep('code'); setTimeout(() => $('join-secret')?.focus(), 50); };
+window.useAddress = () => { const a = $('join-addr').value.trim(); if (!a) { $('join-addr').focus(); return; } chosen = { name: null, address: a }; goStep('code'); };
+async function scan() {
+  if (scanning) return; scanning = true; keepInputs(render);
+  try { found = (await invoke('swarms', { scan: true })).on_network || []; } catch (e) { found = []; }
+  scanning = false; if (step === 'join') keepInputs(render);
+}
+async function busyBtn(id, label, f) {
+  const b = $(id), old = b?.textContent;
+  if (b) { b.disabled = true; b.textContent = label; }
+  if ($('setup-err')) $('setup-err').textContent = '';
+  try { await f(); dashUrl = null; await refresh(); }
+  catch (e) { if (step === 'asking') step = 'code'; keepInputs(render); if ($('setup-err')) $('setup-err').textContent = String(e); }
+  finally { if ($(id)) { $(id).disabled = false; $(id).textContent = old; } }
+}
+window.doJoin = ask => {
+  const secret = ask ? '' : $('join-secret').value.trim();
+  if (!ask && !secret) { $('join-secret').focus(); return; }
+  const name = $('join-name').value.trim() || null;
+  if (ask) { step = 'asking'; render(); }
+  busyBtn('join-go', 'Joining…', () => invoke('join_swarm', { swarm: chosen.name, address: chosen.address, secret, name }));
+};
+window.doStart = () => busyBtn('start-go', 'Starting…', () => invoke('start_swarm', { name: $('start-name').value.trim() || 'home', passphrase: $('start-pass').value.trim() || null }));
+window.cancelJoin = async () => { await invoke('reset'); step = 'code'; refresh(); };
+async function setAutostart(on) { try { await invoke('set_autostart', { on }); autostart = on; } catch (e) { alert(String(e)); } tellDash(); }
+
+// ------------------------------------------------------------------ Running
 async function refresh() {
   st = await invoke('status');
   const set = !!st.setup.mode;
-  $('setup').hidden = set;
-  $('running').hidden = !set;
-  $('no-node').hidden = st.node_found;
-  $('ask-status').textContent = !set && st.running && !st.joined && st.check_code ? `Asking to join. Check code ${st.check_code}: an admin approves this device in the swarm's dashboard when it shows the same code.` : '';
-  if (!set) return;
-  $('swarm-name').textContent = st.setup.swarm || 'swarm';
-  $('role').textContent = st.setup.mode === 'coordinator' ? 'coordinator (this computer)' : 'member';
-  $('pass').hidden = !st.passphrase;
-  $('pass').textContent = st.passphrase ? 'passphrase: ' + st.passphrase : '';
-  $('dot').className = 'dot ' + (st.running && st.joined ? 'on' : st.running ? 'wait' : 'off');
-  $('log').textContent = st.log.join('\n');
+  $('setup').hidden = set; $('running').hidden = !set;
+  if (!set) {
+    if (step === 'asking' && !st.running) step = 'code';
+    // Redraw only when something shown changed (a redraw would lose what is being typed).
+    const key = JSON.stringify([step, st.check_code, st.log.length, st.node_found, st.running]);
+    if (key !== shownKey) { shownKey = key; keepInputs(render); }
+    return;
+  }
   const up = st.running && st.joined;
   if (up && !dashUrl) {
     dashUrl = await invoke('dashboard_url');
-    if (dashUrl) $('dash').src = dashUrl;
+    if (dashUrl) $('dash').src = dashUrl + (dashUrl.includes('?') ? '&' : '?') + 'app=1';
   }
   if (!st.running) dashUrl = null;
-  $('dash').hidden = showLog || !up || !dashUrl;
-  $('log').hidden = !showLog;
-  $('waiting').hidden = showLog || (up && !!dashUrl);
-  $('wait-msg').textContent = st.running ? 'Connecting to the swarm…' : 'Clamor is not running.';
+  $('dash').hidden = !up || !dashUrl;
+  $('waiting').hidden = up && !!dashUrl;
+  $('wait-msg').textContent = st.running ? 'Connecting to the swarm…' : 'Clamor is not running';
   $('run-err').textContent = st.running ? '' : (st.exited || '');
   $('retry').hidden = st.running;
+  if (logOpen) $('log-pre').textContent = st.log.join('\n');
 }
-
-async function scan() {
-  try {
-    const v = await invoke('swarms', { scan: true });
-    const list = v.on_network || [];
-    $('found').innerHTML = list.length ? '' : '<span class="mute">No swarms found on this network. Type the coordinator’s address below.</span>';
-    for (const f of list) {
-      const b = document.createElement('button');
-      b.type = 'button';
-      b.innerHTML = `<span>${esc(f.name)}</span><span class="mute">${f.known ? 'joined before' : esc(f.addresses[0] || '')}</span>`;
-      b.onclick = () => { chosen = f; [...$('found').children].forEach(c => c.classList.toggle('sel', c === b)); $('join-addr').value = ''; };
-      $('found').append(b);
-    }
-    if (list.length === 1) $('found').firstChild.click();
-  } catch (e) { $('found').innerHTML = `<span class="err">${esc(e)}</span>`; }
-}
-const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-
-async function busy(btn, label, f) {
-  const old = btn.textContent; btn.disabled = true; btn.textContent = label; $('setup-err').textContent = '';
-  try { await f(); dashUrl = null; await refresh(); }
-  catch (e) { $('setup-err').textContent = String(e); }
-  finally { btn.disabled = false; btn.textContent = old; }
-}
-
-$('start').onsubmit = e => { e.preventDefault(); busy($('start-go'), 'Starting…', () => invoke('start_swarm', { name: $('start-name').value, passphrase: $('start-pass').value || null })); };
-$('join').onsubmit = e => {
-  e.preventDefault();
-  const addr = $('join-addr').value.trim();
-  const target = addr ? { swarm: null, address: addr } : { swarm: chosen ? chosen.name : null, address: chosen ? chosen.addresses[0] : null };
-  busy($('join-go'), 'Joining…', () => invoke('join_swarm', { ...target, secret: $('join-secret').value, name: $('join-name').value || null }));
-};
-$('show-log').onclick = () => { showLog = !showLog; $('show-log').textContent = showLog ? 'Dashboard' : 'Log'; refresh(); };
 $('retry').onclick = async () => { try { await invoke('restart'); } catch (e) { $('run-err').textContent = String(e); } refresh(); };
-$('leave').onclick = async () => {
-  if (!confirm('Stop Clamor on this computer and choose another swarm? This swarm is remembered: you can rejoin it later without the passphrase.')) return;
-  await invoke('reset'); dashUrl = null; $('dash').removeAttribute('src'); await refresh(); scan();
+let logOpen = false;
+window.logSheet = () => {
+  sheet(`<h2>Log</h2><pre class="log" id="log-pre" style="max-height:60vh">${esc(st.log.join('\n'))}</pre><div class="acts"><button class="btn text st" onclick="navigator.clipboard?.writeText($('log-pre').textContent)">Copy</button><button class="btn filled st" onclick="closeOverlay()">Close</button></div>`);
+  logOpen = true; const p = $('log-pre'); p.scrollTop = p.scrollHeight;
 };
-$('autostart').onchange = e => invoke('set_autostart', { on: e.target.checked }).catch(err => { $('setup-err').textContent = String(err); });
+window.changeSwarm = () => {
+  sheet(`<h2>Change swarm?</h2><p class="body-l muted" style="margin:0">Clamor stops on this ${mobile ? 'phone' : 'computer'} and you can join or start another swarm. This one is remembered: you can rejoin it later without the passphrase.</p>
+    <div class="acts"><button class="btn text st" onclick="closeOverlay()">Cancel</button><button class="btn filled st" id="cs-go">Change swarm</button></div>`);
+  $('cs-go').onclick = async () => { closeOverlay(); await invoke('reset'); dashUrl = null; $('dash').removeAttribute('src'); step = 'welcome'; await refresh(); };
+};
+
+// The dashboard (in the frame) asks for app things over postMessage.
+function tellDash() {
+  const w = $('dash').contentWindow; if (!w || !st) return;
+  w.postMessage({ clamorApp: { autostart: mobile ? undefined : autostart, mobile, passphrase: st.passphrase || null } }, '*');
+}
+addEventListener('message', e => {
+  if (e.source !== $('dash').contentWindow || !e.data || typeof e.data !== 'object') return;
+  const { clamor, value } = e.data;
+  if (clamor === 'hello') tellDash();
+  else if (clamor === 'log') logSheet();
+  else if (clamor === 'change-swarm') changeSwarm();
+  else if (clamor === 'autostart') setAutostart(!!value);
+});
+
+// ------------------------------------------------------------------ Updates
+// Checked a little after starting and then daily; nothing installs until the person presses
+// "Update now" (the app downloads the installer for how it is installed here, checks it against
+// the signed release manifest, and installs it).
+let upd = null;
+const HOW = {
+  rpm: 'Clamor downloads the new package and installs it; your computer asks for your password. Then Clamor restarts.',
+  deb: 'Clamor downloads the new package and installs it; your computer asks for your password. Then Clamor restarts.',
+  appimage: 'Clamor downloads the new version, replaces this AppImage and restarts.',
+  flatpak: 'Clamor downloads the new version and opens it in your software app (Discover, GNOME Software), where you install it.',
+  dmg: 'Clamor downloads the new version, replaces the app and restarts.',
+  nsis: 'Clamor downloads the new installer and runs it; Clamor closes while it installs and starts again afterwards.',
+  apk: 'Clamor downloads the new version; Android then asks whether to update the app: tap Update.',
+};
+function md(t) {
+  // Release notes: headings, bullets, bold and links, as plain text otherwise.
+  const out = []; let list = false, para = false;
+  for (const raw of String(t || '').split('\n')) {
+    let l = esc(raw).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>').replace(/`(.+?)`/g, '<code>$1</code>').replace(/\[(.+?)\]\((.+?)\)/g, '$1');
+    const li = /^\s*[-*] /.test(raw);
+    if (li && !list) { out.push('<ul>'); list = true; }
+    if (!li && list && !/^\s{2,}\S/.test(raw)) { out.push('</ul>'); list = false; }
+    if (/^#{1,6} /.test(raw)) { out.push('<h3>' + l.replace(/^#+ /, '') + '</h3>'); para = false; }
+    else if (li) { out.push('<li>' + l.replace(/^\s*[-*] /, '')); para = false; }
+    else if (raw.trim()) { out.push((list || para ? ' ' : '<p>') + l.trim()); para = !list; }
+    else para = false;
+  }
+  if (list) out.push('</ul>');
+  return out.join('\n');
+}
+const store = { get: k => { try { return localStorage.getItem(k); } catch { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch {} } };
+async function checkUpdate() {
+  try { const v = await invoke('update_check'); upd = v.update ? { ...v.update, kind: v.kind } : null; }
+  catch (e) { console.warn('update check:', e); return; }
+  $('upd').hidden = !upd || store.get('clamor-update-later') === upd.version;
+  if (upd) $('upd-text').textContent = `Clamor ${upd.version} is available`;
+}
+$('upd-later').onclick = () => { if (upd) store.set('clamor-update-later', upd.version); $('upd').hidden = true; };
+$('upd-open').onclick = () => {
+  sheet(`<h2>Update to Clamor ${esc(upd.version)}</h2><div class="notes">${md(upd.notes) || '<p class="muted">No release notes.</p>'}</div>
+    <div class="muted" id="upd-how">${esc(HOW[upd.kind] || '')} Download: ${Math.round(upd.asset.size / 1e6)} MB.</div><div class="err" id="upd-err"></div>
+    <div class="acts"><button class="btn text st" onclick="closeOverlay()">Not now</button><button class="btn filled st" id="upd-go">Update now</button></div>`);
+  $('upd-go').onclick = async () => {
+    const b = $('upd-go'); b.disabled = true; b.textContent = 'Downloading…'; $('upd-err').textContent = '';
+    try {
+      const r = await invoke('update_install');
+      if (r.then === 'open') {
+        if (window.ClamorAndroid) { const err = window.ClamorAndroid.installApk(r.file); if (err) throw err; }
+        $('upd-how').textContent = r.message; b.textContent = 'Opened';
+      } else b.textContent = r.then === 'restart' ? 'Restarting…' : 'Installing…';
+    } catch (e) { $('upd-err').textContent = String(e); b.disabled = false; b.textContent = 'Try again'; }
+  };
+};
+setTimeout(checkUpdate, 8000);
+setInterval(checkUpdate, 24 * 3600 * 1000);
 
 (async () => {
+  try { autostart = await invoke('autostart_enabled'); } catch {}
   await refresh();
-  $('autostart').checked = await invoke('autostart_enabled');
-  if (!st.setup.mode) scan();
   setInterval(refresh, 1500);
 })();
 </script>

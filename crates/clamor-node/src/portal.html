@@ -222,7 +222,10 @@ table.data td.wrap { white-space:normal; min-width:180px; }
 .model-chip .live.ok { background:var(--ok); box-shadow:0 0 0 3px color-mix(in srgb, var(--ok) 25%, transparent); }
 .model-chip .live.warn { background:var(--warn); }
 .model-chip .t { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.desk-pills { display:none; gap:8px; align-items:center; flex:none; }
+.desk-pills { display:none; gap:8px; align-items:center; flex:0 1 auto; min-width:0; overflow:hidden; }
+/* Narrower wide screens: the less important pills step aside instead of running off the edge. */
+@media (max-width:1599px) { .pill-w.opt1 { display:none !important; } }
+@media (max-width:1439px) { .pill-w.opt2 { display:none !important; } }
 .pill-w { display:inline-flex; align-items:center; gap:8px; height:32px; padding:0 12px; border-radius:16px; background:var(--surface-container-high); border:0; font-size:12px; font-weight:500; color:var(--on-surface-variant); white-space:nowrap; }
 .pill-w b { color:var(--on-surface); font-weight:500; }
 .pill-w .mini-meter { width:36px; height:6px; border-radius:3px; background:var(--surface-container-highest); overflow:hidden; }
@@ -1094,8 +1097,8 @@ function renderChatHeader() {
     <button class="pill-w st" onclick="go('models')" title="Speed of the last replies">${path ? `<svg width="40" height="16" viewBox="0 0 40 16" preserveAspectRatio="none"><path d="${path}" fill="none" stroke="var(--primary)" stroke-width="1.6"/></svg>` : ic('speed', 's16')}<b>${last ? last.toFixed(0) : '–'}</b> tok/s</button>
     <button class="pill-w st" onclick="go('swarm')" title="Swarm health"><span class="dot" style="background:${tone}"></span><b>${esc(head)}</b> · ${h.online}/${h.total} devices</button>
     <button class="pill-w st" onclick="go('swarm')" title="Memory the model uses, of what the swarm pools">${ic('memory', 's16')}<span class="mini-meter"><i style="width:${(used / pooled * 100).toFixed(0)}%"></i></span><b>${gib(used)}</b>/${gib(pooled)} GB</button>
-    <button class="pill-w st" onclick="go('swarm')" title="${esc(o.people.here.join(', '))}"><span class="avs">${o.people.here.slice(0, 3).map(n => `<span style="background:${colorOf(n)}">${esc(initials(n)[0])}</span>`).join('')}</span><b>${o.people.here.length}</b> here</button>
-    ${here ? `<button class="pill-w st" onclick='deviceSheet(${js(here.id)})' title="${esc(dn(here.id))}">${ic(devIcon(here), 's16')}This device · <b>${devState(here)[0]}</b></button>` : ''}`;
+    <button class="pill-w st opt2" onclick="go('swarm')" title="${esc(o.people.here.join(', '))}"><span class="avs">${o.people.here.slice(0, 3).map(n => `<span style="background:${colorOf(n)}">${esc(initials(n)[0])}</span>`).join('')}</span><b>${o.people.here.length}</b> here</button>
+    ${here ? `<button class="pill-w st opt1" onclick='deviceSheet(${js(here.id)})' title="${esc(dn(here.id))}">${ic(devIcon(here), 's16')}This device · <b>${devState(here)[0]}</b></button>` : ''}`;
 }
 
 // ------------------------------------------------------------------ Banners (things that need you)

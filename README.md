@@ -13,9 +13,13 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0--or--later-fd5453" alt="License: GPL-3.0-or-later"></a>
 </p>
 
+<p align="center">
+  <img src="assets/screenshots/desktop-chat.png" width="100%" alt="Clamor on a desktop: a group chat where Bea and Alex ask the model what to cook, with the swarm's speed, health, pooled memory and the people here shown along the top.">
+</p>
+
 > [!NOTE]
-> Clamor is early and experimental. Devices can already join a swarm, measure themselves, and plan how to share a
-> model. Running a real model across machines is being built right now (see [What works today](#what-works-today)).
+> Clamor is young: it works, and it is changing quickly. Expect rough edges, and see
+> [What works today](#what-works-today) for what has been tested where.
 
 ## What is Clamor?
 
@@ -27,6 +31,26 @@ one bigger machine. Everything stays on your own network: no cloud, no accounts,
 
 The icon is the idea in a picture: each crab is a computer, and they hold claws in a ring because that is how Clamor
 passes work between them.
+
+## What you can do
+
+- **Chat with a model none of your devices could run alone**, in a group chat everyone in the swarm shares, or in
+  your own chats that only you can open from any of your devices. Replies appear as they are written.
+- **Keep a chat truly private**: in a [private chat](docs/private-chats.md) your own device runs the first and last
+  part of the model, so your words never leave it, not even to the computer coordinating the swarm.
+- **Find a model that fits**: Clamor measures your devices and shows which models it can run, how fast, and over
+  how many devices. Filter by what a model can do (tools, thinking, vision, code), download it with one click, and
+  start it. Downloads are checked against Clamor's catalog. See [models](docs/models.md).
+- **Add devices in seconds**: scan a QR code with the phone app, type a six-digit code, or ask to join and let an
+  admin approve it. Phones help too, while they are charging.
+- **Stay in charge of each device**: how much memory and processor Clamor may use, whether it works on battery,
+  and whether it steps aside while you use the device. See [device settings](docs/device-settings.md).
+- **Share it with the household**: people have their own names and devices, with owner, admin and member roles.
+  See [people](docs/people.md).
+
+<p align="center">
+  <img src="assets/screenshots/phones.png" width="100%" alt="The Clamor app on a phone: the group chat; the Swarm tab with health, devices and people; Models with predicted speeds and filters; and the Coordinator tab for the swarm's owner.">
+</p>
 
 ## How it works
 
@@ -45,11 +69,11 @@ An honest caveat: pooling makes a big model **fit**; it doesn't make it **fast**
 machine, so a model split across a home network runs at a few words per second, limited by the slowest computer and
 the network between them. That's the price of running something no single machine you own could run at all.
 
-### Lots of small jobs, spread out
+### Lots of small jobs, spread out (planned)
 
-The other half of Clamor is breadth. AI assistants and agents create streams of small, separate jobs: summarize
-this, transcribe that, read the text in this image. Those don't need one big model; they need many hands. Clamor
-hands each job to a device that suits it, and here every device helps, even a phone.
+The other half of Clamor, still to come, is breadth. AI assistants and agents create streams of small, separate
+jobs: summarize this, transcribe that, read the text in this image. Those don't need one big model; they need many
+hands. Clamor will hand each job to a device that suits it, and there every device helps, even a phone.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/diagram-lanes-dark.svg">
@@ -62,35 +86,43 @@ Before you pick a model, Clamor runs a quick **muster**: it measures each device
 memory bandwidth, and the speed of the network between them. From that it tells you which models will fit, how fast
 each should run, and what is holding things back: a slow machine, or the network.
 
-Devices can leave whenever their owner needs them: one click in the dashboard drains a device, and a device that
-drops off can rejoin later without benchmarking again.
+Devices can leave whenever their owner needs them: a device can be paused or removed from the app, and a device
+that drops off can rejoin later without benchmarking again.
 
 ## What works today
 
 | | |
 |---|---|
-| **Works** | Starting a swarm, joining with a generated passphrase (never sent over the network), finding the swarm on the local network, one-time codes from the dashboard, remembered swarms, automatic benchmarks, a web dashboard showing devices and which models fit |
-| **Works** | Splitting a real model across machines: the coordinator hands out layers, each machine loads its share, and they pass the work around the ring |
-| **Works** | Text chat through the API, using the model's own tokenizer and chat template (both checked against Hugging Face's) |
-| **Works** | Llama 3.x, Qwen 2.5 and SmolLM2 models, including compressed (quantized) files; checked against a reference implementation |
-| **Works** | One copy of a model is enough: other machines fetch only their share of the layers from the one that has it |
-| **Works** | Downloadable releases for Linux, macOS, Windows and Android (Termux), which can update themselves (signed) |
-| **Works** | A desktop app with installers (Flatpak, .deb, .rpm, AppImage, .dmg, .exe); people with roles (owner, admins, members), sign-in, and encrypted connections between devices |
-| **Works** | A home screen with chat (a group chat for everyone, and your own private conversations) and at-a-glance widgets: swarm health, who is here, the running model and its speed, pooled memory, your devices |
-| **Works** | Replies that appear as they are written (or all at once, as each person prefers), with a Stop button |
-| **Works** | Private chats: your device runs the first and last part of the model, so your words never leave it (see [private chats](docs/private-chats.md)) |
-| **Planned** | An OpenAI-compatible API for agent tools, a phone app, coordinator hand-over |
+| **Swarms** | Start one on any computer; devices join with a QR code, a one-time code, the passphrase (never sent over the network) or by asking; they find the swarm on the local network and rejoin by themselves |
+| **Models** | Llama 3.x, Qwen2.5 and SmolLM2 (and others built the same way), split across devices; one device needs the file, the others fetch their share. Checked against a reference implementation. A catalog of 24 models with predicted speeds for your swarm and verified downloads |
+| **Chat** | Group, personal and private chats, streaming replies with Stop, each person's preferences |
+| **Apps** | Desktop app (Linux: Flatpak, .deb, .rpm, AppImage; macOS; Windows) and an Android app, the same Material 3 design on every screen size; they update themselves when you agree |
+| **Security** | Encrypted connections between devices, device keys, people with roles, sign-in for browsers |
+| **Command line** | `clamor-node` for servers and scripts (Linux, macOS, Windows, Android in Termux), updates itself (signed) |
 
-CI runs the tests on Linux (x86_64 and arm64), Windows and macOS. The Vulkan, CUDA and Android builds are
-compile-checked only. GPU inference has been tested by hand with Vulkan on an Apple M1 running Asahi Linux.
+CI runs the tests on Linux (x86_64 and arm64), Windows and macOS, and builds every installer and the Android app.
+Tried by hand: Linux on an Apple M1 (Fedora Asahi, including GPU inference with Vulkan) and Android on a Galaxy S24
+Ultra. The macOS and Windows apps are built by CI but not yet tried on real machines. CUDA builds are
+compile-checked only.
+
+**Coming next:** an OpenAI-compatible API (so coding tools and agents can use your swarm), tool calling with an
+optional online mode and MCP, model handover when a device leaves, using your swarm away from home, and more model
+families (Qwen3, Gemma 3, vision and embedding models).
 
 ## Try it
 
-**With the desktop app** (Linux, macOS, Windows): install it from the
-[latest release](https://github.com/amruthwo/Clamor/releases/latest), then choose **Start a swarm** on one computer
-and **Join a swarm** on the others. See the [desktop app guide](docs/desktop-app.md).
+1. **Install the app** on the computer that will coordinate the swarm, from the
+   [latest release](https://github.com/amruthwo/Clamor/releases/latest) (see the
+   [desktop app guide](docs/desktop-app.md); on Android, the [Android guide](docs/android.md)).
+2. Choose **Start a swarm**. Clamor measures the computer, which takes about a minute.
+3. On **Models → Find a model**, pick one marked **Best fit**, press **Download**, then **Start**.
+4. Chat. To add more devices, press **Add device** on the **Swarm** tab: scan the QR code with the phone app, or
+   type the code on the new device.
 
-**From source**, with the command line: you need [Rust](https://rustup.rs), CMake and a C++ compiler. Then:
+### From the command line
+
+You need [Rust](https://rustup.rs), CMake and a C++ compiler to build from source (or take `clamor-node` from a
+release). Then:
 
 ```bash
 git clone https://github.com/amruthwo/Clamor.git && cd Clamor
@@ -109,12 +141,11 @@ On each other computer, run that command once (or just `clamor-node join --passp
 swarm on the network). After that, `clamor-node join` on its own is enough: the device remembers the swarm and
 is recognised by its own key. See the [joining guide](docs/joining.md).
 
-Then open `http://<first-computer-ip>:7421/` in any browser on your network, phone included, to see the swarm
-measure itself and suggest models.
+Then open `http://<first-computer-ip>:7421/` in any browser on your network, phone included.
 
-### Chat with a model
+#### Models and chat through the API
 
-Put the model file in a `models` folder next to where you run `clamor-node`, on **any one** of your machines.
+Models can be downloaded from the dashboard (**Models → Find a model**), or put the model file in a `models` folder next to where you run `clamor-node`, on **any one** of your machines.
 The others fetch just the layers they need from it, keep them in their cache, and reuse them next time. A
 small model to start with is
 [SmolLM2 360M Instruct](https://huggingface.co/HuggingFaceTB/SmolLM2-360M-Instruct-GGUF) (386 MB, Apache-2.0):
@@ -138,15 +169,16 @@ curl -X POST http://<first-computer-ip>:7421/api/chat -H 'content-type: applicat
   -d '{"messages": [{"role": "user", "content": "What is the capital of France?"}]}'
 ```
 
-Each device decides how much of itself Clamor may use: memory, CPU, whether it works on battery, and
-whether it steps aside while you use it. Change these from the **Settings** button next to each device
-in the dashboard; see the [device settings guide](docs/device-settings.md).
 
 > [!WARNING]
 > The passphrase is never sent over the network, only approved devices can join or download models, the
 > connections between devices are encrypted, and the dashboard needs a sign-in with owner, admin and member roles
 > (see [people and signing in](docs/people.md)). The plain browser dashboard on port 7421 is not encrypted; use the
 > app, or `https://<coordinator>:7424/`.
+
+<p align="center">
+  <img src="assets/screenshots/models-light.png" width="100%" alt="The Models page in the light theme: the running model, and Find a model with filters, predicted speeds, a Best fit badge and download buttons.">
+</p>
 
 ## For developers
 
@@ -156,7 +188,7 @@ Clamor is a Rust workspace:
 |---|---|
 | `clamor-proto` | Control messages between the coordinator and devices (JSON over TCP, port 7420) |
 | `clamor-muster` | Device probes, benchmarks, network tests, and the planner that splits models; also a CLI |
-| `clamor-node` | The coordinator, the member that joins, and the web portal (port 7421) |
+| `clamor-node` | The coordinator, the member that joins, the dashboard (port 7421; its page is `src/portal.html`), the model catalog and downloads |
 | `clamor-transport` | The binary ring transport between pipeline stages: flow control, plan epochs, cancel |
 | `clamor-engine-ggml` | Inference on [ggml](https://github.com/ggml-org/ggml) (vendored): devices, GGUF loading, layer-range Llama stages |
 
@@ -181,7 +213,11 @@ GPU backends need their SDKs: Vulkan builds need the Vulkan headers and loader p
 (Fedora: `vulkan-loader-devel glslc spirv-headers-devel`; Debian/Ubuntu: `libvulkan-dev glslc spirv-headers`).
 
 - [`docs/`](docs): user guides
-- [`assets/`](assets): icon, diagrams and social preview; diagrams are generated by `assets/src/make_graphics.py`
+- [`apps/desktop`](apps/desktop): the desktop and Android app (Tauri)
+- [`design/prototype`](design/prototype): the clickable Material 3 prototype the interface was built from
+- [`assets/`](assets): icon, diagrams, screenshots and social preview; diagrams are generated by `assets/src/make_graphics.py`
+- `tools/`: reference implementations for tests, and the generators for the icon set (`gen-icons.py`) and the
+  model catalog (`build-catalog.py`)
 
 ## License
 
@@ -191,4 +227,6 @@ share and change it. If you distribute Clamor or a modified version, you must sh
 Clamor includes [ggml](https://github.com/ggml-org/ggml) in `vendor/ggml`, which is MIT-licensed
 (see [`vendor/ggml/LICENSE`](vendor/ggml/LICENSE)). Passphrases are made from the
 [EFF large wordlist](https://www.eff.org/dice) (`crates/clamor-node/data/eff_large_wordlist.txt`) by the Electronic
-Frontier Foundation, used under [CC BY 3.0 US](https://creativecommons.org/licenses/by/3.0/us/).
+Frontier Foundation, used under [CC BY 3.0 US](https://creativecommons.org/licenses/by/3.0/us/). Icons are
+[Material Symbols](https://fonts.google.com/icons) by Google, under the
+[Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0).

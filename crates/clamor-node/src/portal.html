@@ -277,6 +277,8 @@ table.data td.wrap { white-space:normal; min-width:180px; }
 .confetti { position:fixed; inset:0; pointer-events:none; z-index:40; overflow:hidden; }
 .confetti i { position:absolute; top:-12px; width:8px; height:14px; border-radius:2px; animation:fall 1.6s cubic-bezier(.3,.6,.4,1) forwards; }
 @keyframes fall { to { transform:translateY(105vh) rotate(540deg); opacity:.2; } }
+.qr { background:#fff; border-radius:16px; padding:8px; width:min(240px, 70vw); margin:0 auto; }
+.qr svg { display:block; width:100%; height:auto; }
 .code-big { font:400 40px/52px ui-monospace, "Roboto Mono", monospace; letter-spacing:6px; text-align:center; padding:12px 0; background:var(--surface-container-highest); border-radius:16px; }
 .check-code { font:500 22px/28px ui-monospace, "Roboto Mono", monospace; letter-spacing:3px; text-align:center; }
 pre.cmd { margin:0; padding:12px 14px; border-radius:12px; background:var(--surface-container-highest); font:12px/1.5 ui-monospace, monospace; white-space:pre-wrap; word-break:break-all; }
@@ -633,6 +635,7 @@ window.inviteSheet = async (kind) => {
   overlay(`<h2>Add a device</h2><div class="body">
     ${admin ? `<div class="seg" id="inv-kind"><button type="button" class="st" data-v="device" aria-pressed="${kind === 'device'}">One of my devices</button><button type="button" class="st" data-v="person" aria-pressed="${kind === 'person'}">Someone new</button></div>` : ''}
     <div class="body-l" id="inv-what">On the new device, open Clamor and choose <b>Join a swarm</b>. When it asks, type this code:</div>
+    <div id="inv-qr" class="qr" hidden></div>
     <div class="code-big" id="inv-code">…</div>
     <div class="row muted body-s" style="justify-content:center">${ic('timer', 's16')}<span id="inv-help"></span></div>
     <details><summary class="body-s muted" style="cursor:pointer">On the command line</summary><pre class="cmd" id="inv-cmd" style="margin-top:8px"></pre></details>
@@ -645,7 +648,8 @@ window.inviteSheet = async (kind) => {
     const j = await api('/api/invite', 'POST', { kind });
     const until = Date.now() + j.expires_in * 1000;
     $('inv-code').textContent = j.code; $('inv-cmd').textContent = j.command;
-    $('inv-what').innerHTML = kind === 'device' ? 'On your new device, open Clamor and choose <b>Join a swarm</b>. When it asks, type this code:' : 'On their device, they open Clamor, choose <b>Join a swarm</b>, type their name and this code:';
+    if (j.qr_svg) { $('inv-qr').innerHTML = j.qr_svg; $('inv-qr').hidden = false; }
+    $('inv-what').innerHTML = kind === 'device' ? 'On your new device, open Clamor and choose <b>Scan a QR code</b> (phones), or <b>Join a swarm</b> and type the code:' : 'On their device, they open Clamor and choose <b>Scan a QR code</b> (phones), or <b>Join a swarm</b> and type their name and the code:';
     const tick = () => {
       const s = Math.max(0, Math.round((until - Date.now()) / 1000));
       if ($('inv-help')) $('inv-help').textContent = s ? `Works once, for the next ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}` : 'Expired: close this and press Add device again';

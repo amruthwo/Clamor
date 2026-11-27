@@ -302,7 +302,22 @@ async fn invite(State(shared): State<Shared>, Extension(caller): Extension<Calle
     sw.invite = Some(inv);
     let hint = if sw.join_hint.is_empty() { String::new() } else { format!("{} ", sw.join_hint) };
     println!("one-time code made for adding a device (valid {} minutes)", crate::coordinator::INVITE_SECS / 60);
-    Ok(Json(json!({ "code": code, "expires_in": crate::coordinator::INVITE_SECS, "swarm": sw.name, "command": format!("clamor-node join {hint}--code {code}") })))
+    let link = join_link(&sw.name, &sw.auth.profile.swarm_id, &sw.join_hint, &code);
+    Ok(Json(json!({ "code": code, "expires_in": crate::coordinator::INVITE_SECS, "swarm": sw.name, "command": format!("clamor-node join {hint}--code {code}"), "link": link, "qr_svg": qr_svg(&link) })))
+}
+
+/// What a QR code from "Add device" holds: the swarm, where its coordinator is, and the one-time
+/// code (the code proves both sides to each other, as when it is typed).
+pub fn join_link(swarm: &str, swarm_id: &str, addr: &str, code: &str) -> String {
+    let enc = |s: &str| s.bytes().map(|b| if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b':') { (b as char).to_string() } else { format!("%{b:02X}") }).collect::<String>();
+    format!("clamor://join?swarm={}&id={}&addr={}&code={}", enc(swarm), enc(swarm_id), enc(addr), enc(code))
+}
+
+/// A QR code of `text`, as an SVG (black on white, with the quiet zone scanners need).
+fn qr_svg(text: &str) -> Option<String> {
+    use qrcode::render::svg;
+    let code = qrcode::QrCode::with_error_correction_level(text.as_bytes(), qrcode::EcLevel::M).ok()?;
+    Some(code.render::<svg::Color>().min_dimensions(220, 220).dark_color(svg::Color("#000000")).light_color(svg::Color("#ffffff")).quiet_zone(true).build())
 }
 
 /// Remove a device from the swarm: withdraw its approval (it needs the passphrase to join
@@ -918,6 +933,14 @@ mod tests {
             }
         }
         assert!(checked > 40, "found only {checked} icon uses: has the markup changed?");
+    }
+
+    #[test]
+    fn join_links_carry_the_swarm_and_code() {
+        let l = super::join_link("Bea & Cal's home", "1a7e71cf", "192.168.1.40", "482-913");
+        assert_eq!(l, "clamor://join?swarm=Bea%20%26%20Cal%27s%20home&id=1a7e71cf&addr=192.168.1.40&code=482-913");
+        let svg = super::qr_svg(&l).unwrap();
+        assert!(svg.starts_with("<?xml") || svg.contains("<svg"), "{}", &svg[..60]);
     }
 
     /// The dashboard is served with its icons inlined (no network: swarms run offline on a LAN).

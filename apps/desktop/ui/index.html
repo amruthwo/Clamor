@@ -171,10 +171,11 @@ function render() {
   const pick = found.map((f, i) => `<button class="item st" onclick="chooseSwarm(${i})"><div class="tile-icon pri">${ic('hub')}</div><div class="text"><span class="h">${esc(f.name)}</span><span class="s">${f.known ? 'Joined before' : esc(f.addresses[0] || '')}</span></div>${ic('chevron_right')}</button>`).join('');
   const steps = {
     welcome: () => shell(0, 0, `<img class="hero-mark" src="icon.svg" alt=""><div class="center"><div class="headline-s">Welcome to Clamor</div><p class="body-l muted" style="margin:8px 0 0">Team up the computers and phones around you to run AI models too big for any one of them.</p></div>
-      <button class="choice st" onclick="goStep('join')"><div class="tile-icon pri">${ic('login')}</div><div><div class="title-m">Join a swarm</div><div class="muted">Someone nearby already runs Clamor</div></div></button>
+      ${mobile ? `<button class="choice st" onclick="scanQr()"><div class="tile-icon pri">${ic('qr_code_2')}</div><div><div class="title-m">Scan a QR code</div><div class="muted">From <b>Add device</b> on a device already in the swarm</div></div></button>` : ''}
+      <button class="choice st" onclick="goStep('join')"><div class="tile-icon ${mobile ? '' : 'pri'}">${ic('login')}</div><div><div class="title-m">Join a swarm</div><div class="muted">${mobile ? 'Pick it from the network and type the code' : 'Someone nearby already runs Clamor'}</div></div></button>
       <button class="choice st" onclick="goStep('start')"><div class="tile-icon">${ic('hub')}</div><div><div class="title-m">Start a swarm</div><div class="muted">This ${mobile ? 'phone' : 'computer'} becomes the coordinator</div></div></button>
       ${!mobile ? `<label class="item st" style="border-radius:16px;background:var(--surface-container-low)">${ic('power_settings_new')}<div class="text"><span class="h">Start Clamor when I log in</span><span class="s">In the background, in the tray</span></div><span class="switch"><input type="checkbox" id="autostart" ${autostart ? 'checked' : ''}></span></label>` : ''}
-      ${!st.node_found ? '<div class="err">clamor-node was not found next to this app. Reinstall Clamor.</div>' : ''}`),
+      ${!st.node_found ? '<div class="err">clamor-node was not found next to this app. Reinstall Clamor.</div>' : ''}<div class="err" id="scan-err"></div>`),
     join: () => shell(0, 3, `<div class="headline-s">Swarms nearby</div><p class="muted" style="margin:0">Found on this Wi-Fi network.</p>
       <div class="list">${pick || `<div class="item"><div class="text"><span class="s">${scanning ? 'Looking…' : 'No swarms found yet. Is this device on the same Wi-Fi as the swarm?'}</span></div></div>`}</div>
       <div class="row muted body-s">${scanning ? '<div class="spinner sm"></div>Still looking…' : `<button class="btn text st" onclick="scan()">${ic('refresh')}Look again</button>`}</div>
@@ -199,6 +200,32 @@ function render() {
   $('step').innerHTML = (steps[step] || steps.welcome)();
   const a = $('autostart'); if (a) a.onchange = () => setAutostart(a.checked);
 }
+// A join link from a QR code (Add device): clamor://join?swarm=..&id=..&addr=..&code=..
+function parseJoinLink(text) {
+  let u; try { u = new URL(String(text).trim()); } catch { return null; }
+  if (u.protocol !== 'clamor:') return null;
+  const p = new URLSearchParams(u.search || u.href.split('?')[1] || '');
+  const code = p.get('code'), addr = p.get('addr'), swarm = p.get('swarm');
+  if (!code || (!addr && !swarm)) return null;
+  return { name: swarm, address: addr, code };
+}
+window.scanQr = async () => {
+  const err = m => { if ($('scan-err')) $('scan-err').textContent = m; };
+  try {
+    const perm = await invoke('plugin:barcode-scanner|check_permissions').catch(() => ({}));
+    if (perm.camera !== 'granted') {
+      const r = await invoke('plugin:barcode-scanner|request_permissions');
+      if (r.camera !== 'granted') { err('Clamor needs the camera to scan the code. You can also choose Join a swarm and type it.'); return; }
+    }
+    const res = await invoke('plugin:barcode-scanner|scan', { windowed: false, formats: ['QR_CODE'] });
+    const j = parseJoinLink(res && res.content);
+    if (!j) { err("That QR code isn't a Clamor invitation. Use the one from Add device."); return; }
+    chosen = { name: j.name, address: j.address };
+    step = 'code'; render();
+    $('join-secret').value = j.code;
+    $('join-name').focus();
+  } catch (e) { if (!/cancel/i.test(String(e))) err(String(e)); }
+};
 window.goStep = s => { step = s; render(); if (s === 'join') scan(); };
 window.chooseSwarm = i => { chosen = { name: found[i].name, address: found[i].addresses[0] }; goStep('code'); setTimeout(() => $('join-secret')?.focus(), 50); };
 window.useAddress = () => { const a = $('join-addr').value.trim(); if (!a) { $('join-addr').focus(); return; } chosen = { name: null, address: a }; goStep('code'); };

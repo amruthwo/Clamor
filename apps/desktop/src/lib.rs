@@ -419,6 +419,8 @@ pub fn run() {
     let builder = builder
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec!["--background"])));
+    #[cfg(target_os = "android")]
+    let builder = builder.plugin(tauri_plugin_barcode_scanner::init());
     let builder = builder
         .plugin(tauri_plugin_opener::init())
         .manage(shared.clone())

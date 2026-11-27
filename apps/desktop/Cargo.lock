@@ -673,6 +673,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-autostart",
+ "tauri-plugin-barcode-scanner",
  "tauri-plugin-opener",
  "tauri-plugin-single-instance",
 ]
@@ -725,6 +726,7 @@ dependencies = [
  "hex",
  "libc",
  "mdns-sd",
+ "qrcode",
  "self-replace",
  "serde",
  "serde_json",
@@ -3505,6 +3507,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "qrcode"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ace1a365f55004297f2cf24acfd96d02966246ca423385273b58a7dc873ee14d"
+
+[[package]]
 name = "quick-xml"
 version = "0.42.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4626,6 +4634,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bce56ceb0a99b8ab5eebc977ba9ffc62391b862648cb9ab76fc8bc7231b8f7e2"
 dependencies = [
  "auto-launch",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-plugin",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "tauri-plugin-barcode-scanner"
+version = "2.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b57ad7e6ed3e8927205dade785400d9829b8208f59cfe24324fcb324f61482b2"
+dependencies = [
+ "log",
  "serde",
  "serde_json",
  "tauri",

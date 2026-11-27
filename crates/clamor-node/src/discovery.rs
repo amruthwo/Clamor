@@ -47,6 +47,16 @@ pub fn advertise(swarm_id: &str, name: &str, port: u16) -> Result<()> {
 }
 
 /// Swarms advertised on the network, collected for `wait`.
+/// An address another device can connect to: not a loopback (it would mean the device itself),
+/// and not an IPv6 link-local one (it needs the network interface, which an address alone does
+/// not carry: connecting fails with "Invalid argument").
+fn usable(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => !v4.is_loopback() && !v4.is_unspecified(),
+        IpAddr::V6(v6) => !v6.is_loopback() && !v6.is_unspecified() && (v6.segments()[0] & 0xffc0) != 0xfe80,
+    }
+}
+
 pub fn browse(wait: Duration) -> Result<Vec<Found>> {
     let daemon = ServiceDaemon::new()?;
     let rx = daemon.browse(SERVICE)?;
@@ -56,8 +66,7 @@ pub fn browse(wait: Duration) -> Result<Vec<Found>> {
         let Ok(ev) = rx.recv_timeout(left) else { break };
         if let ServiceEvent::ServiceResolved(s) = ev {
             let (Some(id), Some(name)) = (s.get_property_val_str("id"), s.get_property_val_str("name")) else { continue };
-            let mut ips: Vec<IpAddr> = s.addresses.iter().map(|a| a.to_ip_addr()).collect();
-            ips.sort_by_key(|ip| (!ip.is_ipv4(), ip.is_loopback(), *ip));
+            let ips: Vec<IpAddr> = s.addresses.iter().map(|a| a.to_ip_addr()).filter(usable).collect();
             let addrs: Vec<SocketAddr> = ips.into_iter().map(|ip| SocketAddr::new(ip, s.port)).collect();
             match found.iter_mut().find(|f| f.swarm_id == id) {
                 Some(f) => {
@@ -72,6 +81,11 @@ pub fn browse(wait: Duration) -> Result<Vec<Found>> {
         }
     }
     let _ = daemon.shutdown();
+    // Addresses arrive over several events: order the merged list, IPv4 first.
+    for f in &mut found {
+        f.addrs.sort_by_key(|a| (!a.is_ipv4(), *a));
+    }
+    found.retain(|f| !f.addrs.is_empty());
     Ok(found)
 }
 

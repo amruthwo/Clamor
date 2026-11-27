@@ -419,7 +419,7 @@ fn qr_svg(text: &str) -> Option<String> {
 async fn remove(State(shared): State<Shared>, Path(id): Path<String>) -> ApiResult {
     let id = NodeId(id);
     let mut sw = shared.lock().unwrap();
-    remove_device(&mut sw, id)
+    remove_device(&mut sw, id, Duration::ZERO)
 }
 
 /// A device leaving the swarm for good, from its own app (the request is signed with its key):
@@ -431,10 +431,13 @@ async fn leave(State(shared): State<Shared>, Extension(caller): Extension<Caller
         _ => return Err((StatusCode::BAD_REQUEST, "only a device's own app can make it leave (the coordinator stops or deletes the swarm instead)".into())),
     };
     println!("{id} is leaving the swarm");
-    remove_device(&mut sw, id)
+    // This request came through the leaving device's own dashboard: answer it before telling
+    // the device to go, or it can shut down before the answer gets back through it.
+    remove_device(&mut sw, id, Duration::from_millis(1500))
 }
 
-fn remove_device(sw: &mut crate::coordinator::Swarm, id: NodeId) -> ApiResult {
+/// Remove a device; it is told to drain (finish its work and leave) after `drain_after`.
+fn remove_device(sw: &mut crate::coordinator::Swarm, id: NodeId, drain_after: Duration) -> ApiResult {
     if id == sw.coordinator {
         return Err((StatusCode::BAD_REQUEST, "the coordinator cannot remove itself".into()));
     }
@@ -445,7 +448,14 @@ fn remove_device(sw: &mut crate::coordinator::Swarm, id: NodeId) -> ApiResult {
     let shared_key = key.as_deref().is_some_and(|k| sw.nodes.iter().any(|(other, e)| *other != id && e.key.as_deref() == Some(k)));
     let revoked = !shared_key && key.as_deref().is_some_and(|k| sw.auth.revoke(k));
     if let Some(tx) = tx {
-        let _ = tx.send(Message::Drain { grace_secs: 30 });
+        if drain_after.is_zero() {
+            let _ = tx.send(Message::Drain { grace_secs: 30 });
+        } else {
+            tokio::spawn(async move {
+                tokio::time::sleep(drain_after).await;
+                let _ = tx.send(Message::Drain { grace_secs: 30 });
+            });
+        }
     }
     sw.node_lost(&id, "removed from the swarm");
     sw.nodes.remove(&id);

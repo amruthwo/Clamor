@@ -157,3 +157,10 @@ jobs:
         with:
           name: android-arm64
           path: out/*
+      # The release build is shrunk and its names scrambled (R8): this file turns a crash's stack
+      # trace back into real names. Kept with the build, not published in releases.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-mapping
+          path: apps/desktop/gen/android/app/build/outputs/mapping/**/mapping.txt
+          if-no-files-found: warn

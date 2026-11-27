@@ -662,7 +662,7 @@ dependencies = [
 
 [[package]]
 name = "clamor-desktop"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "clamor-node",
@@ -679,7 +679,7 @@ dependencies = [
 
 [[package]]
 name = "clamor-engine-ggml"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -695,7 +695,7 @@ dependencies = [
 
 [[package]]
 name = "clamor-muster"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "clamor-proto",
@@ -708,7 +708,7 @@ dependencies = [
 
 [[package]]
 name = "clamor-node"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -742,7 +742,7 @@ dependencies = [
 
 [[package]]
 name = "clamor-proto"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -750,7 +750,7 @@ dependencies = [
 
 [[package]]
 name = "clamor-transport"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "bytes",

@@ -818,6 +818,12 @@ fn people_roles_and_signing_in() {
     assert_eq!(http(portal, "GET", &format!("/api/chats/{chat}"), None).0, 404, "not even the owner opens someone's personal chat");
     assert_eq!(http(portal, "DELETE", &format!("/api/chats/{chat}"), None).0, 404);
     assert_eq!(http(dash, "GET", "/api/chats/group", None).0, 200, "the group is everyone's");
+    // Deleting: Bea deletes her own chat; the group chat cannot be deleted.
+    let (_, c2) = http(dash, "POST", "/api/chats", None);
+    let chat2 = c2["id"].as_str().unwrap().to_string();
+    assert_eq!(http(dash, "DELETE", &format!("/api/chats/{chat2}"), None).0, 200);
+    assert_eq!(http(dash, "GET", &format!("/api/chats/{chat2}"), None).0, 404, "gone");
+    assert_eq!(http(dash, "DELETE", "/api/chats/group", None).0, 400);
 
     // The owner (the coordinator machine) sees both, and makes Bea an admin.
     let (_, ppl) = http(portal, "GET", "/api/people", None);
@@ -1005,6 +1011,10 @@ fn private_chats_stay_on_the_device() {
     let (st, text) = http_raw(dash, "POST", &format!("/api/private/chats/{id}/messages"), Some(json!({ "content": "again?" })));
     assert_eq!(st, 200);
     assert!(text.contains("off"), "a private chat needs its ring: {text}");
+    // Deleting a private chat removes it from this device.
+    assert_eq!(http(dash, "DELETE", &format!("/api/private/chats/{id}"), None).0, 200);
+    assert_eq!(http(dash, "GET", &format!("/api/private/chats/{id}"), None).0, 404);
+    assert!(http(dash, "GET", "/api/private/chats", None).1["conversations"].as_array().unwrap().iter().all(|c| c["id"] != id.as_str()));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

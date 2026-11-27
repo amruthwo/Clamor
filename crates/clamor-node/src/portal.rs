@@ -29,6 +29,9 @@ pub async fn serve(bind: String, tls_bind: String, shared: Shared) -> anyhow::Re
         .route("/icon.svg", get(icon))
         .route("/api/roster", get(roster))
         .route("/api/plan", get(plan_handler))
+        .route("/api/catalog", get(catalog_handler))
+        .route("/api/models/download", post(download_model))
+        .route("/api/models/cancel", post(cancel_download))
         .route("/api/muster", post(muster))
         .route("/api/nodes/{id}/drain", post(drain))
         .route("/api/nodes/{id}/remove", post(remove))
@@ -199,6 +202,93 @@ struct PlanQuery {
     topology: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct CatalogQuery {
+    quant: Option<String>,
+    ctx: Option<u32>,
+}
+
+/// The model picker: every model in Clamor's catalog, whether Clamor runs it, how it would run
+/// on this swarm right now (fits? how fast? over how many devices?), whether the swarm already
+/// has it, and downloads under way.
+async fn catalog_handler(State(shared): State<Shared>, Query(q): Query<CatalogQuery>) -> Json<Value> {
+    let quant = q.quant.unwrap_or_else(|| "q8".into());
+    let ctx = q.ctx.unwrap_or(8192).clamp(512, 1 << 20);
+    let (reports, coordinator, files) = {
+        let sw = shared.lock().unwrap();
+        let reports: Vec<NodeReport> = sw.nodes.values().filter(|e| matches!(e.state, NodeState::Ready | NodeState::Busy)).map(|e| e.report.clone()).collect();
+        let files: Vec<(String, String)> = sw.nodes.iter().flat_map(|(id, e)| e.models.iter().map(move |m| (m.name.clone(), id.0.clone()))).collect();
+        (reports, sw.coordinator.clone(), files)
+    };
+    let nodes = plan::plan_nodes(&reports, Some(&coordinator));
+    let downloads = crate::models::downloads();
+    let models: Vec<Value> = crate::models::catalog()
+        .iter()
+        .map(|m| {
+            let f = m.file(&quant);
+            let p = plan::plan_model_with(&m.spec(f), ctx, &nodes, plan::Topology::Ring);
+            let have: Vec<Value> = m.files.iter().filter_map(|cf| {
+                let on: Vec<&String> = files.iter().filter(|(n, _)| *n == cf.file).map(|(_, id)| id).collect();
+                (!on.is_empty()).then(|| json!({ "file": cf.file, "quant": cf.quant, "on": on }))
+            }).collect();
+            let why = m.support().err();
+            json!({
+                "id": m.id, "name": m.name, "maker": m.maker, "license": m.license, "about": m.about, "repo": m.repo,
+                "arch": m.arch, "params_b": m.params_b, "context": m.context, "caps": m.caps,
+                "runs": why.is_none(), "why": why,
+                "file": f, "quants": m.files.iter().map(|f| &f.quant).collect::<Vec<_>>(),
+                "fit": { "feasible": p.feasible, "decode_tok_s": p.decode_tok_s, "prefill_tok_s": p.prefill_tok_s, "devices": p.stages.len(), "need_bytes": p.need_bytes, "notes": p.notes },
+                "have": have,
+                "download": downloads.iter().find(|d| d.model == m.id),
+            })
+        })
+        .collect();
+    Json(json!({ "quant": quant, "ctx": ctx, "models": models }))
+}
+
+#[derive(Deserialize)]
+struct DownloadReq {
+    id: String,
+    quant: Option<String>,
+}
+
+/// Download a catalog model to the coordinator (admins). The other devices fetch the layers they
+/// run from it, as for any model.
+async fn download_model(State(shared): State<Shared>, Json(req): Json<DownloadReq>) -> ApiResult {
+    let m = crate::models::find(&req.id).ok_or((StatusCode::NOT_FOUND, format!("no model {:?} in the catalog", req.id)))?;
+    if let Err(why) = m.support() {
+        return Err((StatusCode::BAD_REQUEST, format!("Clamor cannot run {} yet: {why}", m.name)));
+    }
+    let (dir, coordinator) = {
+        let sw = shared.lock().unwrap();
+        (sw.engine.models_dir.clone(), sw.coordinator.clone())
+    };
+    let (dir2, shared2) = (dir.clone(), shared.clone());
+    let quant = req.quant.unwrap_or_else(|| "q8".into());
+    let f = crate::models::start(m, &quant, &dir, move || {
+        // The coordinator now has it: tell the swarm (and the dashboard).
+        let found = crate::share::scan(&dir2);
+        if let Some(e) = shared2.lock().unwrap().nodes.get_mut(&coordinator) {
+            e.models = found;
+        }
+    })
+    .map_err(|e| (StatusCode::CONFLICT, format!("{e:#}")))?;
+    Ok(Json(json!({ "ok": true, "file": f.file, "size": f.size })))
+}
+
+#[derive(Deserialize)]
+struct CancelReq {
+    file: String,
+}
+
+async fn cancel_download(Json(req): Json<CancelReq>) -> ApiResult {
+    if crate::models::cancel(&req.file) {
+        Ok(Json(json!({ "ok": true })))
+    } else {
+        Err((StatusCode::NOT_FOUND, format!("{} is not downloading", req.file)))
+    }
+}
+
 /// Plan over the devices that are in the swarm right now and fully mustered.
 async fn plan_handler(State(shared): State<Shared>, Query(q): Query<PlanQuery>) -> ApiResult {
     let quant = plan::Quant::parse(q.quant.as_deref().unwrap_or("q4")).ok_or((StatusCode::BAD_REQUEST, "quant must be q4, q6, q8 or f16".to_string()))?;
@@ -302,7 +392,22 @@ async fn invite(State(shared): State<Shared>, Extension(caller): Extension<Calle
     sw.invite = Some(inv);
     let hint = if sw.join_hint.is_empty() { String::new() } else { format!("{} ", sw.join_hint) };
     println!("one-time code made for adding a device (valid {} minutes)", crate::coordinator::INVITE_SECS / 60);
-    Ok(Json(json!({ "code": code, "expires_in": crate::coordinator::INVITE_SECS, "swarm": sw.name, "command": format!("clamor-node join {hint}--code {code}") })))
+    let link = join_link(&sw.name, &sw.auth.profile.swarm_id, &sw.join_hint, &code);
+    Ok(Json(json!({ "code": code, "expires_in": crate::coordinator::INVITE_SECS, "swarm": sw.name, "command": format!("clamor-node join {hint}--code {code}"), "link": link, "qr_svg": qr_svg(&link) })))
+}
+
+/// What a QR code from "Add device" holds: the swarm, where its coordinator is, and the one-time
+/// code (the code proves both sides to each other, as when it is typed).
+pub fn join_link(swarm: &str, swarm_id: &str, addr: &str, code: &str) -> String {
+    let enc = |s: &str| s.bytes().map(|b| if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b':') { (b as char).to_string() } else { format!("%{b:02X}") }).collect::<String>();
+    format!("clamor://join?swarm={}&id={}&addr={}&code={}", enc(swarm), enc(swarm_id), enc(addr), enc(code))
+}
+
+/// A QR code of `text`, as an SVG (black on white, with the quiet zone scanners need).
+fn qr_svg(text: &str) -> Option<String> {
+    use qrcode::render::svg;
+    let code = qrcode::QrCode::with_error_correction_level(text.as_bytes(), qrcode::EcLevel::M).ok()?;
+    Some(code.render::<svg::Color>().min_dimensions(220, 220).dark_color(svg::Color("#000000")).light_color(svg::Color("#ffffff")).quiet_zone(true).build())
 }
 
 /// Remove a device from the swarm: withdraw its approval (it needs the passphrase to join
@@ -918,6 +1023,14 @@ mod tests {
             }
         }
         assert!(checked > 40, "found only {checked} icon uses: has the markup changed?");
+    }
+
+    #[test]
+    fn join_links_carry_the_swarm_and_code() {
+        let l = super::join_link("Bea & Cal's home", "1a7e71cf", "192.168.1.40", "482-913");
+        assert_eq!(l, "clamor://join?swarm=Bea%20%26%20Cal%27s%20home&id=1a7e71cf&addr=192.168.1.40&code=482-913");
+        let svg = super::qr_svg(&l).unwrap();
+        assert!(svg.starts_with("<?xml") || svg.contains("<svg"), "{}", &svg[..60]);
     }
 
     /// The dashboard is served with its icons inlined (no network: swarms run offline on a LAN).

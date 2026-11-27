@@ -209,16 +209,16 @@ function parseJoinLink(text) {
   if (!code || (!addr && !swarm)) return null;
   return { name: swarm, address: addr, code };
 }
+// The Android app's scanner (Google's code scanner, MainActivity.scanQr): one result.
+const scanOnce = () => new Promise(resolve => { window.clamorScanned = r => { window.clamorScanned = null; resolve(r || {}); }; window.ClamorAndroid.scanQr(); });
 window.scanQr = async () => {
   const err = m => { if ($('scan-err')) $('scan-err').textContent = m; };
   try {
-    const perm = await invoke('plugin:barcode-scanner|check_permissions').catch(() => ({}));
-    if (perm.camera !== 'granted') {
-      const r = await invoke('plugin:barcode-scanner|request_permissions');
-      if (r.camera !== 'granted') { err('Clamor needs the camera to scan the code. You can also choose Join a swarm and type it.'); return; }
-    }
-    const res = await invoke('plugin:barcode-scanner|scan', { windowed: false, formats: ['QR_CODE'] });
-    const j = parseJoinLink(res && res.content);
+    if (!window.ClamorAndroid || !window.ClamorAndroid.scanQr) { err('Scanning needs the Clamor app on a phone. Choose Join a swarm and type the code.'); return; }
+    const res = await scanOnce();
+    if (res.cancelled) return;
+    if (res.error) { err("Couldn't scan: " + res.error + '. You can also choose Join a swarm and type the code.'); return; }
+    const j = parseJoinLink(res.content);
     if (!j) { err("That QR code isn't a Clamor invitation. Use the one from Add device."); return; }
     chosen = { name: j.name, address: j.address };
     step = 'code'; render();

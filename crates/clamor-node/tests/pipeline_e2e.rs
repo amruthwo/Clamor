@@ -585,7 +585,17 @@ fn devices_join_by_passphrase_and_rejoin_by_key() {
         let (_, r) = http(portal, "GET", "/api/roster", None);
         r["nodes"].as_array().is_some_and(|ns| ns.iter().any(|n| n["id"] == "m" && n["report"]["policy"]["max_ram_fraction"].as_f64().is_some_and(|f| (f - 0.3).abs() < 1e-6)))
     });
+    // The same device back under another name (a phone that used to report "localhost"): its
+    // old, offline entry goes, its name carries over, and it stays approved.
+    assert_eq!(http(portal, "POST", "/api/nodes/m/name", Some(json!({ "name": "Bea's phone" }))).0, 200);
     drop(m);
+    let state_of = |id: &str| http(portal, "GET", "/api/roster", None).1["nodes"].as_array().unwrap().iter().find(|n| n["id"] == id).map(|n| (n["state"].as_str().unwrap_or("").to_string(), n["label"].clone()));
+    wait_for("m to be away", Duration::from_secs(30), &[&coord], || state_of("m").is_some_and(|(s, _)| s == "away"));
+    let m2 = spawn(&dir, "member-renamed", &["join", "--id", "m2", "--models", &models, "--no-update-check", "--config-dir", &member_cfg, "--participation", "full", "--allow-battery"]);
+    wait_for("m2 to join", Duration::from_secs(60), &[&coord, &m2], || state_of("m2").is_some_and(|(s, _)| s == "ready"));
+    assert!(state_of("m").is_none(), "the old entry is gone");
+    assert_eq!(state_of("m2").unwrap().1, "Bea's phone", "its name carried over");
+    drop(m2);
     drop(coord);
 
     // Someone else's coordinator at the same address, even with the same swarm name: the device
@@ -1030,4 +1040,38 @@ fn walk(dir: &Path) -> Vec<PathBuf> {
         }
     }
     out
+}
+
+/// "Leave this swarm" in a device's app: the device asks for itself (signed with its key), the
+/// coordinator removes it, it exits gracefully, and its old key no longer gets it back in. The
+/// coordinator cannot "leave" its own swarm (it stops or deletes it instead).
+#[test]
+fn a_device_leaves_from_its_own_app() {
+    let dir = std::env::temp_dir().join(format!("clamor-node-leave-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("models")).unwrap();
+    let models = dir.join("models").display().to_string();
+    let (ctrl, portal, tls, dash, data) = (free_port(), free_port(), free_port(), free_port(), free_port_run(1));
+    let (ctrl_s, dash_s) = (format!("127.0.0.1:{ctrl}"), format!("127.0.0.1:{dash}"));
+    let coord = spawn(&dir, "coordinator", &["coordinator", "--passphrase", "leave-test", "--id", "coord", "--bind", &ctrl_s, "--portal", &format!("127.0.0.1:{portal}"), "--portal-tls", &format!("127.0.0.1:{tls}"), "--models", &models, "--data-port", &data.to_string(), "--quick-bench", "--no-update-check", "--config-dir", &cfg_dir(&dir, "coordinator"), "--participation", "full", "--allow-battery"]);
+    wait_for("the portal", Duration::from_secs(120), &[&coord], || TcpStream::connect(("127.0.0.1", portal)).is_ok());
+    let member_cfg = cfg_dir(&dir, "member");
+    let member = |name: &'static str, extra: &[&str]| {
+        let mut args = vec!["join", ctrl_s.as_str()];
+        args.extend_from_slice(extra);
+        args.extend_from_slice(&["--name", "Bea", "--dashboard", &dash_s, "--id", "m", "--models", &models, "--no-update-check", "--config-dir", &member_cfg, "--participation", "full", "--allow-battery"]);
+        spawn(&dir, name, &args)
+    };
+    let mut m = member("member", &["--passphrase", "leave-test"]);
+    let in_roster = |id: &str| http(portal, "GET", "/api/roster", None).1["nodes"].as_array().unwrap().iter().any(|n| n["id"] == id);
+    wait_for("m to join", Duration::from_secs(60), &[&coord, &m], || in_roster("m") && TcpStream::connect(("127.0.0.1", dash)).is_ok() && http(dash, "GET", "/api/me", None).0 == 200);
+    assert_eq!(http(portal, "POST", "/api/me/leave", None).0, 400, "the coordinator does not leave its own swarm");
+    let (st, r) = http(dash, "POST", "/api/me/leave", None);
+    assert_eq!((st, r["revoked"].as_bool()), (200, Some(true)), "{r}");
+    assert!(exits(&mut m, Duration::from_secs(30)), "the device leaves gracefully\n{}", m.log());
+    assert!(!in_roster("m"));
+    let mut again = member("member-again", &[]);
+    assert!(!exits(&mut again, Duration::from_secs(20)));
+    assert!(again.log().contains("not approved"), "{}", again.log());
+    let _ = std::fs::remove_dir_all(&dir);
 }

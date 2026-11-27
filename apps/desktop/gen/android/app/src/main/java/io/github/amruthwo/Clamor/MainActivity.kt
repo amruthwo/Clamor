@@ -14,6 +14,10 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.content.FileProvider
 import java.io.File
+import com.google.mlkit.vision.barcode.common.Barcode
+import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
+import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
+import org.json.JSONObject
 
 class MainActivity : TauriActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
@@ -57,13 +61,34 @@ class MainActivity : TauriActivity() {
     }
   }
 
+  private var web: WebView? = null
+
   override fun onWebViewCreate(webView: WebView) {
+    web = webView
     webView.addJavascriptInterface(Updates(), "ClamorAndroid")
+  }
+
+  /** The result of a QR scan, to the page's window.clamorScanned(result). */
+  private fun scanned(result: JSONObject) {
+    runOnUiThread { web?.evaluateJavascript("window.clamorScanned && window.clamorScanned($result)", null) }
   }
 
   /** For the app's updater: hand a downloaded (and already verified) APK to Android's installer,
    *  which asks the person "Update this app?". Only files the app downloaded are accepted. */
   inner class Updates {
+    /** "Scan a QR code" (joining a swarm): Google's code scanner shows its own camera screen, so
+     *  Clamor needs no camera permission. Answers with {content}, {cancelled} or {error}. */
+    @JavascriptInterface
+    fun scanQr() {
+      runOnUiThread {
+        val options = GmsBarcodeScannerOptions.Builder().setBarcodeFormats(Barcode.FORMAT_QR_CODE).build()
+        GmsBarcodeScanning.getClient(this@MainActivity, options).startScan()
+          .addOnSuccessListener { code -> scanned(JSONObject().put("content", code.rawValue ?: "")) }
+          .addOnCanceledListener { scanned(JSONObject().put("cancelled", true)) }
+          .addOnFailureListener { e -> scanned(JSONObject().put("error", e.message ?: e.toString())) }
+      }
+    }
+
     @JavascriptInterface
     fun installApk(path: String): String {
       return try {

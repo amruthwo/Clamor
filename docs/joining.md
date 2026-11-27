@@ -109,11 +109,15 @@ to also list the swarms announced on the network right now.
 
 - **For now:** stop `clamor-node` (Ctrl-C). The device finishes what it is doing and leaves; it
   can come back any time with `clamor-node join`.
-- **For good:** `clamor-node leave home` makes the device forget the swarm. Joining it again needs
-  the passphrase. Add `--purge` to also delete the model pieces it downloaded for that swarm
+- **For good:** in the app, **Settings → Change or leave swarm → Leave**: the swarm removes the
+  device (its key is no longer approved), it finishes its work and leaves, and it forgets the
+  swarm. On the command line, `clamor-node leave home` makes the device forget the swarm (an
+  admin removes it from the swarm's side). Joining it again needs a new invitation or the
+  passphrase. Add `--purge` to also delete the model pieces it downloaded for that swarm
   (pieces another swarm also uses are kept).
-- **Removing someone else's device:** in the dashboard, open the device's **Settings** and press
-  **Remove from swarm**. It finishes its work and leaves, and its key is no longer approved: it
+- **Removing someone else's device:** on **Swarm** or **Coord.**, tap the device and press
+  **Remove from swarm** (admins). An offline device shows **Forget this device** instead, which
+  takes it off the list. It finishes its work and leaves, and its key is no longer approved: it
   needs the passphrase to join again. To keep it out for good, also change the passphrase
   (restart the coordinator with `--passphrase "new words"`).
 - **Deleting a swarm you coordinate:** `clamor-node leave home --delete-swarm` deletes its

@@ -31,6 +31,11 @@ const GPT2: &str = r"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]
 const LLAMA3: &str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
 const QWEN2: &str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
 
+/// Whether this tokenizer handles a model's `tokenizer.ggml.pre` (its pre-tokenizer).
+pub fn supports_pre(pre: &str) -> bool {
+    pre_rules(pre).is_some()
+}
+
 /// (regexes applied in sequence, ignore_merges) for a `tokenizer.ggml.pre` value.
 fn pre_rules(pre: &str) -> Option<(&'static [&'static str], bool)> {
     Some(match pre {

@@ -26,6 +26,7 @@ type ApiResult = Result<Json<Value>, (StatusCode, String)>;
 pub async fn serve(bind: String, tls_bind: String, shared: Shared) -> anyhow::Result<()> {
     let app = Router::new()
         .route("/", get(index))
+        .route("/icon.svg", get(icon))
         .route("/api/roster", get(roster))
         .route("/api/plan", get(plan_handler))
         .route("/api/muster", post(muster))
@@ -120,8 +121,15 @@ impl axum::serve::Listener for TlsListener {
     }
 }
 
+/// The dashboard, with its icons (Material Symbols, shipped inside Clamor: no network needed).
 async fn index() -> Html<&'static str> {
-    Html(include_str!("portal.html"))
+    static PAGE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| include_str!("portal.html").replacen("<!--ICONS-->", include_str!("icons.svg"), 1));
+    Html(PAGE.as_str())
+}
+
+/// The Clamor icon (header and browser tab).
+async fn icon() -> impl axum::response::IntoResponse {
+    ([(axum::http::header::CONTENT_TYPE, "image/svg+xml"), (axum::http::header::CACHE_CONTROL, "max-age=86400")], include_str!("../../../assets/clamor-icon.svg"))
 }
 
 #[derive(Serialize)]
@@ -451,7 +459,7 @@ async fn me(State(shared): State<Shared>, Extension(caller): Extension<Caller>) 
     let pending = if caller.how != "session" || true { sw.auth.signins.iter().filter(|s| s.approved_by.is_none() && s.created_unix + crate::people::SIGNIN_SECS > unix_now()).count() } else { 0 };
     let has_pin = sw.auth.profile.person(&caller.person).is_some_and(|p| p.pin.is_some());
     let reply_style = sw.auth.profile.person(&caller.person).and_then(|p| p.reply_style.clone()).unwrap_or_else(|| "stream".into());
-    Json(json!({ "id": caller.person, "name": caller.name, "role": caller.role, "how": caller.how, "has_pin": has_pin, "pending_signins": pending, "swarm": sw.name, "reply_style": reply_style }))
+    Json(json!({ "id": caller.person, "name": caller.name, "role": caller.role, "how": caller.how, "device": caller.device, "has_pin": has_pin, "pending_signins": pending, "swarm": sw.name, "reply_style": reply_style }))
 }
 
 #[derive(Deserialize)]
@@ -855,4 +863,37 @@ async fn overview(State(shared): State<Shared>, Extension(caller): Extension<Cal
         "memory": { "pooled_bytes": pooled },
         "mine": mine,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    /// Every icon the dashboard and the app use (`#i-NAME`, also built in JavaScript as
+    /// `ic('NAME')`) is in the icon sprite that ships with them; a missing one shows as a blank.
+    #[test]
+    fn every_icon_used_is_shipped() {
+        let sprite = include_str!("icons.svg");
+        let app_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/desktop/ui");
+        let app_sprite = std::fs::read_to_string(app_dir.join("icons.svg")).unwrap();
+        assert_eq!(sprite, app_sprite, "apps/desktop/ui/icons.svg differs: run tools/gen-icons.py");
+        let pages = [("portal.html", include_str!("portal.html").to_string()), ("app", std::fs::read_to_string(app_dir.join("index.html")).unwrap())];
+        let names = |re_start: &str, page: &str| -> Vec<String> {
+            page.match_indices(re_start).map(|(i, _)| page[i + re_start.len()..].chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-').collect::<String>()).filter(|n| !n.is_empty()).collect()
+        };
+        let mut checked = 0;
+        for (which, page) in &pages {
+            for n in names("#i-", page).into_iter().chain(names("ic('", page)) {
+                assert!(sprite.contains(&format!("id=\"i-{n}\"")), "{which} uses icon {n:?}, which is not in icons.svg (add it to tools/gen-icons.py)");
+                checked += 1;
+            }
+        }
+        assert!(checked > 40, "found only {checked} icon uses: has the markup changed?");
+    }
+
+    /// The dashboard is served with its icons inlined (no network: swarms run offline on a LAN).
+    #[tokio::test]
+    async fn the_page_carries_its_icons() {
+        let page = super::index().await.0;
+        assert!(!page.contains("<!--ICONS-->"));
+        assert!(page.contains("<symbol id=\"i-crab-fill\""));
+    }
 }

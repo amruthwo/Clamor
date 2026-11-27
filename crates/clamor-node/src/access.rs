@@ -30,6 +30,9 @@ pub struct Caller {
     pub role: Role,
     /// How they were recognised: "coordinator", "device" or "session".
     pub how: &'static str,
+    /// The device asking, when known: the coordinator itself, or a device that signed the request
+    /// (its app). A browser session does not say.
+    pub device: Option<String>,
 }
 
 pub const SESSION_COOKIE: &str = "clamor_session";
@@ -46,25 +49,28 @@ fn loopback_is_owner() -> bool {
 
 pub fn identify(sw: &Swarm, peer: SocketAddr, via: Via, method: &Method, path_q: &str, headers: &HeaderMap) -> Option<Caller> {
     let profile = &sw.auth.profile;
-    let as_caller = |id: &str, how| profile.person(id).map(|p| Caller { person: p.id.clone(), name: p.name.clone(), role: p.role, how });
+    let as_caller = |id: &str, how, device: Option<String>| profile.person(id).map(|p| Caller { person: p.id.clone(), name: p.name.clone(), role: p.role, how, device });
     // A device's signature (only over TLS: the body is not signed, TLS protects it).
     if via == Via::Tls {
         if let Some(h) = headers.get(crate::auth::SHARE_AUTH_HEADER).and_then(|v| v.to_str().ok()) {
             let signed = format!("{method} {path_q}");
             return crate::auth::verify_share_request(h, &signed, |k| profile.approved.iter().any(|d| d.key == k))
                 .ok()
-                .and_then(|key| profile.person_of_key(&key).map(|p| p.id.clone()))
-                .and_then(|id| as_caller(&id, "device"));
+                .and_then(|key| {
+                    let device = profile.approved.iter().find(|d| d.key == key).map(|d| d.name.clone());
+                    profile.person_of_key(&key).map(|p| (p.id.clone(), device))
+                })
+                .and_then(|(id, device)| as_caller(&id, "device", device));
         }
     }
     // A browser that signed in.
     if let Some(person) = session_token(headers).and_then(|t| sw.auth.sessions.person(&t, clamor_proto::unix_now())) {
-        return as_caller(&person, "session");
+        return as_caller(&person, "session", None);
     }
     // The coordinator machine itself.
     if peer.ip().is_loopback() && loopback_is_owner() {
         let owner = profile.people.iter().find(|p| p.role == Role::Owner).map(|p| p.id.clone()).unwrap_or_else(|| OWNER_ID.into());
-        return as_caller(&owner, "coordinator");
+        return as_caller(&owner, "coordinator", Some(sw.coordinator.0.clone()));
     }
     None
 }
@@ -74,7 +80,7 @@ pub fn required(method: &Method, path: &str) -> Option<Role> {
     let p: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     let m = method.as_str();
     match (m, p.as_slice()) {
-        ("GET", [""]) | ("GET", ["favicon.ico"]) => None,
+        ("GET", [""]) | ("GET", ["favicon.ico"]) | ("GET", ["icon.svg"]) => None,
         ("POST", ["api", "login", "start"]) | ("GET", ["api", "login", "poll"]) | ("POST", ["api", "login", "pin"]) => None,
         ("POST", ["api", "people", _, "role"]) => Some(Role::Owner),
         ("POST", ["api", "muster"])

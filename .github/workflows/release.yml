@@ -9,7 +9,7 @@ on:
     tags: ["v*"]
   workflow_dispatch:
   pull_request:
-    paths: [".github/workflows/release.yml", "scripts/package-release.sh", "scripts/describe-installers.sh", "crates/clamor-node/build.rs", "crates/clamor-engine-ggml/build.rs", "crates/clamor-node/src/update.rs"]
+    paths: [".github/workflows/release.yml", "scripts/package-release.sh", "scripts/describe-installers.sh", ".github/workflows/desktop.yml", "crates/clamor-node/build.rs", "crates/clamor-engine-ggml/build.rs", "crates/clamor-node/src/update.rs"]
 
 permissions:
   contents: write
@@ -96,6 +96,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with: { path: dist, merge-multiple: true }
+      - name: Keep build-only files out of the release
+        # The Android R8 mapping (for reading crash traces) stays with the workflow run.
+        run: find dist -name 'mapping.txt' -print -delete
       - name: Check the tag matches the version
         if: startsWith(github.ref, 'refs/tags/v')
         run: |

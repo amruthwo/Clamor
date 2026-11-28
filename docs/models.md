@@ -43,11 +43,15 @@ be asked to delete, and are listed when that happens.
 
 ## What Clamor runs today
 
-Clamor's engine runs the **Llama** and **Qwen2** families (Llama 3.x, Qwen2.5, SmolLM2 and
-similar). Models with other architectures or tokenizers (Qwen3, Gemma 3, Mistral's newer
-models, the DeepSeek R1 Qwen distills, embedding models) are listed with the reason they do not
-run yet, so you can see what is coming. Vision, embeddings and showing a model's "thinking"
-nicely need more engine work.
+Clamor's engine runs the **Llama** and **Qwen2** families (Llama 3.x, Qwen2.5, SmolLM2, and the
+DeepSeek R1 distills of Llama and Qwen). Models with other architectures or tokenizers (Qwen3,
+Gemma 3, Mistral's newer models, embedding models) are listed with the reason they do not run
+yet, so you can see what is coming. Vision and embeddings need more engine work.
+
+**Thinking models** (marked *Thinking*, such as DeepSeek R1) reason step by step before they
+answer. In the chat, the reasoning folds into a small "Thought it through" line above the
+answer: tap it to read it. Through the [API](api.md), apps get the reply as the model wrote it,
+reasoning included, between `<think>` and `</think>`.
 
 ## The catalog
 

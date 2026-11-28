@@ -212,6 +212,10 @@ table.data td.wrap { white-space:normal; min-width:180px; }
 .bot-avatar { width:32px; height:32px; border-radius:10px; flex:none; }
 .bot-avatar.thinking { animation:breathe 1.4s ease-in-out infinite; }
 @keyframes breathe { 0%,100% { transform:scale(1); } 50% { transform:scale(.86); filter:saturate(1.4) brightness(1.1); } }
+details.think { margin:2px 0 8px; }
+details.think summary { cursor:pointer; color:var(--on-surface-variant); font-size:13px; display:inline-flex; align-items:center; gap:6px; list-style:none; padding:4px 10px; border-radius:16px; background:var(--surface-container-high); }
+details.think summary::-webkit-details-marker { display:none; }
+.think-body { margin-top:8px; padding:4px 0 4px 12px; border-left:2px solid var(--outline-variant); color:var(--on-surface-variant); font-size:14px; line-height:21px; white-space:pre-wrap; max-height:320px; overflow:auto; }
 .typing { display:inline-flex; gap:4px; padding:8px 0; }
 .typing i { width:8px; height:8px; border-radius:50%; background:var(--on-surface-variant); opacity:.4; animation:dot 1.2s infinite; }
 .typing i:nth-child(2) { animation-delay:.15s; } .typing i:nth-child(3) { animation-delay:.3s; }
@@ -1016,9 +1020,30 @@ function chatMeta() {
   if (isPrivate(chatId)) return [privateList.find(c => 'p:' + c.id === chatId)?.title || 'Private chat', 'Private · stays on this device'];
   return [(chatList?.conversations || []).find(c => c.id === chatId)?.title || 'Chat', 'Only you, on any of your devices'];
 }
+// Reasoning models write their thinking first, in <think>...</think> (some templates open the
+// tag in the prompt, so only "</think>" appears). Fold it away above the answer.
+function splitThink(text) {
+  let t = String(text || '');
+  const opened = /^\s*<think>/.test(t);
+  if (opened) t = t.replace(/^\s*<think>/, '');
+  const end = t.indexOf('</think>');
+  if (end >= 0) return { think: t.slice(0, end).trim(), answer: t.slice(end + 8).replace(/^\s+/, ''), thinking: false };
+  if (opened) return { think: t.trim(), answer: '', thinking: true };
+  return { think: null, answer: t, thinking: false };
+}
+let thinkOpen = false;
+function thinkHtml(think, thinking, live) {
+  if (think === null) return '';
+  const n = words(think);
+  const label = thinking ? `Thinking… ${plural(n, 'word')}` : `Thought it through · ${plural(n, 'word')}`;
+  return `<details class="think"${live && thinkOpen ? ' open' : ''}${live ? ' ontoggle="thinkOpen = this.open"' : ''}><summary>${ic('psychology', 's18')}${label}</summary><div class="think-body">${esc(think) || '…'}</div></details>`;
+}
 function msgHtml(m) {
   if (m.error) return `<div class="m bot err"><img class="bot-avatar" src="/icon.svg" alt=""><div class="body"><div class="who">Clamor</div>Couldn't answer: ${esc(m.error)}</div></div>`;
-  if (m.role !== 'user') return `<div class="m bot"><img class="bot-avatar" src="/icon.svg" alt=""><div class="body"><div class="who">Clamor${m.stopped ? ' · stopped' : ''}</div>${esc(m.content)}${m.tok_s ? `<span class="meta">${m.tok_s.toFixed(1)} tok/s</span>` : ''}<div class="msg-actions"><button type="button" class="icon-btn st" title="Copy" data-t="${esc(m.content)}" onclick="copyText(this.dataset.t)">${ic('content_copy')}</button></div></div></div>`;
+  if (m.role !== 'user') {
+    const t = splitThink(m.content);
+    return `<div class="m bot"><img class="bot-avatar" src="/icon.svg" alt=""><div class="body"><div class="who">Clamor${m.stopped ? ' · stopped' : ''}</div>${thinkHtml(t.think, false, false)}${esc(t.answer)}${m.tok_s ? `<span class="meta">${m.tok_s.toFixed(1)} tok/s</span>` : ''}<div class="msg-actions"><button type="button" class="icon-btn st" title="Copy" data-t="${esc(t.answer || m.content)}" onclick="copyText(this.dataset.t)">${ic('content_copy')}</button></div></div></div>`;
+  }
   const mine = chatId !== 'group' || !m.by || m.by === me.name;
   if (mine) return `<div class="m me"><div class="col"><div class="bubble">${esc(m.content)}</div></div></div>`;
   return `<div class="m other">${avatar(m.by, 'sm')}<div class="col"><div class="who">${esc(m.by)}</div><div class="bubble">${esc(m.content)}</div></div></div>`;
@@ -1027,7 +1052,10 @@ window.copyText = t => { navigator.clipboard?.writeText(t).then(() => snack('Cop
 function liveHtml(text) {
   const whole = me && me.reply_style === 'whole';
   const n = words(text || '');
-  const body = !text ? '<span class="typing"><i></i><i></i><i></i></span>' : whole ? `<span class="muted">Writing… ${plural(n, 'word')} so far</span>` : esc(text);
+  const t = splitThink(text);
+  const body = !text ? '<span class="typing"><i></i><i></i><i></i></span>'
+    : whole ? `<span class="muted">${t.thinking ? 'Thinking… ' + plural(words(t.think), 'word') : `Writing… ${plural(words(t.answer || ''), 'word')} so far`}</span>`
+    : thinkHtml(t.think, t.thinking, true) + esc(t.answer);
   return `<div class="m bot" id="live"><img class="bot-avatar thinking" src="/icon.svg" alt=""><div class="body"><div class="who">Clamor</div>${body}</div></div>`;
 }
 // Follow new text only while the reader is at the bottom; reading further up stays put.
@@ -1117,6 +1145,7 @@ $('composer').onsubmit = async e => {
   if (!$('msgs-inner').querySelector('.m')) $('msgs-inner').innerHTML = '';
   $('msgs-inner').insertAdjacentHTML('beforeend', msgHtml({ role: 'user', content: text, by: me.name }));
   toEnd();
+  thinkOpen = false;
   setLive('');
   toEnd();
   try {

@@ -197,6 +197,8 @@ pub struct PendingSignIn {
     pub approved_by: Option<String>,
     /// From where (shown to the approver).
     pub from: String,
+    /// Someone signed in pressed "Not me": the browser is told, and the code no longer works.
+    pub declined: bool,
 }
 
 pub const SIGNIN_SECS: u64 = 300;

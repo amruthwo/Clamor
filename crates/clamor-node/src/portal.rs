@@ -60,6 +60,7 @@ pub async fn serve(bind: String, tls_bind: String, shared: Shared) -> anyhow::Re
         .route("/api/login/pin", post(login_pin))
         .route("/api/login/pending", get(login_pending))
         .route("/api/login/approve", post(login_approve))
+        .route("/api/login/decline", post(login_decline))
         .route("/api/people", get(people))
         .route("/api/people/{id}/role", post(person_role))
         .route("/api/people/{id}/remove", post(person_remove))
@@ -747,7 +748,7 @@ fn person_json(sw: &crate::coordinator::Swarm, p: &crate::people::Person) -> Val
 
 async fn me(State(shared): State<Shared>, Extension(caller): Extension<Caller>) -> Json<Value> {
     let sw = shared.lock().unwrap();
-    let pending = if caller.how != "session" || true { sw.auth.signins.iter().filter(|s| s.approved_by.is_none() && s.created_unix + crate::people::SIGNIN_SECS > unix_now()).count() } else { 0 };
+    let pending = if caller.how != "session" || true { sw.auth.signins.iter().filter(|s| s.approved_by.is_none() && !s.declined && s.created_unix + crate::people::SIGNIN_SECS > unix_now()).count() } else { 0 };
     let has_pin = sw.auth.profile.person(&caller.person).is_some_and(|p| p.pin.is_some());
     let reply_style = sw.auth.profile.person(&caller.person).and_then(|p| p.reply_style.clone()).unwrap_or_else(|| "stream".into());
     Json(json!({ "id": caller.person, "name": caller.name, "role": caller.role, "how": caller.how, "device": caller.device, "has_pin": has_pin, "pending_signins": pending, "swarm": sw.name, "reply_style": reply_style,
@@ -834,7 +835,7 @@ async fn login_start(State(shared): State<Shared>, Extension(peer): Extension<st
     let now = unix_now();
     sw.auth.signins.retain(|s| s.created_unix + crate::people::SIGNIN_SECS > now);
     sw.auth.signins.truncate(20);
-    let s = crate::people::PendingSignIn { id: hex::encode(crate::auth::random_bytes::<16>()), code: crate::people::six_digits(), created_unix: now, approved_by: None, from: peer.ip().to_string() };
+    let s = crate::people::PendingSignIn { id: hex::encode(crate::auth::random_bytes::<16>()), code: crate::people::six_digits(), created_unix: now, approved_by: None, from: peer.ip().to_string(), declined: false };
     let out = json!({ "id": s.id, "code": s.code, "expires_in": crate::people::SIGNIN_SECS });
     sw.auth.signins.push(s);
     Json(out)
@@ -853,6 +854,10 @@ async fn login_poll(State(shared): State<Shared>, Extension(via): Extension<crat
     let Some(i) = sw.auth.signins.iter().position(|s| s.id == q.id && s.created_unix + crate::people::SIGNIN_SECS > now) else {
         return (StatusCode::GONE, "this sign-in code has expired: start again").into_response();
     };
+    if sw.auth.signins[i].declined {
+        sw.auth.signins.remove(i);
+        return (StatusCode::FORBIDDEN, "this sign-in was rejected on another device").into_response();
+    }
     let Some(person) = sw.auth.signins[i].approved_by.clone() else {
         return Json(json!({ "approved": false })).into_response();
     };
@@ -898,7 +903,20 @@ async fn login_pin(State(shared): State<Shared>, Extension(via): Extension<crate
 async fn login_pending(State(shared): State<Shared>) -> Json<Value> {
     let sw = shared.lock().unwrap();
     let now = unix_now();
-    let list: Vec<Value> = sw.auth.signins.iter().filter(|s| s.approved_by.is_none() && s.created_unix + crate::people::SIGNIN_SECS > now).map(|s| json!({ "id": s.id, "code": s.code, "from": s.from, "age_secs": now - s.created_unix })).collect();
+    // Name the device the browser is on when it is one of the swarm's (same address), or this
+    // computer: "on Living room PC" says more than an IP address.
+    let list: Vec<Value> = sw
+        .auth
+        .signins
+        .iter()
+        .filter(|s| s.approved_by.is_none() && !s.declined && s.created_unix + crate::people::SIGNIN_SECS > now)
+        .map(|s| {
+            let ip: Option<std::net::IpAddr> = s.from.parse().ok();
+            let local = ip.is_some_and(|ip| ip.is_loopback() || sw.nodes.values().any(|n| n.coord_ip == Some(ip)));
+            let device = ip.and_then(|ip| sw.nodes.iter().find(|(_, n)| n.peer_ip == Some(ip)).map(|(id, _)| id.0.clone()));
+            json!({ "id": s.id, "code": s.code, "from": s.from, "device": device, "local": local, "age_secs": now - s.created_unix })
+        })
+        .collect();
     Json(json!({ "pending": list }))
 }
 
@@ -917,10 +935,25 @@ async fn login_approve(State(shared): State<Shared>, Extension(caller): Extensio
         .auth
         .signins
         .iter_mut()
-        .find(|s| s.approved_by.is_none() && s.created_unix + crate::people::SIGNIN_SECS > now && s.code.chars().filter(|c| c.is_ascii_digit()).collect::<String>() == want)
+        .find(|s| s.approved_by.is_none() && !s.declined && s.created_unix + crate::people::SIGNIN_SECS > now && s.code.chars().filter(|c| c.is_ascii_digit()).collect::<String>() == want)
         .ok_or((StatusCode::NOT_FOUND, "no browser is waiting with that code".to_string()))?;
     s.approved_by = Some(caller.person.clone());
     println!("{} approved a sign-in from {}", caller.name, s.from);
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// "Not me": turn a browser's sign-in down. Anyone signed in can (it only ever stops a sign-in).
+async fn login_decline(State(shared): State<Shared>, Extension(caller): Extension<Caller>, Json(req): Json<ApproveReq>) -> ApiResult {
+    let mut sw = shared.lock().unwrap();
+    let want: String = req.code.chars().filter(|c| c.is_ascii_digit()).collect();
+    let s = sw
+        .auth
+        .signins
+        .iter_mut()
+        .find(|s| s.approved_by.is_none() && !s.declined && s.code.chars().filter(|c| c.is_ascii_digit()).collect::<String>() == want)
+        .ok_or((StatusCode::NOT_FOUND, "no browser is waiting with that code".to_string()))?;
+    s.declined = true;
+    println!("{} turned down a sign-in from {}", caller.name, s.from);
     Ok(Json(json!({ "ok": true })))
 }
 

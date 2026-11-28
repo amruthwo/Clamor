@@ -102,9 +102,13 @@ fn cfg_dir(dir: &Path, name: &str) -> String {
 }
 
 fn spawn(dir: &Path, name: &'static str, args: &[&str]) -> Proc {
+    spawn_env(dir, name, args, &[])
+}
+
+fn spawn_env(dir: &Path, name: &'static str, args: &[&str], env: &[(&str, &str)]) -> Proc {
     let log = dir.join(format!("{name}.log"));
     let f = std::fs::File::create(&log).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_clamor-node")).args(args).stdout(Stdio::from(f.try_clone().unwrap())).stderr(Stdio::from(f)).spawn().unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_clamor-node")).args(args).envs(env.iter().copied()).stdout(Stdio::from(f.try_clone().unwrap())).stderr(Stdio::from(f)).spawn().unwrap();
     Proc(child, name, log)
 }
 
@@ -1089,5 +1093,62 @@ fn a_device_leaves_from_its_own_app() {
     let mut again = member("member-again", &[]);
     assert!(!exits(&mut again, Duration::from_secs(20)));
     assert!(again.log().contains("not approved"), "{}", again.log());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `http`, with an `Authorization: Bearer` key.
+fn http_key(port: u16, method: &str, path: &str, key: &str, body: Option<Value>) -> (u16, Value) {
+    let body = body.map(|b| b.to_string()).unwrap_or_default();
+    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(120))).unwrap();
+    write!(s, "{method} {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {key}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+    let mut out = String::new();
+    s.read_to_string(&mut out).unwrap();
+    let status: u16 = out.split(' ').nth(1).and_then(|c| c.parse().ok()).unwrap_or(0);
+    let payload = out.split_once("\r\n\r\n").map(|(_, p)| p.to_string()).unwrap_or_default();
+    (status, serde_json::from_str(&payload).unwrap_or_else(|_| json!({ "text": payload })))
+}
+
+/// The OpenAI-compatible API: a person makes an API key (on their device's dashboard); the key
+/// works for /v1 from anywhere, and for nothing else; no key, or a revoked one, gets OpenAI's
+/// error. (No model runs here: chat completions say so, in OpenAI's shape.)
+#[test]
+fn the_openai_api_needs_a_key() {
+    let dir = std::env::temp_dir().join(format!("clamor-node-openai-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("models")).unwrap();
+    let models = dir.join("models").display().to_string();
+    let (ctrl, portal, tls, dash, data) = (free_port(), free_port(), free_port(), free_port(), free_port_run(1));
+    let ctrl_s = format!("127.0.0.1:{ctrl}");
+    // Not the coordinator machine's owner: requests to the portal need a key or a sign-in.
+    let coord = spawn_env(&dir, "coordinator", &["coordinator", "--passphrase", "api-key-words", "--id", "coord", "--bind", &ctrl_s, "--portal", &format!("127.0.0.1:{portal}"), "--portal-tls", &format!("127.0.0.1:{tls}"), "--models", &models, "--data-port", &data.to_string(), "--quick-bench", "--no-update-check", "--config-dir", &cfg_dir(&dir, "coordinator"), "--participation", "full", "--allow-battery"], &[("CLAMOR_TEST_NO_LOOPBACK_OWNER", "1")]);
+    wait_for("the portal", Duration::from_secs(120), &[&coord], || TcpStream::connect(("127.0.0.1", portal)).is_ok());
+    let m = spawn(&dir, "member", &["join", &ctrl_s, "--passphrase", "api-key-words", "--name", "Bea", "--dashboard", &format!("127.0.0.1:{dash}"), "--id", "m", "--models", &models, "--no-update-check", "--config-dir", &cfg_dir(&dir, "member"), "--participation", "full", "--allow-battery"]);
+    wait_for("Bea's dashboard", Duration::from_secs(60), &[&coord, &m], || TcpStream::connect(("127.0.0.1", dash)).is_ok() && http(dash, "GET", "/api/me", None).0 == 200);
+
+    // Bea makes a key on her device; it is shown once, and listed by name and hint only.
+    let (st, k) = http(dash, "POST", "/api/me/keys", Some(json!({ "name": "my editor" })));
+    assert_eq!(st, 200, "{k}");
+    let key = k["key"].as_str().unwrap().to_string();
+    assert!(key.starts_with("clm_") && key.len() > 60);
+    let (_, list) = http(dash, "GET", "/api/me/keys", None);
+    assert_eq!(list["keys"][0]["name"], "my editor");
+    assert!(!list.to_string().contains(&key), "the key itself is never listed");
+
+    // The key works for /v1 on the coordinator, and for nothing else.
+    let (st, r) = http_key(portal, "GET", "/v1/models", &key, None);
+    assert_eq!((st, r["object"].as_str()), (200, Some("list")), "{r}");
+    let (st, r) = http_key(portal, "POST", "/v1/chat/completions", &key, Some(json!({ "messages": [{ "role": "user", "content": "hi" }] })));
+    assert_eq!((st, r["error"]["code"].as_str()), (503, Some("model_not_ready")), "{r}");
+    assert_eq!(http_key(portal, "GET", "/api/roster", &key, None).0, 401, "an API key is not a sign-in");
+    assert_eq!(http_key(portal, "POST", "/api/me/keys", &key, Some(json!({}))).0, 401);
+    // No key, or a wrong one: OpenAI's error.
+    let (st, r) = http(portal, "GET", "/v1/models", None);
+    assert_eq!((st, r["error"]["type"].as_str()), (401, Some("authentication_error")), "{r}");
+    assert_eq!(http_key(portal, "GET", "/v1/models", "clm_wrong", None).0, 401);
+    // Revoked: no longer works.
+    let id = k["id"].as_str().unwrap();
+    assert_eq!(http(dash, "DELETE", &format!("/api/me/keys/{id}"), None).0, 200);
+    assert_eq!(http_key(portal, "GET", "/v1/models", &key, None).0, 401, "revoked");
     let _ = std::fs::remove_dir_all(&dir);
 }

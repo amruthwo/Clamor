@@ -454,6 +454,9 @@ pre.log { margin:0; padding:12px 14px; border-radius:12px; background:var(--surf
           <button class="item st" onclick="inviteSheet('device')"><svg class="i lead-icon"><use href="#i-mobile_arrow_down"/></svg><div class="text"><span class="h">Add one of my devices</span><span class="s">A one-time code, linked to you</span></div><svg class="i trail"><use href="#i-chevron_right"/></svg></button>
           <button class="item st" id="signout" hidden onclick="signOut()"><svg class="i lead-icon"><use href="#i-logout"/></svg><div class="text"><span class="h">Sign out</span><span class="s">Of this browser</span></div></button>
         </div></div>
+        <div><div class="section-title">Connect apps</div><div class="list">
+          <button class="item st" onclick="apiSheet()"><svg class="i lead-icon"><use href="#i-key"/></svg><div class="text"><span class="h">API keys</span><span class="s">Let coding assistants and chat apps use your swarm (OpenAI-compatible)</span></div><svg class="i trail"><use href="#i-chevron_right"/></svg></button>
+        </div></div>
         <div id="app-wrap" hidden><div class="section-title">This app</div><div class="list" id="app-list"></div></div>
         <div><div class="section-title">Clamor</div><div class="list">
           <a class="item st" href="https://github.com/amruthwo/Clamor/tree/main/docs" target="_blank" rel="noopener" style="text-decoration:none"><svg class="i lead-icon"><use href="#i-article"/></svg><div class="text"><span class="h">Guides</span><span class="s">Joining, devices, private chats, updating</span></div><svg class="i trail"><use href="#i-open_in_new"/></svg></a>
@@ -980,6 +983,34 @@ window.pinSheet = () => {
   $('pin-new').focus();
   $('pin-save').onclick = async () => { try { await api('/api/me/pin', 'POST', { pin: $('pin-new').value }); me.has_pin = true; closeOverlay(); snack('PIN saved'); } catch (e) { snack(String(e.message || e)); } };
 };
+// The OpenAI-compatible API: where it is, and this person's keys.
+window.apiSheet = async () => {
+  let keys = [];
+  try { keys = (await api('/api/me/keys')).keys; } catch {}
+  const local = location.hostname === '127.0.0.1' || location.hostname === 'localhost';
+  overlay(`<h2>Connect apps</h2><div class="body">
+    <div class="body-l">Apps made for OpenAI's API (coding assistants such as Continue, Aider or Zed, chat apps such as Open WebUI) can use your swarm's model. Give them this address and an API key:</div>
+    <div class="list"><button class="item st" onclick='copyText(${js(me.api_url)})'>${ic('lan', 'lead-icon')}<div class="text"><span class="h" style="font-family:ui-monospace,monospace;font-size:14px">${esc(me.api_url)}</span><span class="s">From any device on your network, with a key. Tap to copy</span></div>${ic('content_copy', 'trail')}</button>
+    ${local ? `<button class="item st" onclick='copyText(${js(location.origin + '/v1')})'>${ic('computer', 'lead-icon')}<div class="text"><span class="h" style="font-family:ui-monospace,monospace;font-size:14px">${esc(location.origin + '/v1')}</span><span class="s">Apps on this device: no key needed (any key works)</span></div>${ic('content_copy', 'trail')}</button>` : ''}</div>
+    <div><div class="title-s" style="margin-bottom:8px">Your keys</div><div class="list" id="key-list">${keys.map(k => `<div class="item">${ic('key', 'lead-icon')}<div class="text"><span class="h">${esc(k.name)}</span><span class="s">${esc(k.hint)}… · made ${new Date(k.created_unix * 1000).toLocaleDateString()}</span></div><button class="btn danger st" onclick='deleteKey(${js(k.id)}, ${js(k.name)})'>Delete</button></div>`).join('') || '<div class="empty">No keys yet.</div>'}</div></div>
+    <div class="row" style="flex-wrap:nowrap"><div class="field" style="flex:1"><input id="key-name" placeholder=" " maxlength="60"><label>Name for a new key (e.g. "Zed on my laptop")</label></div><button class="btn filled st" id="key-make">Create</button></div>
+    <div id="key-new"></div>
+    <div class="body-s muted">A key acts as you, for this API only. The model replies with the swarm's settings; tool calls are not supported yet. On the plain address the key crosses your network unencrypted; use https on port 7424 to avoid that.</div>
+    <div class="acts"><a class="btn text st" href="https://github.com/amruthwo/Clamor/blob/main/docs/api.md" target="_blank" rel="noopener">${ic('article')}How to connect apps</a><button class="btn filled st" onclick="closeOverlay()">Done</button></div></div>`);
+  $('key-make').onclick = async () => {
+    try {
+      const r = await api('/api/me/keys', 'POST', { name: $('key-name').value });
+      $('key-new').innerHTML = `<div class="banner"><div class="text" style="min-width:0"><b>Your new key</b> (shown only now: copy it into your app)<pre class="cmd" style="margin-top:8px">${esc(r.key)}</pre></div><button class="btn filled st" onclick='copyText(${js(r.key)})'>Copy</button></div>`;
+      $('key-name').value = '';
+    } catch (e) { snack(String(e.message || e)); }
+  };
+};
+window.deleteKey = async (id, name) => {
+  closeOverlay();
+  if (!await confirmDialog(`Delete "${name}"?`, 'Apps using it stop working until they get a new key.', 'Delete', true)) return apiSheet();
+  try { await api('/api/me/keys/' + encodeURIComponent(id), 'DELETE'); snack('Key deleted'); } catch (e) { snack(String(e.message || e)); }
+  apiSheet();
+};
 window.signOut = async () => { await fetch('/api/logout', { method:'POST' }); location.reload(); };
 // The Clamor app (this page in its window): actions only it can do.
 window.appAction = (action, value) => parent.postMessage({ clamor: action, value }, '*');
@@ -989,6 +1020,12 @@ addEventListener('message', e => {
   if (me && roster) renderSettings();
 });
 if (inApp) parent.postMessage({ clamor: 'hello' }, '*');
+// Inside the app, links that open a new window go to the system's browser (the app's window
+// cannot open them itself).
+if (inApp) document.addEventListener('click', e => {
+  const a = e.target.closest && e.target.closest('a[target="_blank"]');
+  if (a && /^https:\/\//.test(a.href)) { e.preventDefault(); appAction('open', a.href); }
+});
 
 // ------------------------------------------------------------------ Chat
 let chatId = 'group', chatList = null, sending = false, shownKey = '', privateHere = null, privateList = [], privateStatus = null;

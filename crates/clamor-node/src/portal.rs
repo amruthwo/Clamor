@@ -23,7 +23,11 @@ type ApiResult = Result<Json<Value>, (StatusCode, String)>;
 
 /// Serve the dashboard on `bind` (plain HTTP) and on `tls_bind` (HTTPS with the coordinator's
 /// certificate; any free port if that one is taken). Members' apps use the HTTPS one.
+/// The dashboard's plain-HTTP port (for showing tools where the API is).
+static PORTAL_PORT: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
+
 pub async fn serve(bind: String, tls_bind: String, shared: Shared) -> anyhow::Result<()> {
+    let _ = PORTAL_PORT.set(bind.rsplit(':').next().and_then(|p| p.parse().ok()).unwrap_or(7421));
     let app = Router::new()
         .route("/", get(index))
         .route("/icon.svg", get(icon))
@@ -43,6 +47,10 @@ pub async fn serve(bind: String, tls_bind: String, shared: Shared) -> anyhow::Re
         .route("/api/pipeline", get(pipeline_status).post(pipeline_start).delete(pipeline_stop))
         .route("/api/generate", post(generate))
         .route("/api/chat", post(chat))
+        .route("/v1/models", get(crate::openai::models))
+        .route("/v1/chat/completions", post(crate::openai::chat_completions))
+        .route("/api/me/keys", get(list_keys).post(new_key))
+        .route("/api/me/keys/{id}", axum::routing::delete(delete_key))
         .route("/api/me", get(me))
         .route("/api/me/pin", post(set_pin))
         .route("/api/logout", post(logout))
@@ -631,7 +639,7 @@ struct GenerateRequest {
 /// Cancels the request in the ring if the HTTP client goes away mid-generation.
 
 /// The running pipeline's head, its epoch, context length and tokenizer, if it can take requests.
-fn ready_pipeline(shared: &Shared) -> Result<(HeadHandle, u32, u32, Option<Arc<Tokenizer>>), (StatusCode, String)> {
+pub(crate) fn ready_pipeline(shared: &Shared) -> Result<(HeadHandle, u32, u32, Option<Arc<Tokenizer>>), (StatusCode, String)> {
     let sw = shared.lock().unwrap();
     let p = sw.pipeline.as_ref().ok_or((StatusCode::SERVICE_UNAVAILABLE, "no pipeline: POST /api/pipeline first".to_string()))?;
     if let Some(f) = p.failure() {
@@ -700,7 +708,51 @@ async fn me(State(shared): State<Shared>, Extension(caller): Extension<Caller>) 
     let pending = if caller.how != "session" || true { sw.auth.signins.iter().filter(|s| s.approved_by.is_none() && s.created_unix + crate::people::SIGNIN_SECS > unix_now()).count() } else { 0 };
     let has_pin = sw.auth.profile.person(&caller.person).is_some_and(|p| p.pin.is_some());
     let reply_style = sw.auth.profile.person(&caller.person).and_then(|p| p.reply_style.clone()).unwrap_or_else(|| "stream".into());
-    Json(json!({ "id": caller.person, "name": caller.name, "role": caller.role, "how": caller.how, "device": caller.device, "has_pin": has_pin, "pending_signins": pending, "swarm": sw.name, "reply_style": reply_style }))
+    Json(json!({ "id": caller.person, "name": caller.name, "role": caller.role, "how": caller.how, "device": caller.device, "has_pin": has_pin, "pending_signins": pending, "swarm": sw.name, "reply_style": reply_style,
+        // Where tools on the network reach the OpenAI-compatible API (with an API key).
+        "api_url": format!("http://{}:{}/v1", sw.join_hint.split(':').next().filter(|h| !h.is_empty()).unwrap_or("<coordinator>"), PORTAL_PORT.get().copied().unwrap_or(7421)) }))
+}
+
+/// The caller's API keys (names and hints only; a key is shown once, when made).
+async fn list_keys(State(shared): State<Shared>, Extension(caller): Extension<Caller>) -> Json<Value> {
+    let sw = shared.lock().unwrap();
+    let keys: Vec<Value> = sw.auth.profile.person(&caller.person).map(|p| p.api_keys.iter().map(|k| json!({ "id": k.id, "name": k.name, "hint": k.hint, "created_unix": k.created_unix })).collect()).unwrap_or_default();
+    Json(json!({ "keys": keys }))
+}
+
+#[derive(Deserialize)]
+struct NewKeyReq {
+    #[serde(default)]
+    name: String,
+}
+
+async fn new_key(State(shared): State<Shared>, Extension(caller): Extension<Caller>, Json(req): Json<NewKeyReq>) -> ApiResult {
+    if caller.how == "api" {
+        return Err((StatusCode::FORBIDDEN, "API keys cannot make API keys".into()));
+    }
+    let mut sw = shared.lock().unwrap();
+    let p = sw.auth.profile.people.iter_mut().find(|p| p.id == caller.person).ok_or((StatusCode::NOT_FOUND, "no such person".into()))?;
+    if p.api_keys.len() >= 20 {
+        return Err((StatusCode::BAD_REQUEST, "at most 20 API keys per person: delete one first".into()));
+    }
+    let name = if req.name.trim().is_empty() { "API key".to_string() } else { req.name.trim().to_string() };
+    let (key, rec) = crate::people::new_api_key(&name);
+    let id = rec.id.clone();
+    p.api_keys.push(rec);
+    sw.auth.save();
+    Ok(Json(json!({ "id": id, "name": name, "key": key })))
+}
+
+async fn delete_key(State(shared): State<Shared>, Extension(caller): Extension<Caller>, Path(id): Path<String>) -> ApiResult {
+    let mut sw = shared.lock().unwrap();
+    let p = sw.auth.profile.people.iter_mut().find(|p| p.id == caller.person).ok_or((StatusCode::NOT_FOUND, "no such person".into()))?;
+    let before = p.api_keys.len();
+    p.api_keys.retain(|k| k.id != id);
+    if p.api_keys.len() == before {
+        return Err((StatusCode::NOT_FOUND, "no such key".into()));
+    }
+    sw.auth.save();
+    Ok(Json(json!({ "ok": true })))
 }
 
 #[derive(Deserialize)]

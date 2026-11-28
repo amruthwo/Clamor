@@ -51,9 +51,9 @@ again). If a copy fails, the device stays and nothing is lost.
 
 ## What Clamor runs today
 
-Clamor's engine runs the **Llama** and **Qwen2** families (Llama 3.x, Qwen2.5, SmolLM2, and the
-DeepSeek R1 distills of Llama and Qwen). Models with other architectures or tokenizers (Qwen3,
-Gemma 3, Mistral's newer models, embedding models) are listed with the reason they do not run
+Clamor's engine runs the **Llama**, **Qwen2** and **Qwen3** families (Llama 3.x, Qwen2.5, Qwen3,
+SmolLM2, and the DeepSeek R1 distills of Llama and Qwen). Models with other architectures or
+tokenizers (Gemma 3, Mistral's newer models, embedding models) are listed with the reason they do not run
 yet, so you can see what is coming. Vision and embeddings need more engine work.
 
 **Thinking models** (marked *Thinking*, such as DeepSeek R1) reason step by step before they

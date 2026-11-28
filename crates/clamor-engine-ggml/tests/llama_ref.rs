@@ -371,7 +371,8 @@ fn architecture_variants_match_reference() {
     }
     let tools = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tools");
     let toks = TOKENS.map(|t| t.to_string()).join(",");
-    for (label, extra) in [("qwen2", vec!["--arch", "qwen2"]), ("llama3 rope_freqs", vec!["--rope-freqs"]), ("qwen2 + rope_freqs", vec!["--arch", "qwen2", "--rope-freqs"])] {
+    // qwen3: per-head q/k norm, and a head size (24) that is not embedding / heads (64 / 4).
+    for (label, extra) in [("qwen2", vec!["--arch", "qwen2"]), ("llama3 rope_freqs", vec!["--rope-freqs"]), ("qwen2 + rope_freqs", vec!["--arch", "qwen2", "--rope-freqs"]), ("qwen3", vec!["--arch", "qwen3"])] {
         let dir = std::env::temp_dir().join(format!("clamor-arch-{}-{}", std::process::id(), label.replace([' ', '+'], "_")));
         std::fs::create_dir_all(&dir).unwrap();
         let model = dir.join("m.gguf").display().to_string();
@@ -386,7 +387,10 @@ fn architecture_variants_match_reference() {
         let o = || StageOptions { device: cpu(), n_ctx: 32, ..Default::default() };
 
         let mut full = LlamaStage::load(&model, 0..N_LAYER, o()).unwrap();
-        assert_eq!(full.hparams().rope_neox, label.starts_with("qwen2"), "{label}");
+        assert_eq!(full.hparams().rope_neox, label.starts_with("qwen"), "{label}");
+        if label == "qwen3" {
+            assert_eq!(full.hparams().head_dim(), 24, "the stated head size");
+        }
         let (out, traced) = full.forward_traced(1, 0, LlamaInput::Tokens(&TOKENS)).unwrap();
         for (l, h) in traced.iter().enumerate() {
             let err = max_err(h, &ref_hidden[l * per..(l + 1) * per]);

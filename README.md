@@ -96,7 +96,7 @@ that drops off can rejoin later without benchmarking again.
 | | |
 |---|---|
 | **Swarms** | Start one on any computer; devices join with a QR code, a one-time code, the passphrase (never sent over the network) or by asking; they find the swarm on the local network and rejoin by themselves |
-| **Models** | Llama 3.x, Qwen2.5 and SmolLM2 (and others built the same way), split across devices; one device needs the file, the others fetch their share. Checked against a reference implementation. A catalog of 24 models with predicted speeds for your swarm and verified downloads |
+| **Models** | Llama 3.x, Qwen2.5, Qwen3 and SmolLM2 (and others built the same way), split across devices; one device needs the file, the others fetch their share. Checked against a reference implementation. A catalog of 24 models with predicted speeds for your swarm and verified downloads |
 | **Chat** | Group, personal and private chats, streaming replies with Stop, each person's preferences |
 | **Apps** | Desktop app (Linux: Flatpak, .deb, .rpm, AppImage; macOS; Windows) and an Android app, the same Material 3 design on every screen size; they update themselves when you agree |
 | **Security** | Encrypted connections between devices, device keys, people with roles, sign-in for browsers |
@@ -109,7 +109,7 @@ compile-checked only.
 
 **Coming next:** tool calling (for coding agents) with an
 optional online mode and MCP, model handover when a device leaves, using your swarm away from home, and more model
-families (Qwen3, Gemma 3, vision and embedding models).
+families (Gemma 3, vision and embedding models).
 
 ## Try it
 

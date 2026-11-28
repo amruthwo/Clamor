@@ -293,7 +293,8 @@ mod tests {
         for id in ["llama-3.2-1b", "qwen2.5-0.5b", "smollm2-360m"] {
             assert!(find(id).unwrap().support().is_ok(), "{id}");
         }
-        assert!(find("qwen3-8b").unwrap().support().is_err());
+        assert!(find("qwen3-8b").unwrap().support().is_ok(), "Qwen3 runs");
+        assert!(find("gemma-3-4b").unwrap().support().is_err(), "Gemma 3 does not yet");
         assert_eq!(find("llama-3.2-3b").unwrap().file("q4").quant, "Q4_K_M");
         assert_eq!(find("llama-3.2-3b").unwrap().file("q8").quant, "Q8_0");
     }

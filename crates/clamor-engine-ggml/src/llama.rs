@@ -36,8 +36,10 @@ pub struct LlamaHparams {
     pub n_rot: u32,
     pub rms_eps: f32,
     pub rope_freq_base: f32,
-    /// `general.architecture`: "llama" or "qwen2".
+    /// `general.architecture`: "llama", "qwen2" or "qwen3".
     pub arch: String,
+    /// Size of one attention head: stated by Qwen3 (`attention.key_length`), else n_embd / n_head.
+    pub head_dim: u32,
     /// Rotate the two halves of each head (NEOX) rather than adjacent pairs.
     pub rope_neox: bool,
 }
@@ -48,7 +50,7 @@ impl LlamaHparams {
         // llama.cpp converts Llama's q/k weights to rotate adjacent pairs; Qwen2 keeps halves.
         let rope_neox = match arch.as_str() {
             "llama" => false,
-            "qwen2" => true,
+            "qwen2" | "qwen3" => true,
             _ => return Err(Error::Gguf(format!("unsupported architecture {arch:?} (supported: {})", crate::ARCHITECTURES.join(", ")))),
         };
         let key = |k: &str| format!("{arch}.{k}");
@@ -71,7 +73,8 @@ impl LlamaHparams {
             n_ff: req("feed_forward_length")?,
             n_vocab,
             n_ctx_train: req("context_length")?,
-            n_rot: g.get_u32(&key("rope.dimension_count")).unwrap_or(n_embd / n_head),
+            n_rot: g.get_u32(&key("rope.dimension_count")).unwrap_or(g.get_u32(&key("attention.key_length")).unwrap_or(n_embd / n_head)),
+            head_dim: g.get_u32(&key("attention.key_length")).unwrap_or(n_embd / n_head),
             rms_eps: g.get_f32(&key("attention.layer_norm_rms_epsilon")).unwrap_or(1e-5),
             rope_freq_base: g.get_f32(&key("rope.freq_base")).unwrap_or(10000.0),
             rope_neox,
@@ -79,7 +82,7 @@ impl LlamaHparams {
         })
     }
     pub fn head_dim(&self) -> u32 {
-        self.n_embd / self.n_head
+        self.head_dim
     }
     /// Width of one layer's K (or V) row: all KV heads for one position.
     pub fn kv_dim(&self) -> u32 {
@@ -155,6 +158,9 @@ struct LayerW {
     bq: Option<T>,
     bk: Option<T>,
     bv: Option<T>,
+    /// Per-head RMS-norm weights on q and k, before RoPE (Qwen3).
+    q_norm: Option<T>,
+    k_norm: Option<T>,
 }
 
 struct KvCache {
@@ -263,6 +269,12 @@ pub fn stage_tensors_with(has: impl Fn(&str) -> bool, hp: &LlamaHparams, layers:
             let b = format!("blk.{l}.{s}.bias");
             if has(&b) {
                 names.push(b);
+            }
+        }
+        for s in ["attn_q_norm", "attn_k_norm"] {
+            let n = format!("blk.{l}.{s}.weight");
+            if has(&n) {
+                names.push(n);
             }
         }
     }
@@ -383,6 +395,8 @@ impl LlamaStage {
                     bq: b("attn_q"),
                     bk: b("attn_k"),
                     bv: b("attn_v"),
+                    q_norm: by_name.get(&format!("blk.{l}.attn_q_norm.weight")).copied(),
+                    k_norm: by_name.get(&format!("blk.{l}.attn_k_norm.weight")).copied(),
                 });
             }
             stage.rope_freqs = by_name.get("rope_freqs.weight").copied();
@@ -622,8 +636,13 @@ impl LlamaStage {
                         None => y,
                     }
                 };
-                let q = rope(sys::ggml_reshape_3d(ctx, proj(w.wq, w.bq), hd, nh, n64));
-                let k = rope(sys::ggml_reshape_3d(ctx, proj(w.wk, w.bk), hd, nkv, n64));
+                // Qwen3: an RMS norm over each head of q and k, before RoPE.
+                let head_norm = |t: T, g: Option<T>| match g {
+                    Some(g) => sys::ggml_mul(ctx, sys::ggml_rms_norm(ctx, t, hp.rms_eps), g),
+                    None => t,
+                };
+                let q = rope(head_norm(sys::ggml_reshape_3d(ctx, proj(w.wq, w.bq), hd, nh, n64), w.q_norm));
+                let k = rope(head_norm(sys::ggml_reshape_3d(ctx, proj(w.wk, w.bk), hd, nkv, n64), w.k_norm));
                 let v = proj(w.wv, w.bv);
                 // Write this batch's K/V into rows [pos, pos+n) of the cache. set_rows returns a
                 // view of the whole cache that depends on the write, so reads are ordered after it.
@@ -640,7 +659,8 @@ impl LlamaStage {
                 let vv = sys::ggml_cont(ctx, sys::ggml_permute(ctx, sys::ggml_view_3d(ctx, v_all, hd, nkv, n_kv, hd as usize * 4, row, 0), 1, 2, 0, 3));
                 // [hd, n, nh] -> [hd, nh, n] -> [e, n]
                 let att = sys::ggml_mul_mat(ctx, vv, kq);
-                let att = sys::ggml_reshape_2d(ctx, sys::ggml_cont(ctx, sys::ggml_permute(ctx, att, 0, 2, 1, 3)), e, n64);
+                // [hd * nh, n]: not always the embedding width (Qwen3 states its head size).
+                let att = sys::ggml_reshape_2d(ctx, sys::ggml_cont(ctx, sys::ggml_permute(ctx, att, 0, 2, 1, 3)), hd * nh, n64);
                 x = sys::ggml_add(ctx, x, sys::ggml_mul_mat(ctx, w.wo, att));
 
                 // Feed-forward (SwiGLU).

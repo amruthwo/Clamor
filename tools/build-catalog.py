@@ -43,6 +43,8 @@ MODELS = [
     ("deepseek-r1-distill-qwen-1.5b", "DeepSeek R1 Distill Qwen 1.5B", "DeepSeek", "MIT", "Small model that thinks step by step before answering.", "bartowski/DeepSeek-R1-Distill-Qwen-1.5B-GGUF", ["thinking"]),
     ("deepseek-r1-distill-qwen-7b", "DeepSeek R1 Distill Qwen 7B", "DeepSeek", "MIT", "Thinks step by step before answering.", "bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF", ["thinking"]),
     ("deepseek-r1-distill-qwen-14b", "DeepSeek R1 Distill Qwen 14B", "DeepSeek", "MIT", "Thinks step by step; stronger reasoning.", "bartowski/DeepSeek-R1-Distill-Qwen-14B-GGUF", ["thinking"]),
+    ("qwen3-0.6b", "Qwen3 0.6B", "Alibaba Qwen", "Apache-2.0", "Tiny and quick; thinks step by step when asked to.", "Qwen/Qwen3-0.6B-GGUF", ["thinking"]),
+    ("qwen3-4b", "Qwen3 4B", "Alibaba Qwen", "Apache-2.0", "Strong small model with tools and switchable thinking.", "Qwen/Qwen3-4B-GGUF", ["thinking"]),
     ("qwen3-8b", "Qwen3 8B", "Alibaba Qwen", "Apache-2.0", "Tools and switchable thinking.", "Qwen/Qwen3-8B-GGUF", ["thinking"]),
     ("qwen3-14b", "Qwen3 14B", "Alibaba Qwen", "Apache-2.0", "Tools and switchable thinking; stronger.", "Qwen/Qwen3-14B-GGUF", ["thinking"]),
     ("gemma-3-4b", "Gemma 3 4B", "Google", "Gemma Terms of Use", "Small model that also understands pictures.", "bartowski/google_gemma-3-4b-it-GGUF", ["vision"]),

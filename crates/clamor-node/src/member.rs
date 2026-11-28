@@ -440,6 +440,25 @@ async fn session(addr: &str, creds: &Credentials, allowed: &share::AllowedKeys, 
                             h.abort();
                         }
                     }
+                    Message::FetchModel { name, model_id, source } => {
+                        // Another device is leaving with the swarm's only copy: take it over.
+                        println!("copying {name} from a device that is leaving");
+                        let (dir, key, ctl) = (engine.models_dir.clone(), engine.share_key.clone(), private.lock().unwrap().control.clone());
+                        tokio::task::spawn_blocking(move || {
+                            let send = |m: Message| {
+                                if let Some(c) = &ctl {
+                                    let _ = c.send(m);
+                                }
+                            };
+                            let r = crate::share::fetch_file(&source, &name, &model_id, key.as_ref(), &dir, |done, total| send(Message::FetchProgress { model_id: model_id.clone(), done, total, finished: false, error: None }));
+                            match &r {
+                                Ok(()) => println!("{name} is now on this device"),
+                                Err(e) => eprintln!("could not copy {name}: {e:#}"),
+                            }
+                            send(Message::FetchProgress { model_id: model_id.clone(), done: 0, total: 0, finished: r.is_ok(), error: r.err().map(|e| format!("{e:#}")) });
+                            send(Message::Inventory { models: crate::share::scan(&dir) });
+                        });
+                    }
                     Message::DeleteModel { name, model_id } => {
                         let (dir, cache) = (engine.models_dir.clone(), engine.cache_dir.clone());
                         let r = tokio::task::spawn_blocking(move || crate::models::delete_local(&dir, &cache, &name, &model_id).map(|b| (name, b))).await;

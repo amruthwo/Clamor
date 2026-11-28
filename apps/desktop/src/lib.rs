@@ -303,17 +303,42 @@ async fn restart(shared: State<'_, Shared>) -> Result<(), String> {
 
 /// Stop taking part and forget the setup (the swarm itself is still remembered by clamor-node,
 /// so joining it again needs no passphrase).
-/// Ask this device's own dashboard (127.0.0.1:7421, which signs requests with the device's key)
-/// to POST `path` to the coordinator.
-fn post_local(path: &str) -> Result<String, String> {
+/// A request to this device's own dashboard (127.0.0.1:7421, which signs requests with the
+/// device's key and passes them to the coordinator): (status, body).
+fn local_http(method: &str, path: &str, body: &str) -> Result<(u16, String), String> {
     use std::io::{Read, Write};
     let mut s = std::net::TcpStream::connect_timeout(&"127.0.0.1:7421".parse().unwrap(), Duration::from_secs(5)).map_err(|e| format!("this device's Clamor is not running ({e})"))?;
     s.set_read_timeout(Some(Duration::from_secs(20))).ok();
-    write!(s, "POST {path} HTTP/1.0\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\n\r\n").map_err(|e| e.to_string())?;
+    write!(s, "{method} {path} HTTP/1.0\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len()).map_err(|e| e.to_string())?;
     let mut resp = String::new();
     s.read_to_string(&mut resp).map_err(|e| e.to_string())?;
-    let (head, body) = resp.split_once("\r\n\r\n").unwrap_or((&resp, ""));
-    if head.split_whitespace().nth(1).is_some_and(|c| c.starts_with('2')) { Ok(body.to_string()) } else { Err(body.trim().to_string()) }
+    let (head, rest) = resp.split_once("\r\n\r\n").unwrap_or((&resp, ""));
+    let code = head.split_whitespace().nth(1).and_then(|c| c.parse().ok()).unwrap_or(0);
+    Ok((code, rest.to_string()))
+}
+
+/// Ask the swarm to let this device leave (a member). 200: it goes now. 202: its only copies of
+/// some models are being copied elsewhere first (then it goes). 409: no device has room for
+/// them (`now` leaves anyway).
+#[tauri::command]
+async fn leave_request(now: bool) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let (status, body) = local_http("POST", "/api/me/leave", &json!({ "now": now }).to_string())?;
+        Ok(json!({ "status": status, "body": serde_json::from_str::<Value>(&body).unwrap_or(json!({ "text": body })) }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Models being copied off leaving devices (for the progress while this one leaves).
+#[tauri::command]
+async fn handovers() -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let (_, body) = local_http("GET", "/api/handovers", "")?;
+        serde_json::from_str(&body).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// The arguments for a one-off command about this device's swarms (`leave`).
@@ -335,11 +360,8 @@ async fn leave_swarm(shared: State<'_, Shared>, purge: bool) -> Result<(), Strin
         let swarm = s.swarm.clone().ok_or("no swarm to leave")?;
         let coordinator = s.mode.as_deref() == Some("coordinator");
         if !coordinator {
-            // Tell the swarm first (gracefully: it finishes its work and leaves). If the
-            // coordinator cannot be reached, leave anyway: an admin can remove the device later.
-            if let Err(e) = post_local("/api/me/leave") {
-                eprintln!("could not tell the swarm: {e}");
-            }
+            // The window asked the swarm already (leave_request); if it could not, leave anyway:
+            // an admin can remove the device later. Wait for it to finish its work and go.
             let t0 = Instant::now();
             while t0.elapsed() < Duration::from_secs(35) && shared.lock().unwrap().runner.as_mut().is_some_and(|r| r.exited().is_none()) {
                 std::thread::sleep(Duration::from_millis(250));
@@ -479,7 +501,7 @@ pub fn run() {
     let builder = builder
         .plugin(tauri_plugin_opener::init())
         .manage(shared.clone())
-        .invoke_handler(tauri::generate_handler![status, swarms, dashboard_url, start_swarm, join_swarm, restart, reset, autostart_enabled, set_autostart, update_check, update_install, leave_swarm])
+        .invoke_handler(tauri::generate_handler![status, swarms, dashboard_url, start_swarm, join_swarm, restart, reset, autostart_enabled, set_autostart, update_check, update_install, leave_swarm, leave_request, handovers])
         .setup(move |app| {
             #[cfg(mobile)]
             {

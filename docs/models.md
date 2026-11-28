@@ -41,6 +41,14 @@ devices hold it, start it, or delete it (admins):
 A model that is running cannot be deleted: stop it first. Devices older than Clamor 0.7.0 cannot
 be asked to delete, and are listed when that happens.
 
+## When a device leaves
+
+If a device that leaves (or is removed) has the swarm's **only copy** of a model, Clamor first
+copies the model to another device with room (the coordinator if it can), checks that the copy
+is the same model, and only then lets the device go. The app shows the progress. If no device
+has room, you are told which models would be lost and can leave anyway (you can download them
+again). If a copy fails, the device stays and nothing is lost.
+
 ## What Clamor runs today
 
 Clamor's engine runs the **Llama** and **Qwen2** families (Llama 3.x, Qwen2.5, SmolLM2, and the

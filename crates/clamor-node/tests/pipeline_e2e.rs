@@ -1152,3 +1152,50 @@ fn the_openai_api_needs_a_key() {
     assert_eq!(http_key(portal, "GET", "/v1/models", &key, None).0, 401, "revoked");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Model handover: a device holding the swarm's only copy of a model is removed. The model is
+/// copied to the coordinator first (checked to be the same model), and only then does the device
+/// leave. Removing it again is not needed: it goes by itself once the copy is in place.
+#[test]
+fn a_leaving_device_hands_over_its_only_copy() {
+    let dir = std::env::temp_dir().join(format!("clamor-node-handover-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let Some(_) = python_fixture(&dir) else { return };
+    let d = |n: &str| {
+        let p = dir.join(n);
+        std::fs::create_dir_all(&p).unwrap();
+        p.display().to_string()
+    };
+    let (coord_models, b_models) = (d("coord-models"), d("b-models"));
+    std::fs::rename(dir.join("tiny.gguf"), Path::new(&b_models).join("tiny.gguf")).unwrap();
+    let original = std::fs::read(Path::new(&b_models).join("tiny.gguf")).unwrap();
+    let (ctrl, portal, data) = (free_port(), free_port(), free_port_run(1));
+    let ctrl_s = format!("127.0.0.1:{ctrl}");
+    // The coordinator's disk is full: the copy has to go to another device.
+    let coord = spawn_env(&dir, "coordinator", &["coordinator", "--passphrase", "hand-over-words", "--id", "coord", "--bind", &ctrl_s, "--portal", &format!("127.0.0.1:{portal}"), "--models", &coord_models, "--cache-dir", &d("coord-cache"), "--data-port", &data.to_string(), "--quick-bench", "--no-update-check", "--config-dir", &cfg_dir(&dir, "coordinator"), "--participation", "full", "--allow-battery"], &[("CLAMOR_TEST_DISK_FREE", "0")]);
+    wait_for("the portal", Duration::from_secs(120), &[&coord], || TcpStream::connect(("127.0.0.1", portal)).is_ok());
+    let mut b = spawn(&dir, "member-b", &["join", &ctrl_s, "--passphrase", "hand-over-words", "--id", "b", "--models", &b_models, "--cache-dir", &d("b-cache"), "--no-update-check", "--config-dir", &cfg_dir(&dir, "member-b"), "--participation", "full", "--allow-battery"]);
+    let roster = || http(portal, "GET", "/api/roster", None).1;
+    wait_for("b with its model", Duration::from_secs(60), &[&coord, &b], || roster()["nodes"].as_array().unwrap().iter().any(|n| n["id"] == "b" && n["state"] == "ready" && n["models"].as_array().is_some_and(|m| !m.is_empty())));
+
+    // Nobody has room: removing b would lose the model, so it is refused unless "now".
+    let (st, r) = http(portal, "POST", "/api/nodes/b/remove", None);
+    assert_eq!((st, r["models"][0].as_str()), (409, Some("tiny.gguf")), "{r}");
+
+    // a joins, with room: the copy goes to a (a member is asked to fetch it).
+    let a_models = d("a-models");
+    let a = spawn(&dir, "member-a", &["join", &ctrl_s, "--passphrase", "hand-over-words", "--id", "a", "--models", &a_models, "--cache-dir", &d("a-cache"), "--no-update-check", "--config-dir", &cfg_dir(&dir, "member-a"), "--participation", "full", "--allow-battery"]);
+    wait_for("a", Duration::from_secs(60), &[&coord, &a], || roster()["nodes"].as_array().unwrap().iter().any(|n| n["id"] == "a" && n["state"] == "ready"));
+    let (st, r) = http(portal, "POST", "/api/nodes/b/remove", None);
+    assert_eq!(st, 202, "b has the only copy: it is handed over first: {r}");
+    assert_eq!(r["handover"][0]["to"], "a", "{r}");
+    assert!(exits(&mut b, Duration::from_secs(60)), "b leaves once the copy is in place\n{}\n{}\n{}", coord.log(), a.log(), b.log());
+    assert_eq!(std::fs::read(Path::new(&a_models).join("tiny.gguf")).unwrap(), original, "a has the same model");
+    assert!(!Path::new(&coord_models).join("tiny.gguf").exists());
+    assert!(!roster()["nodes"].as_array().unwrap().iter().any(|n| n["id"] == "b"));
+    let (_, h) = http(portal, "GET", "/api/handovers", None);
+    assert_eq!(h["handovers"][0]["state"], "done", "{h}");
+    wait_for("a to list it", Duration::from_secs(20), &[&coord, &a], || roster()["nodes"].as_array().unwrap().iter().any(|n| n["id"] == "a" && n["models"].as_array().is_some_and(|m| m.iter().any(|x| x["name"] == "tiny.gguf"))));
+    let _ = std::fs::remove_dir_all(&dir);
+}

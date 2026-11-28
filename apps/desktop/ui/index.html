@@ -303,8 +303,38 @@ window.changeSwarm = () => {
     const b = $('cs-leave');
     if (!b.dataset.sure) { b.dataset.sure = '1'; b.querySelector('.h').textContent = coord ? `Press again to delete ${st.setup.swarm || 'it'} for good` : 'Press again to leave for good'; return; }
     b.disabled = true; b.querySelector('.h').textContent = coord ? 'Deleting…' : 'Leaving…';
-    try { await invoke('leave_swarm', { purge: $('cs-purge').checked }); closeOverlay(); dashUrl = null; $('dash').removeAttribute('src'); step = 'welcome'; await refresh(); }
-    catch (e) { $('cs-err').textContent = String(e); b.disabled = false; }
+    const purge = $('cs-purge').checked;
+    const finish = async () => {
+      try { await invoke('leave_swarm', { purge }); closeOverlay(); dashUrl = null; $('dash').removeAttribute('src'); step = 'welcome'; await refresh(); }
+      catch (e) { $('cs-err').textContent = String(e); b.disabled = false; }
+    };
+    if (coord) return finish();
+    // A member: ask the swarm. It may copy this device's only copies of models elsewhere first.
+    let r = await invoke('leave_request', { now: false }).catch(e => ({ status: 0, body: { text: String(e) } }));
+    if (r.status === 409) {
+      const lost = (r.body.models || []).join(', ');
+      b.querySelector('.h').textContent = 'Press again to leave anyway';
+      b.querySelector('.s').textContent = `This ${dev} has the swarm's only copy of ${lost}, and no other device has room for it. Leaving now loses it (you can download it again).`;
+      b.disabled = false; delete b.dataset.sure;
+      b.onclick = async () => { b.disabled = true; b.querySelector('.h').textContent = 'Leaving…'; await invoke('leave_request', { now: true }).catch(() => {}); finish(); };
+      return;
+    }
+    if (r.status === 202) {
+      // Show the copies' progress until this device is let go (its Clamor stops).
+      const show = async () => {
+        const h = (await invoke('handovers').catch(() => ({ handovers: [] }))).handovers || [];
+        const mine = h.filter(x => x.state !== 'done' || Date.now() / 1000 - x.started_unix < 3600);
+        if (mine.some(x => x.state === 'failed')) { $('cs-err').textContent = "Couldn't copy a model off this " + dev + ", so it stays in the swarm: " + (mine.find(x => x.state === 'failed').error || ''); b.disabled = false; return false; }
+        const c = mine.filter(x => x.state === 'copying');
+        b.querySelector('.h').textContent = c.length ? `Copying ${c.map(x => x.name.replace(/\.gguf$/, '')).join(', ')} to another device: ${Math.floor(c.reduce((a, x) => a + x.done, 0) / Math.max(c.reduce((a, x) => a + x.size, 0), 1) * 100)}%` : 'Leaving…';
+        b.querySelector('.s').textContent = 'This ' + dev + ' has the only copy; it leaves once the copy is safe.';
+        return true;
+      };
+      while (await show() && st.running) await new Promise(res => setTimeout(res, 2000));
+      if (!st.running) finish();
+      return;
+    }
+    finish();
   };
 };
 

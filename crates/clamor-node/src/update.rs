@@ -399,7 +399,7 @@ mod tests {
     }
 
     fn me() -> BuildInfo {
-        BuildInfo { version: "0.4.0".into(), target: "x86_64-unknown-linux-gnu".into(), variant: "vulkan".into(), cpu: "x86-64-v3".into(), commit: "test".into() }
+        BuildInfo { version: "0.4.0".into(), target: "x86_64-unknown-linux-gnu".into(), variant: "vulkan".into(), cpu: "x86-64-v3".into(), commit: "test".into(), features: vec![] }
     }
 
     fn manifest_for(version: &str, archive: &[u8]) -> Manifest {

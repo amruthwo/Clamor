@@ -186,6 +186,8 @@ pub struct Swarm {
     pub portal_tls_port: Option<u16>,
     /// Devices asking to join.
     pub joins: Vec<PendingJoin>,
+    /// Models being copied off devices that are leaving (handover.rs).
+    pub handovers: Vec<crate::handover::Handover>,
     /// Conversations (personal and group).
     pub chats: crate::chats::Chats,
     /// Conversations the model is answering right now.
@@ -216,7 +218,7 @@ impl Swarm {
         engine.tls = Some(tls.clone());
         Swarm {
             tls,
-            tls_server, name, auth, invite: None, join_hint: String::new(), portal_tls_port: None, joins: Vec::new(), chats, generating: Default::default(), next_ring: 0, speeds: Default::default(), coordinator, nodes: BTreeMap::new(), next_generation: 1, engine, data_port, quick_bench, pipeline: None, next_epoch: 1, share_port }
+            tls_server, name, auth, invite: None, join_hint: String::new(), portal_tls_port: None, joins: Vec::new(), handovers: Vec::new(), chats, generating: Default::default(), next_ring: 0, speeds: Default::default(), coordinator, nodes: BTreeMap::new(), next_generation: 1, engine, data_port, quick_bench, pipeline: None, next_epoch: 1, share_port }
     }
 
     /// A node that held a pipeline stage is gone: that pipeline cannot run any more.
@@ -662,6 +664,9 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, shared: Shared) -> Res
                 }
             }
             Message::PrivateClose => crate::pipeline::close_private(&mut shared.lock().unwrap(), &id),
+            Message::FetchProgress { model_id, done, total: _, finished, error } => {
+                crate::handover::progress(&mut shared.lock().unwrap(), &id, &model_id, done, finished, error);
+            }
             Message::Inventory { models } => {
                 if let Some(e) = shared.lock().unwrap().nodes.get_mut(&id) {
                     e.models = models;

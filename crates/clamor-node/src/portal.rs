@@ -41,6 +41,7 @@ pub async fn serve(bind: String, tls_bind: String, shared: Shared) -> anyhow::Re
         .route("/api/nodes/{id}/drain", post(drain))
         .route("/api/nodes/{id}/remove", post(remove))
         .route("/api/me/leave", post(leave))
+        .route("/api/handovers", get(handovers))
         .route("/api/invite", post(invite))
         .route("/api/nodes/{id}/policy", post(set_policy))
         .route("/api/nodes/{id}/name", post(set_device_name))
@@ -493,15 +494,56 @@ fn qr_svg(text: &str) -> Option<String> {
 
 /// Remove a device from the swarm: withdraw its approval (it needs the passphrase to join
 /// again), let it finish its work and leave, and drop it from the roster.
-async fn remove(State(shared): State<Shared>, Path(id): Path<String>) -> ApiResult {
-    let id = NodeId(id);
+#[derive(Deserialize, Default)]
+struct LeaveReq {
+    /// Leave at once, even if that loses the swarm's only copy of a model.
+    #[serde(default)]
+    now: bool,
+}
+
+fn leave_req(body: &axum::body::Bytes) -> Result<LeaveReq, (StatusCode, String)> {
+    if body.iter().all(u8::is_ascii_whitespace) {
+        return Ok(LeaveReq::default());
+    }
+    serde_json::from_slice(body).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
+}
+
+/// Remove `id`, unless it holds the swarm's only copy of a model: then copy those elsewhere
+/// first (202, and it leaves once they are in place), or, if no device has room, say which
+/// would be lost (409) unless `now`.
+fn remove_or_hand_over(shared: &Shared, sw: &mut crate::coordinator::Swarm, id: NodeId, drain_after: Duration, now: bool) -> Result<axum::response::Response, (StatusCode, String)> {
+    use axum::response::IntoResponse;
+    if !now && id != sw.coordinator && sw.nodes.contains_key(&id) {
+        match crate::handover::plan(sw, &id) {
+            Ok(copies) if !copies.is_empty() => {
+                let started = crate::handover::start(shared, sw, &id, copies, drain_after);
+                return Ok((StatusCode::ACCEPTED, Json(json!({ "handover": started, "leaving": id }))).into_response());
+            }
+            Ok(_) => {}
+            Err(lost) => {
+                return Ok((StatusCode::CONFLICT, Json(json!({ "error": "no device has room for the swarm's only copy of these models", "models": lost }))).into_response());
+            }
+        }
+    }
+    remove_device(sw, id, drain_after).map(IntoResponse::into_response)
+}
+
+async fn remove(State(shared): State<Shared>, Path(id): Path<String>, body: axum::body::Bytes) -> Result<axum::response::Response, (StatusCode, String)> {
+    let req = leave_req(&body)?;
     let mut sw = shared.lock().unwrap();
-    remove_device(&mut sw, id, Duration::ZERO)
+    remove_or_hand_over(&shared, &mut sw, NodeId(id), Duration::ZERO, req.now)
+}
+
+/// Models being copied off leaving devices, newest first.
+async fn handovers(State(shared): State<Shared>) -> Json<Value> {
+    let sw = shared.lock().unwrap();
+    Json(json!({ "handovers": sw.handovers.iter().rev().collect::<Vec<_>>() }))
 }
 
 /// A device leaving the swarm for good, from its own app (the request is signed with its key):
 /// as if an admin removed it. It finishes its work and leaves; its key is no longer approved.
-async fn leave(State(shared): State<Shared>, Extension(caller): Extension<Caller>) -> ApiResult {
+async fn leave(State(shared): State<Shared>, Extension(caller): Extension<Caller>, body: axum::body::Bytes) -> Result<axum::response::Response, (StatusCode, String)> {
+    let req = leave_req(&body)?;
     let mut sw = shared.lock().unwrap();
     let id = match (&caller.device, caller.how) {
         (Some(d), "device") => NodeId(d.clone()),
@@ -510,11 +552,11 @@ async fn leave(State(shared): State<Shared>, Extension(caller): Extension<Caller
     println!("{id} is leaving the swarm");
     // This request came through the leaving device's own dashboard: answer it before telling
     // the device to go, or it can shut down before the answer gets back through it.
-    remove_device(&mut sw, id, Duration::from_millis(1500))
+    remove_or_hand_over(&shared, &mut sw, id, Duration::from_millis(1500), req.now)
 }
 
 /// Remove a device; it is told to drain (finish its work and leave) after `drain_after`.
-fn remove_device(sw: &mut crate::coordinator::Swarm, id: NodeId, drain_after: Duration) -> ApiResult {
+pub(crate) fn remove_device(sw: &mut crate::coordinator::Swarm, id: NodeId, drain_after: Duration) -> ApiResult {
     if id == sw.coordinator {
         return Err((StatusCode::BAD_REQUEST, "the coordinator cannot remove itself".into()));
     }

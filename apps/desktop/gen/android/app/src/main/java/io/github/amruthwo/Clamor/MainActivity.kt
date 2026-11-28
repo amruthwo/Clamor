@@ -14,9 +14,6 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.content.FileProvider
 import java.io.File
-import com.google.mlkit.vision.barcode.common.Barcode
-import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
-import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import org.json.JSONObject
 
 class MainActivity : TauriActivity() {
@@ -68,6 +65,24 @@ class MainActivity : TauriActivity() {
     webView.addJavascriptInterface(Updates(), "ClamorAndroid")
   }
 
+  /** Start the scanner (QrScanActivity), asking for the camera first if needed. */
+  private fun startScanner() {
+    QrScanActivity.onResult = { text -> scanned(if (text == null) JSONObject().put("cancelled", true) else JSONObject().put("content", text)) }
+    startActivity(Intent(this, QrScanActivity::class.java))
+  }
+
+  @Deprecated("Deprecated in Java")
+  override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+    @Suppress("DEPRECATION")
+    super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+    if (requestCode == CAMERA_REQUEST) {
+      if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) startScanner()
+      else scanned(JSONObject().put("error", "Clamor needs the camera to scan the code"))
+    }
+  }
+
+  private val CAMERA_REQUEST = 2
+
   /** The result of a QR scan, to the page's window.clamorScanned(result). */
   private fun scanned(result: JSONObject) {
     runOnUiThread { web?.evaluateJavascript("window.clamorScanned && window.clamorScanned($result)", null) }
@@ -76,16 +91,13 @@ class MainActivity : TauriActivity() {
   /** For the app's updater: hand a downloaded (and already verified) APK to Android's installer,
    *  which asks the person "Update this app?". Only files the app downloaded are accepted. */
   inner class Updates {
-    /** "Scan a QR code" (joining a swarm): Google's code scanner shows its own camera screen, so
-     *  Clamor needs no camera permission. Answers with {content}, {cancelled} or {error}. */
+    /** "Scan a QR code" (joining a swarm): Clamor's own scanner (no Google Play services needed),
+     *  after asking for the camera. Answers with {content}, {cancelled} or {error}. */
     @JavascriptInterface
     fun scanQr() {
       runOnUiThread {
-        val options = GmsBarcodeScannerOptions.Builder().setBarcodeFormats(Barcode.FORMAT_QR_CODE).build()
-        GmsBarcodeScanning.getClient(this@MainActivity, options).startScan()
-          .addOnSuccessListener { code -> scanned(JSONObject().put("content", code.rawValue ?: "")) }
-          .addOnCanceledListener { scanned(JSONObject().put("cancelled", true)) }
-          .addOnFailureListener { e -> scanned(JSONObject().put("error", e.message ?: e.toString())) }
+        if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) startScanner()
+        else requestPermissions(arrayOf(Manifest.permission.CAMERA), CAMERA_REQUEST)
       }
     }
 

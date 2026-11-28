@@ -21,6 +21,13 @@ Wi-Fi; type the code from **Add device**, the passphrase, or nothing to ask an a
 swarm**. Allow notifications when asked: the notification is what lets Clamor stay in your swarm
 while the app is in the background.
 
+## Joining by QR code
+
+On the first screen, **Scan a QR code** and point the camera at the code from **Add device** on a
+device that is already in the swarm. Clamor asks for the camera only then. The scanner is
+Clamor's own, so it also works on phones without Google Play services (GrapheneOS, LineageOS,
+/e/OS). You can always type the six-digit code instead.
+
 ## When the phone helps
 
 A phone is a **phone** to Clamor: by default it takes work only while it is **charging** and you

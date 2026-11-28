@@ -31,6 +31,11 @@ devices. Conversations are kept on the coordinator, so whoever runs the coordina
 could read the files. For chats that even the owner cannot read, use a [private
 chat](private-chats.md) from the app on your own device.
 
+**Documents:** press **+** in the message box (or drop files onto the chat, on a computer) to add
+text files, Markdown, code, CSV or JSON (up to 512 KB each). The model reads them with your
+message; the chat shows them as a chip. In a private chat they stay on your device. PDFs are not
+supported yet: paste their text instead.
+
 Replies appear **as the model writes them**. If you prefer to read a reply only once it is
 finished, choose **All at once** in **Settings → Preferences**; you then see how far it has got ("Writing… 120 words so far"). Either way, **Stop**
 ends a reply early and keeps what was written. A reply is finished and saved even if you close

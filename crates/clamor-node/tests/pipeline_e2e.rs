@@ -942,7 +942,9 @@ fn asking_to_join_waits_for_an_admin() {
     let ask = |name: &'static str| spawn(&dir, name, &["join", &ctrl_s, "--ask", "--name", "Cal", "--dashboard", "off", "--id", "cal", "--models", &models, "--no-update-check", "--config-dir", &cfg, "--participation", "full", "--allow-battery"]);
     let pending = |m: &Proc| -> (String, String) {
         let mut found = (String::new(), String::new());
-        wait_for("the request to join", Duration::from_secs(30), &[&coord, m], || {
+        // As long as the other joins: a fresh binary on the hosted Mac runners can take well over
+        // 30 s to start (main CI timed out here with the device not yet printing anything).
+        wait_for("the request to join", Duration::from_secs(90), &[&coord, m], || {
             let (_, r) = http(portal, "GET", "/api/joins", None);
             match r["joins"].as_array().and_then(|j| j.first()) {
                 Some(j) => {

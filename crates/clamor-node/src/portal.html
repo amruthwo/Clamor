@@ -1378,8 +1378,11 @@ function renderChatHeader() {
 
 // ------------------------------------------------------------------ Banners (things that need you)
 function renderBanners() {
-  // A browser asking to sign in (any person can approve it as themselves).
-  const html = pending.map(s => `<div class="banner" style="margin:8px 0">${ic('login')}<div class="text"><b>A browser wants to sign in</b> (${esc(s.from)}). If it shows <b>${esc(s.code)}</b> and it is you, approve it.</div><button class="btn filled st" onclick='act(() => api("/api/login/approve", "POST", { code: ${js(s.code)} }), "Signed in")'>Approve as me</button></div>`).join('');
+  // A browser asking to sign in (any person can approve it as themselves, or turn it down).
+  const html = pending.map(s => {
+    const where = s.local ? 'on this computer' : s.device ? `on <b>${esc(dn(s.device))}</b> (${esc(s.from)})` : `at ${esc(s.from)}`;
+    return `<div class="banner" style="margin:8px 0">${ic('login')}<div class="text"><b>Sign-in request</b><br>A web browser ${where} wants to open Clamor as you. Approve only if it shows <b style="white-space:nowrap">${esc(s.code)}</b>.</div><div class="row" style="gap:8px;margin-left:auto"><button class="btn text st" onclick='act(() => api("/api/login/decline", "POST", { code: ${js(s.code)} }), "Turned down")'>Not me</button><button class="btn filled st" onclick='act(() => api("/api/login/approve", "POST", { code: ${js(s.code)} }), "Approved: that browser is signed in as you")'>Approve</button></div></div>`;
+  }).join('');
   $('banners-chat').innerHTML = html; $('banners-swarm').innerHTML = html + handoverBanners();
   if ($('banners-coord')) $('banners-coord').innerHTML = handoverBanners();
   $('coord-dot').hidden = !joins.length;
@@ -1395,6 +1398,7 @@ async function checkMe() {
     if (!signin) { signin = await api('/api/login/start', 'POST'); $('si-code').textContent = signin.code; }
     const p = await fetch('/api/login/poll?id=' + signin.id);
     if (p.status === 410) { signin = null; $('si-status').textContent = 'That code expired; here is a new one.'; }
+    else if (p.status === 403) { signin = null; $('si-status').textContent = 'That sign-in was turned down on another device. Here is a new code.'; }
     else if ((await p.json()).approved) { signin = null; location.reload(); }
     return false;
   }

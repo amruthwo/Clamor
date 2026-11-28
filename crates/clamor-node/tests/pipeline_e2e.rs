@@ -876,6 +876,16 @@ fn people_roles_and_signing_in() {
     let (_, _, me) = http_c(portal, "GET", "/api/me", None, Some(&cookie));
     assert_eq!((me["name"].as_str(), me["how"].as_str()), (Some("Bea"), Some("session")), "{me}");
     assert_eq!(http_c(portal, "GET", &format!("/api/login/poll?id={id}"), None, None).0, 410, "the code works once");
+    // "Not me": a turned-down browser is told so, and the code can no longer be approved.
+    let (_, _, start) = http_c(portal, "POST", "/api/login/start", None, None);
+    let (id, code) = (start["id"].as_str().unwrap().to_string(), start["code"].as_str().unwrap().to_string());
+    let (_, pend) = http(dash, "GET", "/api/login/pending", None);
+    let entry = pend["pending"].as_array().unwrap().iter().find(|p| p["code"] == code.as_str()).cloned().expect("listed");
+    assert_eq!(entry["local"], true, "a browser on the coordinator is 'this computer': {entry}");
+    assert_eq!(http(dash, "POST", "/api/login/decline", Some(json!({ "code": code }))).0, 200);
+    assert_eq!(http(dash, "POST", "/api/login/approve", Some(json!({ "code": code }))).0, 404, "turned down for good");
+    assert!(http(dash, "GET", "/api/login/pending", None).1["pending"].as_array().unwrap().iter().all(|p| p["code"] != code.as_str()));
+    assert_eq!(http_c(portal, "GET", &format!("/api/login/poll?id={id}"), None, None).0, 403, "the browser is told");
 
     // PIN: Bea sets one, signs in with it; wrong PINs lock it.
     assert_eq!(http(dash, "POST", "/api/me/pin", Some(json!({ "pin": "12" }))).0, 400);

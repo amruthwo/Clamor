@@ -1150,6 +1150,8 @@ fn the_openai_api_needs_a_key() {
     let id = k["id"].as_str().unwrap();
     assert_eq!(http(dash, "DELETE", &format!("/api/me/keys/{id}"), None).0, 200);
     assert_eq!(http_key(portal, "GET", "/v1/models", &key, None).0, 401, "revoked");
+    let _ = std::fs::remove_dir_all(&dir);
+}
 
 /// Model handover: a device holding the swarm's only copy of a model is removed. The model is
 /// copied to the coordinator first (checked to be the same model), and only then does the device

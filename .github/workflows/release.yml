@@ -98,7 +98,14 @@ jobs:
         with: { path: dist, merge-multiple: true }
       - name: Keep build-only files out of the release
         # The Android R8 mapping (for reading crash traces) stays with the workflow run.
-        run: find dist -name 'mapping.txt' -print -delete
+        # Its folder (e.g. universalRelease/) goes too: the release is a flat list of files, and
+        # a folder left behind broke the checksums step of the first 0.8.0 build.
+        run: |
+          find dist -name 'mapping.txt' -print -delete
+          find dist -mindepth 1 -type d -empty -print -delete
+          if [ -n "$(find dist -mindepth 1 -type d)" ]; then
+            echo "::error::folders in the release files:"; find dist -mindepth 1 -type d; exit 1
+          fi
       - name: Check the tag matches the version
         if: startsWith(github.ref, 'refs/tags/v')
         run: |

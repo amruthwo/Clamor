@@ -19,3 +19,11 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+# --- Clamor ---
+# Methods the web page calls (window.ClamorAndroid.*): never rename or remove them.
+-keepclassmembers class * {
+    @android.webkit.JavascriptInterface <methods>;
+}
+-keepattributes JavascriptInterface,*Annotation*
+# Clamor's own activities, service and bridges (also reached from the manifest and JNI).
+-keep class io.github.amruthwo.Clamor.** { *; }

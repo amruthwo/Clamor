@@ -99,7 +99,11 @@ impl Chats {
         let Some(c) = self.convs.get_mut(id) else { return };
         // A personal chat is named after its first question.
         if c.owner.is_some() && c.messages.is_empty() && msg.role == "user" {
-            let t: String = msg.content.split_whitespace().collect::<Vec<_>>().join(" ");
+            // Documents in the message ("--- file: NAME ---" ... ) do not make a title: the
+            // question does, or else the first file's name.
+            let question = msg.content.split("\n\n--- file: ").next().unwrap_or("").trim();
+            let source = if question.is_empty() || question.starts_with("--- file: ") { msg.content.lines().find_map(|l| l.strip_prefix("--- file: ").and_then(|r| r.strip_suffix(" ---"))).unwrap_or("Document").to_string() } else { question.to_string() };
+            let t: String = source.split_whitespace().collect::<Vec<_>>().join(" ");
             c.title = if t.chars().count() > 48 { format!("{}…", t.chars().take(47).collect::<String>()) } else { t };
         }
         c.updated = msg.at;
@@ -179,6 +183,13 @@ mod tests {
         assert!(c.can_open(&id, "bea") && !c.can_open(&id, "cal"), "personal");
         assert!(c.can_open(GROUP, "cal"), "the group is everyone's");
         assert_eq!(c.list("bea")[0]["title"], "What is the capital of France?");
+        // A first message with a document: titled by the question, or the file's name.
+        let id2 = c.create("bea", 2);
+        c.append(&id2, ChatMsg { role: "user".into(), content: "Summarize this\n\n--- file: notes.md ---\n# Notes\n--- end of notes.md ---".into(), by: None, at: 2, tok_s: None, stopped: false, error: None });
+        let id3 = c.create("bea", 3);
+        c.append(&id3, ChatMsg { role: "user".into(), content: "--- file: plan.txt ---\nstep one\n--- end of plan.txt ---".into(), by: None, at: 3, tok_s: None, stopped: false, error: None });
+        let titles: Vec<String> = c.list("bea").iter().map(|x| x["title"].as_str().unwrap().to_string()).collect();
+        assert!(titles.contains(&"Summarize this".to_string()) && titles.contains(&"plan.txt".to_string()), "{titles:?}");
         assert!(c.list("cal").is_empty());
         let again = Chats::load(&dir, "s");
         assert_eq!(again.get(&id).unwrap().messages.len(), 1, "saved");

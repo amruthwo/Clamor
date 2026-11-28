@@ -40,6 +40,7 @@ MODELS = [
     ("qwen2.5-coder-14b", "Qwen2.5 Coder 14B Instruct", "Alibaba Qwen", "Apache-2.0", "Writes and explains code; stronger.", "bartowski/Qwen2.5-Coder-14B-Instruct-GGUF", ["code"]),
     ("qwen2.5-coder-32b", "Qwen2.5 Coder 32B Instruct", "Alibaba Qwen", "Apache-2.0", "One of the best open coding models.", "bartowski/Qwen2.5-Coder-32B-Instruct-GGUF", ["code"]),
     ("deepseek-r1-distill-llama-8b", "DeepSeek R1 Distill Llama 8B", "DeepSeek", "MIT (Llama 3.1 base)", "Thinks step by step before answering.", "bartowski/DeepSeek-R1-Distill-Llama-8B-GGUF", ["thinking"]),
+    ("deepseek-r1-distill-qwen-1.5b", "DeepSeek R1 Distill Qwen 1.5B", "DeepSeek", "MIT", "Small model that thinks step by step before answering.", "bartowski/DeepSeek-R1-Distill-Qwen-1.5B-GGUF", ["thinking"]),
     ("deepseek-r1-distill-qwen-7b", "DeepSeek R1 Distill Qwen 7B", "DeepSeek", "MIT", "Thinks step by step before answering.", "bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF", ["thinking"]),
     ("deepseek-r1-distill-qwen-14b", "DeepSeek R1 Distill Qwen 14B", "DeepSeek", "MIT", "Thinks step by step; stronger reasoning.", "bartowski/DeepSeek-R1-Distill-Qwen-14B-GGUF", ["thinking"]),
     ("qwen3-8b", "Qwen3 8B", "Alibaba Qwen", "Apache-2.0", "Tools and switchable thinking.", "Qwen/Qwen3-8B-GGUF", ["thinking"]),

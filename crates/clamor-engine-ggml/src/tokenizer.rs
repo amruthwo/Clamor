@@ -44,7 +44,9 @@ fn pre_rules(pre: &str) -> Option<(&'static [&'static str], bool)> {
         "smollm" | "starcoder" => (&[r"\p{N}", GPT2], false),
         // Llama 3 also takes a whole word straight from the vocabulary when it is there.
         "llama-bpe" | "llama3" => (&[LLAMA3], true),
-        "qwen2" => (&[QWEN2], false),
+        // DeepSeek's R1 distills of Qwen2.5 name their own, but use exactly Qwen2's rules
+        // (checked against their tokenizer.json; tests/tokenizer_ref.rs).
+        "qwen2" | "deepseek-r1-qwen" => (&[QWEN2], false),
         _ => return None,
     })
 }

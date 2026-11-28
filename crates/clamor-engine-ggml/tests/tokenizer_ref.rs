@@ -40,6 +40,7 @@ struct Family {
 const FAMILIES: &[Family] = &[
     Family { repo: "HuggingFaceTB/SmolLM2-360M-Instruct", pre: "smollm" },
     Family { repo: "Qwen/Qwen2.5-0.5B-Instruct", pre: "qwen2" },
+    Family { repo: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B", pre: "deepseek-r1-qwen" },
     Family { repo: "unsloth/Llama-3.2-1B-Instruct", pre: "llama-bpe" },
     Family { repo: "openai-community/gpt2", pre: "gpt2" },
 ];

@@ -206,7 +206,17 @@ table.data td.wrap { white-space:normal; min-width:180px; }
 .m .bubble { padding:10px 16px; border-radius:20px; width:fit-content; max-width:100%; font-size:16px; line-height:24px; letter-spacing:.2px; overflow-wrap:anywhere; white-space:pre-wrap; }
 .m.me .bubble { background:var(--primary-container); color:var(--on-primary-container); border-bottom-right-radius:6px; }
 .m.other .bubble { background:var(--surface-container-high); border-bottom-left-radius:6px; }
-.m.bot .body { flex:1; min-width:0; font-size:16px; line-height:24px; letter-spacing:.2px; white-space:pre-wrap; overflow-wrap:anywhere; }
+.m.bot .body { flex:1; min-width:0; font-size:16px; line-height:24px; letter-spacing:.2px; overflow-wrap:anywhere; }
+.md p { margin:0 0 10px; } .md > :last-child { margin-bottom:0; }
+.md ul, .md ol { margin:0 0 10px; padding-left:24px; } .md li { margin:2px 0; }
+.md .h { font-weight:600; margin:14px 0 6px; } .md .h1, .md .h2 { font-size:19px; } .md .h3 { font-size:17px; } .md > .h:first-child { margin-top:0; }
+.md code { font:14px/1.4 ui-monospace, monospace; background:var(--surface-container-high); padding:1px 5px; border-radius:6px; }
+.md pre.code { margin:0 0 10px; padding:12px 14px; border-radius:12px; background:var(--surface-container-high); overflow-x:auto; }
+.md pre.code code { background:none; padding:0; white-space:pre; }
+.md blockquote { margin:0 0 10px; padding:2px 0 2px 12px; border-left:3px solid var(--outline-variant); color:var(--on-surface-variant); }
+.md hr { border:0; border-top:1px solid var(--outline-variant); margin:12px 0; }
+.md .md-table { margin:0 0 10px; background:var(--surface-container-low); }
+.md .md-table td, .md .md-table th { white-space:normal; }
 .m .who { font-size:12px; color:var(--on-surface-variant); margin-bottom:2px; font-weight:500; white-space:normal; }
 .m.err .body { color:var(--error); }
 .bot-avatar { width:32px; height:32px; border-radius:10px; flex:none; }
@@ -1089,6 +1099,74 @@ function chatMeta() {
 }
 // Reasoning models write their thinking first, in <think>...</think> (some templates open the
 // tag in the prompt, so only "</think>" appears). Fold it away above the answer.
+// Markdown in replies (models write it): a small renderer that escapes everything first, so no
+// text can become markup it was not meant to be. Links: http(s) only, opening a new window.
+function mdInline(t) {
+  const codes = [];
+  t = t.replace(/`([^`\n]+)`/g, (_, c) => { codes.push(c); return `\u0000${codes.length - 1}\u0000`; });
+  t = t.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, (_, txt, url) => `<a href="${url}" target="_blank" rel="noopener">${txt}</a>`)
+    .replace(/\*\*([^*\n]+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/(^|[^\w])__([^_\n]+?)__(?=[^\w]|$)/g, '$1<strong>$2</strong>')
+    .replace(/(^|[^*\w])\*([^*\s][^*\n]*?)\*(?=[^*\w]|$)/g, '$1<em>$2</em>')
+    .replace(/(^|[^\w])_([^_\s][^_\n]*?)_(?=[^\w]|$)/g, '$1<em>$2</em>')
+    .replace(/~~([^~\n]+?)~~/g, '<del>$1</del>');
+  return t.replace(/\u0000(\d+)\u0000/g, (_, i) => `<code>${codes[i]}</code>`);
+}
+function md(text) {
+  const lines = esc(String(text || '')).split('\n');
+  const out = [];
+  let i = 0;
+  const isTableSep = l => /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$/.test(l);
+  const cells = l => l.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => mdInline(c.trim()));
+  while (i < lines.length) {
+    const l = lines[i];
+    const fence = l.match(/^\s*```\s*([\w+-]*)\s*$/);
+    if (fence) {
+      const body = [];
+      i++;
+      while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) body.push(lines[i++]);
+      i++;
+      out.push(`<pre class="code"><code>${body.join('\n')}</code></pre>`);
+      continue;
+    }
+    if (/^\s*$/.test(l)) { i++; continue; }
+    const h = l.match(/^(#{1,6})\s+(.*)$/);
+    if (h) { out.push(`<div class="h h${h[1].length}">${mdInline(h[2])}</div>`); i++; continue; }
+    if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(l)) { out.push('<hr>'); i++; continue; }
+    if (l.includes('|') && i + 1 < lines.length && isTableSep(lines[i + 1])) {
+      const head = cells(l); i += 2;
+      const rows = [];
+      while (i < lines.length && lines[i].includes('|') && !/^\s*$/.test(lines[i])) rows.push(cells(lines[i++]));
+      out.push(`<div class="table-wrap md-table"><table class="data"><thead><tr>${head.map(c => `<th>${c}</th>`).join('')}</tr></thead><tbody>${rows.map(r => `<tr>${r.map(c => `<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`);
+      continue;
+    }
+    if (/^\s*&gt;\s?/.test(l)) {
+      const q = [];
+      while (i < lines.length && /^\s*&gt;\s?/.test(lines[i])) q.push(lines[i++].replace(/^\s*&gt;\s?/, ''));
+      out.push(`<blockquote>${md(q.join('\n').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'"))}</blockquote>`);
+      continue;
+    }
+    const li = l.match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/);
+    if (li) {
+      const ordered = /\d/.test(li[2]);
+      const start = ordered ? parseInt(li[2], 10) : 1;
+      const items = [];
+      while (i < lines.length) {
+        const m = lines[i].match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/);
+        if (m && /\d/.test(m[2]) === ordered && m[1].length < 2) { items.push(mdInline(m[3])); i++; continue; }
+        // A nested or continued line belongs to the item before it.
+        if (items.length && /^\s{2,}\S/.test(lines[i])) { const n = lines[i].trim().match(/^([-*+]|\d+[.)])\s+(.*)$/); items[items.length - 1] += n ? `<br>• ${mdInline(n[2])}` : ' ' + mdInline(lines[i].trim()); i++; continue; }
+        break;
+      }
+      out.push(ordered ? `<ol${start !== 1 ? ` start="${start}"` : ''}>${items.map(x => `<li>${x}</li>`).join('')}</ol>` : `<ul>${items.map(x => `<li>${x}</li>`).join('')}</ul>`);
+      continue;
+    }
+    const para = [];
+    while (i < lines.length && !/^\s*$/.test(lines[i]) && !/^(#{1,6})\s/.test(lines[i]) && !/^\s*```/.test(lines[i]) && !/^(\s*)([-*+]|\d+[.)])\s+/.test(lines[i]) && !/^\s*&gt;/.test(lines[i])) para.push(mdInline(lines[i++]));
+    out.push(`<p>${para.join('<br>')}</p>`);
+  }
+  return out.join('');
+}
 function splitThink(text) {
   let t = String(text || '');
   const opened = /^\s*<think>/.test(t);
@@ -1109,7 +1187,7 @@ function msgHtml(m) {
   if (m.error) return `<div class="m bot err"><img class="bot-avatar" src="/icon.svg" alt=""><div class="body"><div class="who">Clamor</div>Couldn't answer: ${esc(m.error)}</div></div>`;
   if (m.role !== 'user') {
     const t = splitThink(m.content);
-    return `<div class="m bot"><img class="bot-avatar" src="/icon.svg" alt=""><div class="body"><div class="who">Clamor${m.stopped ? ' · stopped' : ''}</div>${thinkHtml(t.think, false, false)}${esc(t.answer)}${m.tok_s ? `<span class="meta">${m.tok_s.toFixed(1)} tok/s</span>` : ''}<div class="msg-actions"><button type="button" class="icon-btn st" title="Copy" data-t="${esc(t.answer || m.content)}" onclick="copyText(this.dataset.t)">${ic('content_copy')}</button></div></div></div>`;
+    return `<div class="m bot"><img class="bot-avatar" src="/icon.svg" alt=""><div class="body"><div class="who">Clamor${m.stopped ? ' · stopped' : ''}</div>${thinkHtml(t.think, false, false)}<div class="md">${md(t.answer)}</div>${m.tok_s ? `<span class="meta">${m.tok_s.toFixed(1)} tok/s</span>` : ''}<div class="msg-actions"><button type="button" class="icon-btn st" title="Copy" data-t="${esc(t.answer || m.content)}" onclick="copyText(this.dataset.t)">${ic('content_copy')}</button></div></div></div>`;
   }
   const mine = chatId !== 'group' || !m.by || m.by === me.name;
   const f = splitFiles(m.content);
@@ -1159,7 +1237,7 @@ function liveHtml(text) {
   const t = splitThink(text);
   const body = !text ? '<span class="typing"><i></i><i></i><i></i></span>'
     : whole ? `<span class="muted">${t.thinking ? 'Thinking… ' + plural(words(t.think), 'word') : `Writing… ${plural(words(t.answer || ''), 'word')} so far`}</span>`
-    : thinkHtml(t.think, t.thinking, true) + esc(t.answer);
+    : thinkHtml(t.think, t.thinking, true) + `<div class="md">${md(t.answer)}</div>`;
   return `<div class="m bot" id="live"><img class="bot-avatar thinking" src="/icon.svg" alt=""><div class="body"><div class="who">Clamor</div>${body}</div></div>`;
 }
 // Follow new text only while the reader is at the bottom; reading further up stays put.

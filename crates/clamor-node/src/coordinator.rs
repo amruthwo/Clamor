@@ -107,7 +107,7 @@ impl SwarmAuth {
             None => {
                 let id = crate::people::new_person_id();
                 let pname = person_name.map(str::trim).filter(|n| !n.is_empty()).unwrap_or(name);
-                self.profile.people.push(crate::people::Person { id: id.clone(), name: pname.chars().take(40).collect(), role: crate::people::Role::Member, pin: None, created_unix: unix_now(), reply_style: None });
+                self.profile.people.push(crate::people::Person { id: id.clone(), name: pname.chars().take(40).collect(), role: crate::people::Role::Member, pin: None, created_unix: unix_now(), reply_style: None, api_keys: Vec::new() });
                 id
             }
         };

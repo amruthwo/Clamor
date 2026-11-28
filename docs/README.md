@@ -2,6 +2,7 @@
 
 - [Updating](updating.md): how the apps and `clamor-node` update themselves, and how updates are
   verified.
+- [Connecting apps](api.md): the OpenAI-compatible API, API keys, and examples.
 - [Models](models.md): finding, downloading and running models; what Clamor runs today.
 - [Device settings](device-settings.md): how much of each device Clamor may use, pausing,
   battery, priority, and where settings are kept.

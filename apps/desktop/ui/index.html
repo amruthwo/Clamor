@@ -320,6 +320,7 @@ addEventListener('message', e => {
   else if (clamor === 'log') logSheet();
   else if (clamor === 'change-swarm') changeSwarm();
   else if (clamor === 'autostart') setAutostart(!!value);
+  else if (clamor === 'open' && typeof value === 'string' && /^https:\/\//.test(value)) invoke('plugin:opener|open_url', { url: value }).catch(e => console.warn('open:', e));
 });
 
 // ------------------------------------------------------------------ Updates

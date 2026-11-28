@@ -19,6 +19,7 @@ mod private;
 mod share;
 mod stage;
 pub mod models;
+pub mod openai;
 pub mod update;
 mod wire;
 

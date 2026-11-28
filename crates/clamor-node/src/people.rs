@@ -32,6 +32,34 @@ pub struct Person {
     /// How the model's replies appear: "stream" (as they are written; the default) or "whole".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_style: Option<String>,
+    /// Keys for the OpenAI-compatible API (/v1), which act as this person. Only hashes are kept.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub api_keys: Vec<ApiKey>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ApiKey {
+    pub id: String,
+    /// What the person called it ("Zed on my laptop").
+    pub name: String,
+    /// SHA-256 of the key, hex.
+    pub hash: String,
+    /// The key's first characters, to tell keys apart ("clm_3f9a…").
+    pub hint: String,
+    pub created_unix: u64,
+}
+
+/// A new API key: (the key, shown once; its record). Keys are 32 random bytes: hashing (no
+/// salt, no stretching) is enough, unlike PINs.
+pub fn new_api_key(name: &str) -> (String, ApiKey) {
+    let key = format!("clm_{}", hex::encode(crate::auth::random_bytes::<32>()));
+    let rec = ApiKey { id: hex::encode(crate::auth::random_bytes::<6>()), name: name.chars().take(60).collect(), hash: hash_api_key(&key), hint: key[..8].to_string(), created_unix: clamor_proto::unix_now() };
+    (key, rec)
+}
+
+pub fn hash_api_key(key: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(key.as_bytes()))
 }
 
 pub const OWNER_ID: &str = "owner";

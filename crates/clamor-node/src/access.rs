@@ -50,6 +50,17 @@ fn loopback_is_owner() -> bool {
 pub fn identify(sw: &Swarm, peer: SocketAddr, via: Via, method: &Method, path_q: &str, headers: &HeaderMap) -> Option<Caller> {
     let profile = &sw.auth.profile;
     let as_caller = |id: &str, how, device: Option<String>| profile.person(id).map(|p| Caller { person: p.id.clone(), name: p.name.clone(), role: p.role, how, device });
+    // An API key: only for the OpenAI-compatible API (/v1), never the dashboard's own API.
+    if path_q.starts_with("/v1/") {
+        if let Some(key) = headers.get(axum::http::header::AUTHORIZATION).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ")) {
+            let hash = crate::people::hash_api_key(key.trim());
+            if let Some(p) = profile.people.iter().find(|p| p.api_keys.iter().any(|k| k.hash == hash)) {
+                return as_caller(&p.id, "api", None);
+            }
+            // An unknown key: no more than any other request (an app on this device, or the
+            // coordinator machine, still gets in the way it otherwise would; others are refused).
+        }
+    }
     // A device's signature (only over TLS: the body is not signed, TLS protects it).
     if via == Via::Tls {
         if let Some(h) = headers.get(crate::auth::SHARE_AUTH_HEADER).and_then(|v| v.to_str().ok()) {
@@ -120,6 +131,9 @@ pub async fn layer(State(shared): State<Shared>, mut req: Request, next: Next) -
         identify(&sw, peer, via, req.method(), &path_q, req.headers())
     };
     let Some(caller) = caller else {
+        if req.uri().path().starts_with("/v1/") {
+            return crate::openai::error(StatusCode::UNAUTHORIZED, "missing or unknown API key: create one in Clamor under Settings -> API keys", "invalid_api_key");
+        }
         return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
     };
     if caller.role < need {

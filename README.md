@@ -45,6 +45,8 @@ passes work between them.
   admin approve it. Phones help too, while they are charging.
 - **Stay in charge of each device**: how much memory and processor Clamor may use, whether it works on battery,
   and whether it steps aside while you use the device. See [device settings](docs/device-settings.md).
+- **Connect your apps**: Clamor speaks OpenAI's API, so coding assistants, chat apps and scripts can use your
+  swarm's model with an API key. See [connecting apps](docs/api.md).
 - **Share it with the household**: people have their own names and devices, with owner, admin and member roles.
   See [people](docs/people.md).
 
@@ -105,7 +107,7 @@ Tried by hand: Linux on an Apple M1 (Fedora Asahi, including GPU inference with 
 Ultra. The macOS and Windows apps are built by CI but not yet tried on real machines. CUDA builds are
 compile-checked only.
 
-**Coming next:** an OpenAI-compatible API (so coding tools and agents can use your swarm), tool calling with an
+**Coming next:** tool calling (for coding agents) with an
 optional online mode and MCP, model handover when a device leaves, using your swarm away from home, and more model
 families (Qwen3, Gemma 3, vision and embedding models).
 

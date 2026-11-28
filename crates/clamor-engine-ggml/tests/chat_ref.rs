@@ -6,7 +6,7 @@
 use clamor_engine_ggml::*;
 use serde_json::Value;
 
-const REPOS: &[&str] = &["HuggingFaceTB/SmolLM2-360M-Instruct", "Qwen/Qwen2.5-0.5B-Instruct", "unsloth/Llama-3.2-1B-Instruct", "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"];
+const REPOS: &[&str] = &["HuggingFaceTB/SmolLM2-360M-Instruct", "Qwen/Qwen2.5-0.5B-Instruct", "unsloth/Llama-3.2-1B-Instruct", "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B", "Qwen/Qwen3-0.6B"];
 
 fn conversations() -> Vec<Vec<ChatMessage>> {
     let m = ChatMessage::new;

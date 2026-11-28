@@ -27,7 +27,7 @@ pub use smoke::{matmul_check, matmul_gflops, MatmulReport};
 pub use tokenizer::{supports_pre, token_type, StreamDecoder, Tokenizer};
 
 /// Model architectures the engine runs (`general.architecture`).
-pub const ARCHITECTURES: &[&str] = &["llama", "qwen2"];
+pub const ARCHITECTURES: &[&str] = &["llama", "qwen2", "qwen3"];
 
 /// Can the engine run a model with this architecture and pre-tokenizer? Why not, if not.
 pub fn supports_model(arch: &str, tokenizer_pre: &str) -> std::result::Result<(), String> {

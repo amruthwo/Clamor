@@ -37,15 +37,16 @@ def kv(k):
     f = r.fields[k]
     return f.contents()
 arch = str(kv("general.architecture"))
-assert arch in ("llama", "qwen2"), f"unsupported architecture {arch}"
+assert arch in ("llama", "qwen2", "qwen3"), f"unsupported architecture {arch}"
 P = arch + "."
 n_layer = int(kv(P + "block_count")); E = int(kv(P + "embedding_length"))
 H = int(kv(P + "attention.head_count")); HKV = int(kv(P + "attention.head_count_kv"))
 eps = float(kv(P + "attention.layer_norm_rms_epsilon")); base = float(kv(P + "rope.freq_base"))
-HD = E // H
-# Qwen2 rotates the two halves of each head (NEOX); llama.cpp's converter permutes Llama's q/k
+# Qwen3 states its head size (key_length); otherwise it is embedding / heads.
+HD = int(kv(P + "attention.key_length")) if (P + "attention.key_length") in r.fields else E // H
+# Qwen2/3 rotate the two halves of each head (NEOX); llama.cpp's converter permutes Llama's q/k
 # weights so Llama rotates adjacent pairs (NORM).
-NEOX = arch == "qwen2"
+NEOX = arch in ("qwen2", "qwen3")
 # Llama 3 RoPE scaling: frequency i is divided by rope_freqs[i].
 FF = np.array(next(t.data for t in r.tensors if t.name == "rope_freqs.weight"), dtype=np.float64) if any(t.name == "rope_freqs.weight" for t in r.tensors) else np.ones(HD // 2)
 
@@ -77,8 +78,11 @@ def forward(toks):
     for l in range(n_layer):
         g = lambda s: T[f"blk.{l}.{s}.weight"]
         h = rms(x, g("attn_norm"))
-        q = rope((h @ g("attn_q").T + bias(l, "attn_q")).reshape(n, H, HD), pos)
-        k = rope((h @ g("attn_k").T + bias(l, "attn_k")).reshape(n, HKV, HD), pos)
+        q = (h @ g("attn_q").T + bias(l, "attn_q")).reshape(n, H, HD)
+        k = (h @ g("attn_k").T + bias(l, "attn_k")).reshape(n, HKV, HD)
+        if f"blk.{l}.attn_q_norm.weight" in T:  # Qwen3: RMS norm over each head, before RoPE
+            q, k = rms(q, g("attn_q_norm")), rms(k, g("attn_k_norm"))
+        q, k = rope(q, pos), rope(k, pos)
         v = (h @ g("attn_v").T + bias(l, "attn_v")).reshape(n, HKV, HD)
         rep = H // HKV
         k = np.repeat(k, rep, axis=1); v = np.repeat(v, rep, axis=1)

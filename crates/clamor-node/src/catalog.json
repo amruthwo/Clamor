@@ -597,6 +597,66 @@
    ]
   },
   {
+   "id": "qwen3-0.6b",
+   "name": "Qwen3 0.6B",
+   "maker": "Alibaba Qwen",
+   "license": "Apache-2.0",
+   "about": "Tiny and quick; thinks step by step when asked to.",
+   "repo": "Qwen/Qwen3-0.6B-GGUF",
+   "arch": "qwen3",
+   "tokenizer_pre": "qwen2",
+   "params_b": 0.6,
+   "n_layers": 28,
+   "hidden_dim": 1024,
+   "kv_ratio": 0.5,
+   "context": 40960,
+   "caps": [
+    "thinking",
+    "tools"
+   ],
+   "files": [
+    {
+     "quant": "Q8_0",
+     "file": "Qwen3-0.6B-Q8_0.gguf",
+     "size": 639446688,
+     "sha256": "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031"
+    }
+   ]
+  },
+  {
+   "id": "qwen3-4b",
+   "name": "Qwen3 4B",
+   "maker": "Alibaba Qwen",
+   "license": "Apache-2.0",
+   "about": "Strong small model with tools and switchable thinking.",
+   "repo": "Qwen/Qwen3-4B-GGUF",
+   "arch": "qwen3",
+   "tokenizer_pre": "qwen2",
+   "params_b": 4.02,
+   "n_layers": 36,
+   "hidden_dim": 2560,
+   "kv_ratio": 0.25,
+   "context": 40960,
+   "caps": [
+    "thinking",
+    "tools"
+   ],
+   "files": [
+    {
+     "quant": "Q8_0",
+     "file": "Qwen3-4B-Q8_0.gguf",
+     "size": 4280404704,
+     "sha256": "8c2f07f26af9747e41988551106f149b03eb9b5cb6df636027b6bf6278473300"
+    },
+    {
+     "quant": "Q4_K_M",
+     "file": "Qwen3-4B-Q4_K_M.gguf",
+     "size": 2497280256,
+     "sha256": "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5"
+    }
+   ]
+  },
+  {
    "id": "qwen3-8b",
    "name": "Qwen3 8B",
    "maker": "Alibaba Qwen",

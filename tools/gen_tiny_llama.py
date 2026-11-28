@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Write a tiny random-weight Llama-architecture GGUF (f32) for engine tests.
 
-Usage: gen_tiny_llama.py OUT.gguf [--layers 4] [--seed 0] [--tied] [--bytes-vocab] [--arch qwen2] [--rope-freqs]
+Usage: gen_tiny_llama.py OUT.gguf [--layers 4] [--seed 0] [--tied] [--bytes-vocab] [--arch qwen2|qwen3] [--rope-freqs]
 --tied omits output.weight, so lm_head reuses token_embd.weight (as many small models do).
 Weights are in ggml convention (RoPE on adjacent pairs), so ref_forward.py and the
 Rust graph must agree on exactly this definition.
@@ -15,8 +15,9 @@ p.add_argument("out")
 p.add_argument("--layers", type=int, default=4)
 p.add_argument("--seed", type=int, default=0)
 p.add_argument("--tied", action="store_true", help="omit output.weight (lm_head tied to token_embd)")
-p.add_argument("--arch", choices=["llama", "qwen2"], default="llama",
-               help="qwen2: q/k/v biases and NEOX RoPE (as Qwen2/2.5)")
+p.add_argument("--arch", choices=["llama", "qwen2", "qwen3"], default="llama",
+               help="qwen2: q/k/v biases and NEOX RoPE (as Qwen2/2.5); qwen3: per-head RMS norm on q and k, "
+                    "NEOX RoPE, and a head size that is not embedding / heads (as Qwen3)")
 p.add_argument("--rope-freqs", action="store_true", help="add a rope_freqs.weight tensor (Llama 3 RoPE scaling)")
 p.add_argument("--ctx", type=int, default=64, help="context_length to declare (the weights do not depend on it)")
 p.add_argument("--alignment", type=int, default=0, help="GGUF data alignment (default: the format's 32)")
@@ -29,6 +30,8 @@ E, H, HKV, FF, V, CTX = 64, 4, 2, 128, 128, a.ctx
 if a.bytes_vocab:
     V = 259
 HD = E // H
+if a.arch == "qwen3":
+    HD = 24  # q is H * HD = 96 wide while the embedding is 64: the head size is stated, not derived
 rng = np.random.default_rng(a.seed)
 
 def w(*shape, scale=None):
@@ -56,6 +59,9 @@ wr.add_head_count(H)
 wr.add_head_count_kv(HKV)
 wr.add_layer_norm_rms_eps(1e-5)
 wr.add_rope_dimension_count(HD)
+if a.arch == "qwen3":
+    wr.add_key_length(HD)
+    wr.add_value_length(HD)
 wr.add_rope_freq_base(10000.0)
 wr.add_vocab_size(V)
 if a.bytes_vocab:
@@ -86,6 +92,9 @@ for i in range(a.layers):
     if a.arch == "qwen2":
         for nm, rows in (("attn_q", H * HD), ("attn_k", HKV * HD), ("attn_v", HKV * HD)):
             wr.add_tensor(f"blk.{i}.{nm}.bias", (0.5 * rng.standard_normal(rows)).astype(np.float32))
+    if a.arch == "qwen3":
+        wr.add_tensor(f"blk.{i}.attn_q_norm.weight", (1 + 0.2 * rng.standard_normal(HD)).astype(np.float32))
+        wr.add_tensor(f"blk.{i}.attn_k_norm.weight", (1 + 0.2 * rng.standard_normal(HD)).astype(np.float32))
     wr.add_tensor(f"blk.{i}.attn_output.weight", w(E, H * HD))
     wr.add_tensor(f"blk.{i}.ffn_norm.weight", (1 + 0.1 * rng.standard_normal(E)).astype(np.float32))
     wr.add_tensor(f"blk.{i}.ffn_gate.weight", w(FF, E))

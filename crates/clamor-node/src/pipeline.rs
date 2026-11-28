@@ -574,7 +574,7 @@ mod tests {
     }
 
     fn hp() -> LlamaHparams {
-        LlamaHparams { n_layer: 4, n_embd: 64, n_head: 4, n_head_kv: 2, n_ff: 128, n_vocab: 128, n_ctx_train: 64, n_rot: 16, rms_eps: 1e-5, rope_freq_base: 1e4, arch: "llama".into(), rope_neox: false }
+        LlamaHparams { n_layer: 4, n_embd: 64, n_head: 4, n_head_kv: 2, n_ff: 128, n_vocab: 128, n_ctx_train: 64, n_rot: 16, rms_eps: 1e-5, rope_freq_base: 1e4, arch: "llama".into(), rope_neox: false, head_dim: 16 }
     }
 
     fn sizes() -> HashMap<String, u64> {

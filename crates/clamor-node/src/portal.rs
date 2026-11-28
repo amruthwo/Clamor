@@ -856,7 +856,7 @@ async fn login_poll(State(shared): State<Shared>, Extension(via): Extension<crat
     };
     if sw.auth.signins[i].declined {
         sw.auth.signins.remove(i);
-        return (StatusCode::FORBIDDEN, "this sign-in was turned down on another device").into_response();
+        return (StatusCode::FORBIDDEN, "this sign-in was rejected on another device").into_response();
     }
     let Some(person) = sw.auth.signins[i].approved_by.clone() else {
         return Json(json!({ "approved": false })).into_response();

@@ -55,7 +55,17 @@ jobs:
           if [ -n "$F" ]; then apps/desktop/prepare.sh --features "$F"; else apps/desktop/prepare.sh; fi
       - name: App and installers
         working-directory: apps/desktop
-        run: cargo tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+        shell: bash
+        # macOS's disk-image tool on GitHub's runners now and then fails with "hdiutil: create
+        # failed - Resource busy"; a retry (everything is already compiled) gets past it.
+        run: |
+          for i in 1 2 3; do
+            cargo tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} && exit 0
+            [ "$RUNNER_OS" = macOS ] || exit 1
+            echo "::warning::installer build attempt $i failed; retrying in 30 s"
+            sleep 30
+          done
+          exit 1
       - name: Flatpak
         if: matrix.flatpak
         # Flathub's builder runs sandboxed and needs a session bus, which a headless runner lacks.

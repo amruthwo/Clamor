@@ -64,6 +64,8 @@ pub fn probe_node(id: NodeId) -> NodeInfo {
         .ok()
         .and_then(|d| d.iter().map(|x| x.available_space()).max())
         .unwrap_or(0);
+    // Tests: a device whose disk is (nearly) full.
+    let disk_free = std::env::var("CLAMOR_TEST_DISK_FREE").ok().and_then(|v| v.parse().ok()).unwrap_or(disk_free);
 
     let accelerators = detect_accelerators(os, &arch, ram_total);
     let class = classify(os, &arch, ram_total, power.is_some());

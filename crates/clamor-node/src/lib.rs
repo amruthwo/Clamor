@@ -18,6 +18,7 @@ mod portal;
 mod private;
 mod share;
 mod stage;
+pub mod handover;
 pub mod models;
 pub mod openai;
 pub mod update;

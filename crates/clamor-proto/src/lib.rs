@@ -281,6 +281,10 @@ pub struct BuildInfo {
     pub cpu: String,
     /// Git commit (12 hex digits) or "unknown".
     pub commit: String,
+    /// What this build can do beyond its protocol version, so the coordinator only sends a
+    /// message a device understands (e.g. "handover"). Older builds send none.
+    #[serde(default)]
+    pub features: Vec<String>,
 }
 
 /// The coordinator's side of the join handshake, sent in Welcome.
@@ -596,6 +600,22 @@ pub enum Message {
     DeleteModel {
         name: String,
         model_id: String,
+    },
+    /// Coordinator -> device (feature "handover"): copy the whole model file `name` from the
+    /// device whose model sharing is at `source` (it is leaving, with the swarm's only copy).
+    FetchModel {
+        name: String,
+        model_id: String,
+        source: String,
+    },
+    /// Device -> coordinator: how a `FetchModel` copy is going; `finished` once the file is in
+    /// place and checked, or `error`.
+    FetchProgress {
+        model_id: String,
+        done: u64,
+        total: u64,
+        finished: bool,
+        error: Option<String>,
     },
 }
 

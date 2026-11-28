@@ -437,6 +437,7 @@ pre.log { margin:0; padding:12px 14px; border-radius:12px; background:var(--surf
     <section class="screen" id="s-coord" hidden>
       <header class="topbar"><span class="title-l">Coordinator</span></header>
       <div class="scroll"><div class="wrap">
+        <div id="banners-coord"></div>
         <div class="card hero" id="coord-hero"></div>
         <div id="needs-wrap"><div class="section-title">Needs you</div><div style="display:grid;gap:12px" id="needs"></div></div>
         <div><div class="section-title">People</div><div class="list" id="coord-people"></div></div>
@@ -677,9 +678,28 @@ window.togglePause = id => {
 };
 window.removeDevice = async (id, away) => {
   closeOverlay();
-  if (await confirmDialog((away ? 'Forget ' : 'Remove ') + dn(id) + '?', away ? 'It is offline. It leaves the list, and coming back needs a new invitation (unless it is in the swarm under another name).' : 'It finishes its current work and leaves the swarm. To come back it needs a new invitation.', away ? 'Forget' : 'Remove', true))
-    act(() => api('/api/nodes/' + encodeURIComponent(id) + '/remove', 'POST'), 'Removing ' + dn(id));
+  if (!await confirmDialog((away ? 'Forget ' : 'Remove ') + dn(id) + '?', away ? 'It is offline. It leaves the list, and coming back needs a new invitation (unless it is in the swarm under another name).' : 'It finishes its current work and leaves the swarm. To come back it needs a new invitation.', away ? 'Forget' : 'Remove', true)) return;
+  removeNow(id, false);
 };
+// Remove a device. If it holds the swarm's only copy of a model, the model is copied to another
+// device first (it leaves after); if no device has room, say what would be lost.
+async function removeNow(id, now) {
+  const r = await fetch('/api/nodes/' + encodeURIComponent(id) + '/remove', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ now }) });
+  const t = await r.text(); let j = {}; try { j = JSON.parse(t); } catch {}
+  if (r.status === 202) snack(`Copying ${plural(j.handover.length, 'model')} off ${dn(id)} first; it leaves when ${j.handover.length === 1 ? 'that is' : 'they are'} safe`);
+  else if (r.status === 409) {
+    if (await confirmDialog(`Remove ${dn(id)} anyway?`, `It has the swarm's only copy of ${(j.models || []).join(', ')}, and no other device has room for ${(j.models || []).length === 1 ? 'it' : 'them'}. Removing it now loses ${(j.models || []).length === 1 ? 'that model' : 'those models'} (you can download ${(j.models || []).length === 1 ? 'it' : 'them'} again).`, 'Remove anyway', true)) removeNow(id, true);
+  } else if (r.ok) snack('Removing ' + dn(id));
+  else snack(t || r.statusText);
+  refresh();
+}
+// Models being copied off leaving devices: a banner with progress while it happens.
+let handovers = [];
+function handoverBanners() {
+  return handovers.filter(h => h.state === 'copying' || (h.state === 'failed' && Date.now() / 1000 - h.started_unix < 600)).map(h => h.state === 'failed'
+    ? `<div class="banner warn" style="margin:8px 0">${ic('error')}<div class="text"><b>Couldn't copy ${esc(modelName(h.name))} off ${esc(dn(h.from))}</b>, so it stays in the swarm. ${esc(h.error || '')}</div></div>`
+    : `<div class="banner" style="margin:8px 0">${ic('download')}<div class="text"><b>Copying ${esc(modelName(h.name))}</b> from ${esc(dn(h.from))} to ${esc(dn(h.to))} before ${esc(dn(h.from))} leaves: ${Math.floor(h.done / Math.max(h.size, 1) * 100)}%<div class="pbar"><i style="width:${(h.done / Math.max(h.size, 1) * 100).toFixed(1)}%"></i></div></div></div>`).join('');
+}
 
 // ------------------------------------------------------------------ Invites ("Add device")
 let inviteTimer;
@@ -1282,7 +1302,8 @@ function renderChatHeader() {
 function renderBanners() {
   // A browser asking to sign in (any person can approve it as themselves).
   const html = pending.map(s => `<div class="banner" style="margin:8px 0">${ic('login')}<div class="text"><b>A browser wants to sign in</b> (${esc(s.from)}). If it shows <b>${esc(s.code)}</b> and it is you, approve it.</div><button class="btn filled st" onclick='act(() => api("/api/login/approve", "POST", { code: ${js(s.code)} }), "Signed in")'>Approve as me</button></div>`).join('');
-  $('banners-chat').innerHTML = html; $('banners-swarm').innerHTML = html;
+  $('banners-chat').innerHTML = html; $('banners-swarm').innerHTML = html + handoverBanners();
+  if ($('banners-coord')) $('banners-coord').innerHTML = handoverBanners();
   $('coord-dot').hidden = !joins.length;
 }
 
@@ -1320,6 +1341,7 @@ async function refresh() {
       api('/api/overview'), api('/api/roster'), api('/api/people'), api('/api/login/pending'),
       me.role === 'member' ? { joins: [] } : api('/api/joins').catch(() => ({ joins: [] })),
       wantPlan ? api('/api/plan?' + q).catch(() => null) : null]);
+    handovers = (await api('/api/handovers').catch(() => ({ handovers: [] }))).handovers || [];
     o = ov; roster = ro; people = ppl.people; pending = pend.pending; joins = jn.joins;
     if (pl) { plan = pl; lastPlan = Date.now(); }
     nodes = Object.fromEntries(roster.nodes.map(n => [n.id, n]));

@@ -241,7 +241,7 @@ fn holders_in(sw: &crate::coordinator::Swarm, name: &str) -> Result<(ModelInfo, 
 }
 
 /// `http://host:port` at which `fetcher` can reach `holder`'s model sharing.
-fn share_url(sw: &crate::coordinator::Swarm, holder: &NodeId, fetcher: &NodeId) -> Option<String> {
+pub(crate) fn share_url(sw: &crate::coordinator::Swarm, holder: &NodeId, fetcher: &NodeId) -> Option<String> {
     let (ip, port) = if *holder == sw.coordinator {
         // How the fetcher reaches the coordinator (it is on the fetcher's control connection).
         let ip = if *fetcher == sw.coordinator { std::net::IpAddr::from([127, 0, 0, 1]) } else { sw.nodes.get(fetcher)?.coord_ip? };

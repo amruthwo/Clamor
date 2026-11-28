@@ -179,6 +179,45 @@ async fn slice(State(s): State<Shared>, UrlPath(name): UrlPath<String>, Query(q)
         .unwrap()
 }
 
+/// The whole model file (a handover: this device is leaving with the swarm's only copy).
+async fn whole_file(State(s): State<Shared>, UrlPath(name): UrlPath<String>, uri: Uri, headers: HeaderMap) -> Response {
+    if let Some(r) = refused(&s, &uri, &headers) {
+        return r;
+    }
+    let path = match crate::stage::resolve_model(&s.models_dir, &name) {
+        Ok(p) => p,
+        Err(e) => return (StatusCode::NOT_FOUND, e.to_string()).into_response(),
+    };
+    let id = match tokio::task::spawn_blocking({
+        let path = path.clone();
+        move || model_id(&path)
+    })
+    .await
+    {
+        Ok(Ok(id)) => id,
+        Ok(Err(e)) => return (StatusCode::NOT_FOUND, format!("{e:#}")).into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let len = match std::fs::metadata(&path) {
+        Ok(m) => m.len(),
+        Err(e) => return (StatusCode::NOT_FOUND, e.to_string()).into_response(),
+    };
+    let (tx, rx) = tokio::sync::mpsc::channel::<std::io::Result<Bytes>>(8);
+    tokio::task::spawn_blocking(move || {
+        let mut out = std::io::BufWriter::with_capacity(1 << 20, ChannelWriter(tx.clone()));
+        let r = std::fs::File::open(&path).and_then(|mut f| std::io::copy(&mut f, &mut out)).and_then(|_| out.flush());
+        if let Err(e) = r {
+            let _ = tx.blocking_send(Err(e));
+        }
+    });
+    Response::builder()
+        .header("content-type", "application/octet-stream")
+        .header("content-length", len)
+        .header(MODEL_ID_HEADER, id)
+        .body(Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx)))
+        .unwrap()
+}
+
 /// Every tensor's name and size in bytes: enough to estimate a stage's memory without the file.
 async fn tensors(State(s): State<Shared>, UrlPath(name): UrlPath<String>, uri: Uri, headers: HeaderMap) -> Response {
     if let Some(r) = refused(&s, &uri, &headers) {
@@ -228,6 +267,7 @@ pub async fn serve(port: u16, models_dir: PathBuf, allowed: AllowedKeys) -> Resu
         .route("/models", get(list))
         .route("/models/{name}/slice", get(slice))
         .route("/models/{name}/tensors", get(tensors))
+        .route("/models/{name}/file", get(whole_file))
         .with_state(Shared { models_dir, allowed });
     tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
@@ -301,6 +341,75 @@ pub fn fetch_slice(source: &str, name: &str, model_id: &str, layers: std::ops::R
     progress(done, total);
     std::fs::rename(&part, dest)?;
     Ok(())
+}
+
+/// Copy the whole model file `name` from `source` into `models_dir` (a handover), checking that
+/// the server has the model `model_id` and that the copy is that model before it is put in place.
+pub fn fetch_file(source: &str, name: &str, model_id_want: &str, key: Option<&ed25519_dalek::SigningKey>, models_dir: &Path, mut progress: impl FnMut(u64, u64)) -> Result<()> {
+    crate::stage::validate_model_name(name)?;
+    let dest = models_dir.join(name);
+    if dest.is_file() && model_id(&dest).is_ok_and(|id| id == model_id_want) {
+        return Ok(());
+    }
+    let url = format!("{}/models/{}/file", source.trim_end_matches('/'), url_escape(name));
+    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_connect(Some(Duration::from_secs(10))).http_status_as_error(false).build().into();
+    let mut req = agent.get(&url);
+    if let Some(h) = sign(key, &url) {
+        req = req.header(crate::auth::SHARE_AUTH_HEADER, h);
+    }
+    let mut resp = req.call().with_context(|| format!("GET {url}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let msg = resp.body_mut().read_to_string().unwrap_or_default();
+        bail!("{source} refused {name} ({status}): {msg}");
+    }
+    let got_id = resp.headers().get(MODEL_ID_HEADER).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    if got_id != model_id_want {
+        bail!("{source} has a different {name} (model id {got_id}, expected {model_id_want})");
+    }
+    let total: u64 = resp.headers().get("content-length").and_then(|v| v.to_str().ok()).and_then(|v| v.parse().ok()).ok_or_else(|| anyhow!("no content-length from {source}"))?;
+    if let Some(free) = clamor_muster::probe::free_space(models_dir) {
+        if free < total + (256 << 20) {
+            bail!("not enough disk space here for {name}: {:.1} GB needed, {:.1} GB free", total as f64 / 1e9, free as f64 / 1e9);
+        }
+    }
+    let part = models_dir.join(format!(".{name}.handover.part"));
+    let result = (|| -> Result<()> {
+        let mut out = std::io::BufWriter::with_capacity(1 << 20, std::fs::File::create(&part)?);
+        let mut body = resp.body_mut().with_config().limit(total + 1).reader();
+        let mut buf = vec![0u8; 1 << 20];
+        let (mut done, mut last) = (0u64, std::time::Instant::now());
+        progress(0, total);
+        loop {
+            let n = body.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            out.write_all(&buf[..n])?;
+            done += n as u64;
+            if last.elapsed() > Duration::from_millis(500) {
+                progress(done, total);
+                last = std::time::Instant::now();
+            }
+        }
+        out.flush()?;
+        drop(out);
+        if done != total {
+            bail!("{source} sent {done} of {total} bytes of {name}");
+        }
+        // The copy must be the same model (header and size), as the original is about to go.
+        let got = model_id(&part)?;
+        if got != model_id_want {
+            bail!("the copy of {name} is not the same model ({got})");
+        }
+        std::fs::rename(&part, &dest)?;
+        progress(done, total);
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&part);
+    }
+    result
 }
 
 #[cfg(test)]

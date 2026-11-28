@@ -116,7 +116,8 @@ to also list the swarms announced on the network right now.
   passphrase. Add `--purge` to also delete the model pieces it downloaded for that swarm
   (pieces another swarm also uses are kept).
 - **Removing someone else's device:** on **Swarm** or **Coord.**, tap the device and press
-  **Remove from swarm** (admins). An offline device shows **Forget this device** instead, which
+  **Remove from swarm** (admins). If it has the swarm's only copy of a model, the model is copied
+  to another device first (see [models](models.md#when-a-device-leaves)). An offline device shows **Forget this device** instead, which
   takes it off the list. It finishes its work and leaves, and its key is no longer approved: it
   needs the passphrase to join again. To keep it out for good, also change the passphrase
   (restart the coordinator with `--passphrase "new words"`).

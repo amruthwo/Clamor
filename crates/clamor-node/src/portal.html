@@ -224,7 +224,14 @@ details.think summary::-webkit-details-marker { display:none; }
 .msg-actions { display:flex; margin:2px 0 0 -8px; }
 .msg-actions .icon-btn { width:32px; height:32px; } .msg-actions .i { width:18px; height:18px; }
 .composer { flex:none; padding:8px 12px calc(12px + env(safe-area-inset-bottom)); }
-.composer .box { max-width:760px; margin:0 auto; display:flex; align-items:flex-end; gap:4px; background:var(--surface-container-high); border-radius:28px; padding:4px 4px 4px 16px; }
+.composer .box { max-width:760px; margin:0 auto; display:flex; align-items:flex-end; gap:4px; background:var(--surface-container-high); border-radius:28px; padding:4px; }
+.attach-row { max-width:760px; margin:0 auto 8px; display:flex; gap:8px; flex-wrap:wrap; }
+.file-chip { display:inline-flex; align-items:center; gap:6px; height:32px; padding:0 4px 0 10px; border-radius:8px; background:var(--surface-container-high); font-size:13px; max-width:100%; }
+.file-chip span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.file-chip .icon-btn { width:28px; height:28px; }
+.m .files { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:6px; justify-content:flex-end; }
+.m .files .file-chip { background:var(--surface-container-highest); padding-right:10px; }
+.conv.dropping .msgs { outline:2px dashed var(--primary); outline-offset:-8px; border-radius:16px; }
 .composer textarea { flex:1; min-width:0; border:0; background:transparent; outline:none; resize:none; font-size:16px; line-height:24px; padding:8px 4px; max-height:144px; }
 .composer .icon-btn { width:48px; height:48px; border-radius:24px; }
 .composer .note { display:flex; gap:6px; align-items:center; justify-content:center; font-size:12px; color:var(--on-surface-variant); padding:6px 0 0; }
@@ -359,7 +366,10 @@ pre.log { margin:0; padding:12px 14px; border-radius:12px; background:var(--surf
           <div class="banners" id="banners-chat" style="padding:0 16px"></div>
           <div class="msgs" id="msgs" aria-live="polite"><div class="inner" id="msgs-inner"></div></div>
           <form class="composer" id="composer">
+            <div class="attach-row" id="attach-row" hidden></div>
             <div class="box">
+              <button type="button" class="icon-btn st" id="attach" title="Add a document"><svg class="i"><use href="#i-add_circle"/></svg></button>
+              <input type="file" id="attach-input" multiple hidden>
               <textarea id="say" rows="1" placeholder="Message Clamor" aria-label="Message"></textarea>
               <button class="icon-btn filled st" id="send" title="Send"><svg class="i"><use href="#i-arrow_upward" id="send-icon"/></svg></button>
             </div>
@@ -1045,9 +1055,46 @@ function msgHtml(m) {
     return `<div class="m bot"><img class="bot-avatar" src="/icon.svg" alt=""><div class="body"><div class="who">Clamor${m.stopped ? ' · stopped' : ''}</div>${thinkHtml(t.think, false, false)}${esc(t.answer)}${m.tok_s ? `<span class="meta">${m.tok_s.toFixed(1)} tok/s</span>` : ''}<div class="msg-actions"><button type="button" class="icon-btn st" title="Copy" data-t="${esc(t.answer || m.content)}" onclick="copyText(this.dataset.t)">${ic('content_copy')}</button></div></div></div>`;
   }
   const mine = chatId !== 'group' || !m.by || m.by === me.name;
-  if (mine) return `<div class="m me"><div class="col"><div class="bubble">${esc(m.content)}</div></div></div>`;
-  return `<div class="m other">${avatar(m.by, 'sm')}<div class="col"><div class="who">${esc(m.by)}</div><div class="bubble">${esc(m.content)}</div></div></div>`;
+  const f = splitFiles(m.content);
+  const files = f.files.length ? `<div class="files">${f.files.map(x => `<span class="file-chip" title="${esc(x.name)}">${ic('description', 's18')}<span>${esc(x.name)}</span><span class="muted">${kb(x.text.length)}</span></span>`).join('')}</div>` : '';
+  const bubble = f.text ? `<div class="bubble">${esc(f.text)}</div>` : '';
+  if (mine) return `<div class="m me"><div class="col">${files}${bubble}</div></div>`;
+  return `<div class="m other">${avatar(m.by, 'sm')}<div class="col"><div class="who">${esc(m.by)}</div>${files.replace('justify-content:flex-end', '')}${bubble}</div></div>`;
 }
+// Documents in a message: "--- file: NAME ---" ... "--- end of NAME ---" (the model reads them
+// as they are; the chat shows a chip).
+function splitFiles(content) {
+  const files = [];
+  const text = String(content || '').replace(/\n*--- file: ([^\n]+?) ---\n([\s\S]*?)\n--- end of \1 ---/g, (_, name, body) => { files.push({ name, text: body }); return ''; }).trim();
+  return { text, files };
+}
+const kb = n => n < 1024 ? n + ' B' : n < 1048576 ? Math.round(n / 1024) + ' KB' : (n / 1048576).toFixed(1) + ' MB';
+let attached = [];
+const TEXT_TYPES = /\.(txt|md|markdown|csv|tsv|json|jsonl|yaml|yml|toml|ini|cfg|conf|log|xml|html?|css|js|mjs|ts|tsx|jsx|py|rs|go|java|kt|c|h|cc|cpp|hpp|cs|rb|php|swift|sh|bash|zsh|ps1|sql|r|lua|pl|tex|rst|org|srt|vtt)$/i;
+async function addFiles(list) {
+  for (const file of list) {
+    if (/\.pdf$/i.test(file.name)) { snack(`${file.name}: PDFs are not supported yet; paste its text instead`); continue; }
+    if (file.size > 512 * 1024) { snack(`${file.name} is too big (${kb(file.size)}; up to 512 KB)`); continue; }
+    let text;
+    try { text = await file.text(); } catch { snack(`Couldn't read ${file.name}`); continue; }
+    if (text.includes('\u0000') || (!TEXT_TYPES.test(file.name) && !file.type.startsWith('text/') && /[\u0001-\u0008\u000E-\u001F]/.test(text.slice(0, 4096)))) { snack(`${file.name} is not a text file`); continue; }
+    attached.push({ name: file.name.replace(/[\n\r]/g, ' ').slice(0, 120), text });
+  }
+  renderAttached();
+}
+function renderAttached() {
+  $('attach-row').hidden = !attached.length;
+  $('attach-row').innerHTML = attached.map((f, i) => `<span class="file-chip">${ic('description', 's18')}<span>${esc(f.name)}</span><span class="muted">${kb(f.text.length)}</span><button type="button" class="icon-btn st" title="Remove" onclick="attached.splice(${i},1);renderAttached()">${ic('close', 's18')}</button></span>`).join('');
+}
+$('attach').onclick = () => $('attach-input').click();
+$('attach-input').onchange = e => { addFiles([...e.target.files]); e.target.value = ''; };
+// Drop files onto the conversation (computers).
+(() => {
+  const conv = document.querySelector('.conv');
+  conv.addEventListener('dragover', e => { if ([...(e.dataTransfer?.types || [])].includes('Files')) { e.preventDefault(); conv.classList.add('dropping'); } });
+  conv.addEventListener('dragleave', e => { if (!conv.contains(e.relatedTarget)) conv.classList.remove('dropping'); });
+  conv.addEventListener('drop', e => { e.preventDefault(); conv.classList.remove('dropping'); if (e.dataTransfer?.files?.length) addFiles([...e.dataTransfer.files]); });
+})();
 window.copyText = t => { navigator.clipboard?.writeText(t).then(() => snack('Copied'), () => snack('Could not copy')); };
 function liveHtml(text) {
   const whole = me && me.reply_style === 'whole';
@@ -1138,8 +1185,10 @@ function sendMode(on) {
 $('send').onclick = e => { if (sending) { e.preventDefault(); fetch(chatUrl(chatId) + '/stop', { method:'POST' }); } };
 $('composer').onsubmit = async e => {
   e.preventDefault();
-  const text = $('say').value.trim();
-  if (!text || sending) return;
+  const typed = $('say').value.trim();
+  if ((!typed && !attached.length) || sending) return;
+  const text = typed + attached.map(f => `\n\n--- file: ${f.name} ---\n${f.text.replace(/\s+$/, '')}\n--- end of ${f.name} ---`).join('');
+  attached = []; renderAttached();
   const asked = chatId;
   sendMode(true); $('say').value = ''; grow();
   if (!$('msgs-inner').querySelector('.m')) $('msgs-inner').innerHTML = '';
